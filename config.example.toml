@@ -1,0 +1,70 @@
+# =============================================================================
+# DS Build — DeepSeek V4 config template
+# =============================================================================
+#
+# SETUP
+#   1. Get a key:  https://platform.deepseek.com/api_keys   (starts with sk-)
+#   2. Copy this file:
+#        mkdir -p ~/.ds
+#        cp config.example.toml ~/.ds/config.toml
+#        chmod 600 ~/.ds/config.toml
+#   3. Paste your key into BOTH [model.*] api_key lines below
+#   4. Run:  ds -p "Reply with exactly: DEEPSEEK_OK" --model deepseek-v4-flash
+#
+# IMPORTANT
+#   - Use singular  [model.deepseek-v4-pro]   ← correct
+#   - Do NOT use    [models.deepseek-v4-pro]  ← ignored for credentials
+#   - Keep this file out of git (it lives in ~/.ds/)
+#
+# ALTERNATIVE TO api_key IN THIS FILE
+#   export DEEPSEEK_API_KEY="sk-..."
+#   (env wins over this file if both are set)
+#
+# Full guide: DEEPSEEK.md
+# =============================================================================
+
+[auth]
+preferred_method = "api_key"
+
+[ui]
+permission_mode = "always-approve"
+
+[subagents]
+enabled = true
+
+[endpoints]
+ds_api_base_url = "https://api.deepseek.com/v1"
+
+# DeepSeek thinking depth (reasoning_effort). Highest by default.
+[models]
+default_reasoning_effort = "max"
+
+# -----------------------------------------------------------------------------
+# PASTE YOUR DEEPSEEK API KEY BELOW (same key in both blocks is fine)
+# -----------------------------------------------------------------------------
+
+[model.deepseek-v4-pro]
+api_key = "sk-PASTE_YOUR_DEEPSEEK_API_KEY_HERE"
+base_url = "https://api.deepseek.com/v1"
+api_backend = "chat_completions"
+context_window = 1000000
+supports_reasoning_effort = true
+reasoning_effort = "max"
+reasoning_efforts = ["high", "max"]
+
+[model.deepseek-v4-flash]
+api_key = "sk-PASTE_YOUR_DEEPSEEK_API_KEY_HERE"
+base_url = "https://api.deepseek.com/v1"
+api_backend = "chat_completions"
+context_window = 1000000
+supports_reasoning_effort = true
+reasoning_effort = "max"
+reasoning_efforts = ["high", "max"]
+
+[features]
+telemetry = false
+
+[telemetry]
+mixpanel_enabled = false
+trace_upload = false
+otel_enabled = false
