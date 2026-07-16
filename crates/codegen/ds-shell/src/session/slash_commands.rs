@@ -446,10 +446,26 @@ pub(super) fn available_commands(
     availability: CommandAvailability,
 ) -> Vec<acp::AvailableCommand> {
     // Detect duplicate bare names among user-invocable skills so we can
-    // advertise qualified names (e.g. "local:commit") when ambiguous.
+    // qualify losers (e.g. "user:commit") while the highest-priority skill
+    // still owns the bare slash name (e.g. "/commit", "/deep-debug").
     let mut name_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for s in skills.iter().filter(|s| s.user_invocable) {
         *name_counts.entry(&s.name).or_default() += 1;
+    }
+
+    // Bare-name winner among same-name skills: lowest SkillScope ordinal wins
+    // (Local < Repo < User < Server < Bundled < Plugin).
+    let mut bare_winner: std::collections::HashMap<&str, &SkillInfo> =
+        std::collections::HashMap::new();
+    for s in skills.iter().filter(|s| s.user_invocable) {
+        bare_winner
+            .entry(s.name.as_str())
+            .and_modify(|best| {
+                if s.scope < best.scope {
+                    *best = s;
+                }
+            })
+            .or_insert(s);
     }
 
     // Collect builtin command names so skills that collide are also qualified.
@@ -481,8 +497,11 @@ pub(super) fn available_commands(
                     .as_object()
                     .cloned();
                     let qualified = format_skill_name(s);
-                    let bare_collides = name_counts.get(s.name.as_str()).copied().unwrap_or(0) > 1
-                        || builtin_names.contains(s.name.as_str());
+                    let collides_builtin = builtin_names.contains(s.name.as_str());
+                    let name_dupes = name_counts.get(s.name.as_str()).copied().unwrap_or(0) > 1;
+                    let is_bare_winner = bare_winner.get(s.name.as_str()).is_some_and(|w| {
+                        w.scope == s.scope && w.path == s.path
+                    });
                     let make_entry = |name: String| {
                         acp::AvailableCommand::new(name, cmd.description().to_string())
                             .input(cmd.argument_hint().map(|hint| {
@@ -492,13 +511,20 @@ pub(super) fn available_commands(
                             }))
                             .meta(meta.clone())
                     };
-                    // Always advertise the qualified name for plugin skills.
-                    // Also advertise the bare name if it doesn't collide.
-                    if bare_collides {
+                    // Builtin name reserved → only qualified form for the skill.
+                    // Multiple skills share a bare name → winner keeps bare
+                    // (e.g. `/deep-debug`); losers are qualified only
+                    // (`plugin:skill` or `user:skill`).
+                    // Unique bare name → bare only (no redundant qualified entry).
+                    if collides_builtin {
                         vec![make_entry(qualified)]
+                    } else if name_dupes {
+                        if is_bare_winner {
+                            vec![make_entry(s.name.clone())]
+                        } else {
+                            vec![make_entry(qualified)]
+                        }
                     } else {
-                        // No collision — bare name only. The qualified form
-                        // would just duplicate the entry in autocomplete.
                         vec![make_entry(s.name.clone())]
                     }
                 }
@@ -763,23 +789,24 @@ pub(crate) fn parse_skill_references(
 
     let commands = all_commands(skills, availability);
 
-    // Build a map from bare name → SkillInfo reference, tracking ambiguous
-    // names (multiple skills sharing the same bare name). Ambiguous bare
-    // names are excluded from the map so `/commit` passes through when two
-    // skills are both called "commit" in different scopes — the user must
-    // use the qualified form `/local:commit` instead.
-    let mut skill_map: std::collections::HashMap<&str, Option<&SkillInfo>> =
+    // Bare name → highest-priority SkillInfo (lowest SkillScope ordinal).
+    // When several skills share a bare name (e.g. user `deep-debug` + plugin
+    // `deep-debug:deep-debug`), `/deep-debug` resolves to the winner; losers
+    // remain reachable only via their qualified slash name.
+    let mut skill_map: std::collections::HashMap<&str, &SkillInfo> =
         std::collections::HashMap::new();
     for cmd in &commands {
         if let SlashCommand::Skill(s) = cmd {
             skill_map
                 .entry(&s.name)
-                .and_modify(|v| *v = None) // duplicate → mark ambiguous
-                .or_insert(Some(s));
+                .and_modify(|best| {
+                    if s.scope < best.scope {
+                        *best = s;
+                    }
+                })
+                .or_insert(s);
         }
     }
-    // Remove ambiguous entries so they're never matched by bare name.
-    skill_map.retain(|_, v| v.is_some());
 
     // Collect positions of all /{word} tokens, checking if each matches a known skill.
     struct SkillHit<'a> {
@@ -830,8 +857,8 @@ pub(crate) fn parse_skill_references(
             continue;
         }
 
-        // Check bare name in map (only unambiguous entries remain).
-        if let Some(Some(skill)) = skill_map.get(word) {
+        // Check bare name in map (highest-priority skill when names collide).
+        if let Some(skill) = skill_map.get(word) {
             hits.push(SkillHit {
                 offset: i,
                 typed_name: word.to_string(),
@@ -1901,22 +1928,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_ambiguous_bare_name_passes_through() {
+    fn resolve_ambiguous_bare_name_picks_highest_priority() {
         // Two skills share the bare name "commit" in different scopes.
         let skills = vec![
             make_scoped_skill("commit", SkillScope::Local),
             make_scoped_skill("commit", SkillScope::User),
         ];
-        // Bare "/commit" is ambiguous -- should pass through (not first-match).
-        assert!(
-            resolve(
-                vec![text_block("/commit")],
-                &skills,
-                all_gated(),
-                SkillSlashRewrite::default()
-            )
-            .is_ok()
-        );
+        // Bare "/commit" resolves to the highest-priority scope (Local).
+        let outcome = resolve(
+            vec![text_block("/commit")],
+            &skills,
+            all_gated(),
+            SkillSlashRewrite::default(),
+        )
+        .unwrap_err();
+        let skill = first_skill(outcome);
+        assert_eq!(skill.name, "commit");
+        assert_eq!(skill.qualified_name, "local:commit");
     }
 
     #[test]
@@ -1960,17 +1988,66 @@ mod tests {
         ];
         let commands = available_commands(&skills, all_gated());
         let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        // Duplicate "commit" skills should use qualified names.
-        assert!(names.contains(&"local:commit"));
-        assert!(names.contains(&"user:commit"));
+        // Highest-priority scope owns the bare slash name.
+        assert!(
+            names.contains(&"commit"),
+            "bare name should go to Local winner, got: {names:?}"
+        );
+        // Loser is advertised under its qualified name only.
+        assert!(
+            names.contains(&"user:commit"),
+            "User loser should be qualified, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"local:commit"),
+            "Local winner should not also advertise a qualified duplicate, got: {names:?}"
+        );
         // Unique "deploy" keeps bare name only (no duplicate qualified form).
         assert!(names.contains(&"deploy"));
         assert!(
             !names.contains(&"local:deploy"),
             "non-colliding skill should NOT get a qualified duplicate, got: {names:?}"
         );
-        // Bare "commit" should NOT appear.
-        assert!(!names.contains(&"commit"));
+    }
+
+    #[test]
+    fn available_commands_plugin_deep_debug_keeps_bare_when_unique() {
+        // Plugin skill named deep-debug with plugin_name deep-debug would
+        // format as "deep-debug:deep-debug", but with no bare-name collision
+        // autocomplete should still expose simply "deep-debug".
+        let mut plugin = make_scoped_skill("deep-debug", SkillScope::Plugin);
+        plugin.plugin_name = Some("deep-debug".into());
+        let commands = available_commands(&[plugin], all_gated());
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"deep-debug"),
+            "unique plugin skill should advertise bare name, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"deep-debug:deep-debug"),
+            "should not force plugin:skill form when bare is unique, got: {names:?}"
+        );
+    }
+
+    #[test]
+    fn available_commands_user_wins_bare_over_plugin_deep_debug() {
+        let user = make_scoped_skill("deep-debug", SkillScope::User);
+        let mut plugin = make_scoped_skill("deep-debug", SkillScope::Plugin);
+        plugin.plugin_name = Some("deep-debug".into());
+        let commands = available_commands(&[user, plugin], all_gated());
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"deep-debug"),
+            "user skill should own bare /deep-debug, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"deep-debug:deep-debug"),
+            "plugin loser should remain as deep-debug:deep-debug, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"user:deep-debug"),
+            "user winner should not also list user:deep-debug, got: {names:?}"
+        );
     }
 
     // ── builtin/skill name collisions ─────────────────────────────

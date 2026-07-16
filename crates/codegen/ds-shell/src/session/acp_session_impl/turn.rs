@@ -315,6 +315,42 @@ impl SessionActor {
                         token_budget,
                     } => {
                         ds_telemetry::session_ctx::log_event(slash_used);
+                        // Expand any `/{skill}` tokens embedded in the goal
+                        // objective (e.g. `/goal /deep-debug fix X`). Without
+                        // this, only the literal slash text is passed through
+                        // and the model must re-invoke the skill — burning a
+                        // turn and often a redundant subagent. The goal
+                        // planner still runs once via setup_goal (expected).
+                        if let Some(parsed) = slash_commands::parse_skill_references(
+                            &objective,
+                            &slash_skills,
+                            availability,
+                        ) {
+                            if let Some(first) = parsed.first() {
+                                *self.active_skill.lock() = Some(first.name.clone());
+                            }
+                            for sk in &parsed {
+                                ds_telemetry::session_ctx::log_event(
+                                    ds_telemetry::events::SlashCommandUsed {
+                                        command: sk.name.clone(),
+                                        args_provided: !sk.args.is_empty(),
+                                    },
+                                );
+                                ds_telemetry::session_ctx::log_event(
+                                    ds_telemetry::events::SkillDispatched {
+                                        skill_name: sk.name.clone(),
+                                        plugin_source: sk.plugin_name.clone(),
+                                    },
+                                );
+                            }
+                            pending_skill_information =
+                                slash_commands::build_skill_information_for_refs(
+                                    &parsed,
+                                    &slash_skills,
+                                    &self.session_id_string(),
+                                )
+                                .await;
+                        }
                         let reminder = self.setup_goal(&objective, token_budget).await;
                         vec![text_block(reminder), text_block(objective)]
                     }

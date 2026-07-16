@@ -80,8 +80,12 @@ If a goal is created, use an objective that names the target and includes the fu
 - On each iteration, change the audit angle instead of only re-reading the previous finding: follow a different entry point, inspect neighboring modules, run a different test scope, or trace a different data shape.
 - For the final pass, choose at least one independent route that was not the path to the last fix: public API index, test suite map, config/CI path, dependency boundary, domain invariant list, or resource-lifetime path.
 - Search broadly before concluding: enumerate files or modules, inspect representative entry points and callers, and connect tests to implementation paths rather than relying on the files already touched.
-- When multi-agent tools are available, current instructions permit delegation, and the task is broad enough, launch an independent fresh audit with only the task-relevant context and compare concrete evidence, not conclusions.
+- **Subagents:** Do **not** spawn a subagent as the first action. Start on the main thread (orient, list, grep, read). Fan out only when two+ independent areas need parallel evidence, and prefer `explore` over `general-purpose`. If this run was started under `/goal`, a **goal plan writer** subagent may already have run — that is platform behavior, not a signal to spawn more agents immediately.
 - Keep a compact ledger of candidates: `candidate`, `dimension`, `verification`, `status`, `fix`, and `reverify`.
+
+## Slash form
+
+Prefer bare `/deep-debug` (or `$deep-debug`). The qualified form `deep-debug:deep-debug` is only for the plugin copy when it collides with a user/bundled skill of the same name.
 
 ## Stop Condition
 
