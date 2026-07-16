@@ -1,28 +1,45 @@
 # DS Build (`ds`)
 
+<p align="center">
+  <img src="docs/images/logo.png" alt="DS Build whale logo" width="280" />
+</p>
+
 **DS Build** is a terminal AI coding agent optimized for
 [DeepSeek V4](https://api-docs.deepseek.com/). It runs as a full-screen TUI
-(or headless CLI) that can read/edit your codebase, run shell commands, and
-orchestrate multi-step work — including subagents.
+(or headless CLI) that can read and edit your codebase, run shell commands, and
+orchestrate multi-step work — including parallel subagents.
 
-This repository is a **re-vendored open-source clone of Grok Build**, fully
-rebranded to **DS**:
+<p align="center">
+  <img src="docs/images/login.png" alt="DS Build login — paste DeepSeek API key" width="720" />
+</p>
 
-| | |
-|--|--|
-| Command | `ds` |
-| Config / sessions | `~/.ds/` (`DS_HOME`) |
-| Crates | `ds-*` |
-| Version | `0.1.0` |
-| Default model | `deepseek-v4-pro` |
-| Fast model | `deepseek-v4-flash` |
-| API | `https://api.deepseek.com/v1` (OpenAI-compatible `chat_completions`) |
-| Permissions | **always-approve** by default |
-| Subagents | **enabled** by default |
+<p align="center"><em>Login: <code>ds auth set</code> — paste your DeepSeek API key (input is hidden).</em></p>
 
-Product analytics (Mixpanel), Sentry crash reporting, and internal telemetry
-phone-home are **off** by default. The only intended network traffic is your
-DeepSeek (or other BYOK) API calls.
+<p align="center">
+  <img src="docs/images/welcome.png" alt="DS Build welcome screen after login" width="720" />
+</p>
+
+<p align="center"><em>Welcome screen after login — braille whale mark, model badge, API key session.</em></p>
+
+---
+
+## Origin & credit
+
+**DS Build is built from the open-source [Grok Build](https://github.com/xai-org/grok-build) codebase.**
+
+Huge thanks to **Elon Musk** and **xAI** for open-sourcing Grok Build — this
+project re-vendors and rebrands that work as **DS** for DeepSeek:
+
+| | Grok Build (upstream) | DS Build (this repo) |
+|--|--|--|
+| Command | `grok` / grok-build | `ds` |
+| Home dir | `~/.grok` | `~/.ds` (`DS_HOME`) |
+| Crates | `xai-*` / grok crates | `ds-*` |
+| Default model / API | xAI Grok | DeepSeek V4 (`api.deepseek.com`) |
+
+First-party product analytics (Mixpanel), Sentry crash reporting, and internal
+telemetry phone-home are **off** by default. The only intended network traffic
+is your DeepSeek (or other BYOK) API calls.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
@@ -32,13 +49,30 @@ DeepSeek (or other BYOK) API calls.
 
 ---
 
+## At a glance
+
+| | |
+|--|--|
+| Command | `ds` |
+| Config / sessions | `~/.ds/` (`DS_HOME`) |
+| Version | `0.1.0` |
+| Default model | `deepseek-v4-pro` |
+| Fast model | `deepseek-v4-flash` |
+| API | `https://api.deepseek.com/v1` (OpenAI-compatible `chat_completions`) |
+| Login | `ds auth set` / first-run paste / `DEEPSEEK_API_KEY` |
+| Permissions | **always-approve** by default |
+| Subagents | **enabled** by default |
+| Reasoning effort | max / high by default on DeepSeek models |
+
+---
+
 ## Quick start
 
 ### 1. Get a DeepSeek API key
 
 1. Open **https://platform.deepseek.com/api_keys**
 2. Create a key (starts with `sk-`)
-3. Choose how to store it (config file **or** env — see below)
+3. Store it with `ds auth set` (recommended) or env / config — see below
 
 ### 2. Build and install `ds`
 
@@ -50,9 +84,9 @@ codesign --force --sign - ~/.local/bin/ds
 export PATH="$HOME/.local/bin:$PATH"   # add to ~/.zshrc if needed
 ```
 
-### 3. Configure the DeepSeek API key
+### 3. Log in (API key)
 
-**A. Paste on first run / `ds auth set` (recommended, CodeWhale-style)**
+**A. Paste on first run / `ds auth set` (recommended)**
 
 ```sh
 ds auth set
@@ -94,6 +128,17 @@ If you see `Not signed in` or `401 Unauthorized`, re-check the key steps in
 
 ---
 
+## Features
+
+- **DeepSeek-first** — defaults for V4 Pro / Flash, chat-completions API, high/max reasoning effort
+- **Full TUI** — scrollback, markdown, plans, todos, worktrees, session resume
+- **Headless / CI** — `ds -p "…"` for scripts; `--always-approve`, `--max-turns`, etc.
+- **Tools** — read/edit/search, terminal, web fetch/search, MCP, skills, subagents
+- **Orchestration** — Fable-style plan → execute → verify harness with resource bounds
+- **Privacy defaults** — no Mixpanel / Sentry / product phone-home unless you opt in
+
+---
+
 ## Building from source
 
 Requirements:
@@ -117,7 +162,7 @@ cargo check -p ds-pager-bin               # fast validation
 |---------|---------|----------|
 | Permission mode | always-approve | `[ui] permission_mode = "ask"` or omit always-approve |
 | Subagents | on | `DS_SUBAGENTS=0`, `--no-subagents`, or `[subagents] enabled = false` |
-| System prompt identity | Neutral coding-agent prompt (no vendor “released by …” line) | — |
+| System prompt | Neutral coding-agent prompt + Fable harness | templates under `crates/codegen/ds-agent/templates/` |
 | Telemetry / Mixpanel / Sentry | off | only if you explicitly opt in (`DS_TELEMETRY_OPT_IN=1`, etc.) |
 
 Full setup notes: [`DEEPSEEK.md`](DEEPSEEK.md).
@@ -128,9 +173,10 @@ Full setup notes: [`DEEPSEEK.md`](DEEPSEEK.md).
 
 | Doc | Contents |
 |-----|----------|
-| [`DEEPSEEK.md`](DEEPSEEK.md) | API key, privacy, defaults |
+| [`DEEPSEEK.md`](DEEPSEEK.md) | API key, privacy, defaults, troubleshooting |
 | [`config.example.toml`](config.example.toml) | Copy to `~/.ds/config.toml` |
 | [`crates/codegen/ds-pager/docs/user-guide/`](crates/codegen/ds-pager/docs/user-guide/) | Keyboard shortcuts, config, MCP, headless, etc. |
+| [`docs/images/`](docs/images/) | Login / welcome screenshots |
 
 ---
 
@@ -182,7 +228,10 @@ cd crates/codegen/ds-agent && python3 scripts/encrypt_templates.py
 
 First-party code is **Apache License 2.0** — see [`LICENSE`](LICENSE).
 
-Third-party and vendored code remains under original licenses:
+This project incorporates and is derived from open-source **Grok Build**
+published by **xAI**. Thanks again to **Elon Musk** and the xAI team for
+releasing that code. Upstream and third-party components remain under their
+original licenses:
 
 - [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES)
 - [`crates/codegen/ds-tools/THIRD_PARTY_NOTICES.md`](crates/codegen/ds-tools/THIRD_PARTY_NOTICES.md)
