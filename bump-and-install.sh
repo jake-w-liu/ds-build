@@ -16,6 +16,8 @@ set -euo pipefail
 #   If HEAD is already a version-bump commit (message starts with
 #   "chore: bump to v") and the tree is clean, the script exits early
 #   with a diagnostic.
+#
+# Flow: bump toml files → build (lockfile updates) → commit all → push → install
 # ──────────────────────────────────────────────────────────────────────────────
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -49,8 +51,10 @@ What it does:
   3. If HEAD is already a version-bump commit, exits early (idempotent).
   4. Increments the patch component, writes the new version to both
      ds-version/Cargo.toml and ds-pager-bin/Cargo.toml.
-  5. Commits the version bump and pushes to origin/main.
-  6. Builds ds-pager-bin in release mode with DS_VERSION set.
+  5. Builds ds-pager-bin in release mode with DS_VERSION set (this also
+     updates Cargo.lock with the new version metadata).
+  6. Commits the version bump (both tomls + Cargo.lock) and pushes to
+     origin/main.
   7. Installs the binary to ~/.local/bin/ds (codesigned on macOS).
 
 Requirements:
@@ -140,19 +144,19 @@ for f in "$VERSION_FILE1" "$VERSION_FILE2"; do
     fi
 done
 
-# ── commit + push ──────────────────────────────────────────────────────────
+# ── build (lockfile will be updated by cargo with the new versions) ────────
 
-info "Committing version bump ..."
-git add "$VERSION_FILE1" "$VERSION_FILE2"
+info "Building ds-pager-bin (release) with DS_VERSION=$new_version ..."
+DS_VERSION="$new_version" cargo build -p ds-pager-bin --release
+
+# ── commit + push (lockfile now reflects the bumped versions) ──────────────
+
+info "Committing version bump (tomls + Cargo.lock) ..."
+git add "$VERSION_FILE1" "$VERSION_FILE2" Cargo.lock
 git commit -m "chore: bump to v$new_version"
 
 info "Pushing to origin/main ..."
 git push origin main
-
-# ── build ──────────────────────────────────────────────────────────────────
-
-info "Building ds-pager-bin (release) with DS_VERSION=$new_version ..."
-DS_VERSION="$new_version" cargo build -p ds-pager-bin --release
 
 # ── install ────────────────────────────────────────────────────────────────
 
