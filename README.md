@@ -10,16 +10,16 @@
 orchestrate multi-step work — including parallel subagents.
 
 <p align="center">
-  <img src="docs/images/login.png" alt="DS Build login — paste DeepSeek API key" width="720" />
+  <img src="docs/images/welcome.png" alt="DS Build welcome screen (real TUI screenshot)" width="900" />
 </p>
 
-<p align="center"><em>Login: <code>ds auth set</code> — paste your DeepSeek API key (input is hidden).</em></p>
+<p align="center"><em>Welcome screen (real TUI) — logo, session menu, shortcuts.</em></p>
 
 <p align="center">
-  <img src="docs/images/welcome.png" alt="DS Build welcome screen after login" width="720" />
+  <img src="docs/images/login.png" alt="DS Build login — ds auth set (real Terminal screenshot)" width="720" />
 </p>
 
-<p align="center"><em>Welcome screen after login — braille whale mark, model badge, API key session.</em></p>
+<p align="center"><em>Login (real Terminal): <code>ds auth set</code> — paste your DeepSeek API key (input is hidden).</em></p>
 
 ---
 
