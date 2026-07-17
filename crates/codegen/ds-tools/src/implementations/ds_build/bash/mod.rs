@@ -403,6 +403,38 @@ fn annotations(bash: &BashOutput) -> String {
     s
 }
 
+/// If Headroom is enabled and this bash result was truncated at the tool
+/// boundary, replace `output_for_prompt` with a Headroom marker over the
+/// **full** on-disk body so middle-line `query` retrieve still works.
+fn maybe_headroom_replace_truncated(bash: &mut BashOutput, tool_call_id: &str) {
+    if !bash.truncated || !ds_headroom::is_enabled() {
+        return;
+    }
+    // Full lossless body lives on disk (see TerminalRunResult::output_file).
+    let full_raw = match std::fs::read(&bash.output_file) {
+        Ok(bytes) if !bytes.is_empty() => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => return,
+    };
+    let full_body = strip_ansi_escapes::strip_str(&full_raw);
+    // Same shape as a non-truncated prompt body so retrieve is a drop-in.
+    let full_tool_text = format!("exit: {}\n{}", bash.exit_code, full_body);
+    let mut stats = ds_headroom::CompressionStats::default();
+    let Some(compressed) =
+        ds_headroom::maybe_compress_content(&full_tool_text, Some(tool_call_id), &mut stats)
+    else {
+        return;
+    };
+    tracing::info!(
+        target: "ds_headroom",
+        tool_call_id,
+        original_chars = full_tool_text.len(),
+        compressed_chars = compressed.len(),
+        tokens_saved = stats.tokens_saved,
+        "headroom replaced truncated bash tool result with full-body marker"
+    );
+    bash.output_for_prompt = compressed;
+}
+
 /// Build the full DEFAULT prompt text from a `BashOutput`.
 ///
 /// - Normal: `exit: N [annotations]\n<stripped_output>`
@@ -2171,6 +2203,12 @@ impl ds_tool_runtime::Tool for BashTool {
                 was_bare_echo: false,
             };
             bash.output_for_prompt = format_default_prompt(&bash);
+            // When the tool boundary already dropped the middle of a huge dump,
+            // request-clone Headroom can only store the truncated window — so
+            // query retrieve cannot find middle lines. If Headroom is on, store
+            // the *full* on-disk output and put a compress marker in the tool
+            // result so `headroom_retrieve` + `query` remain complete.
+            maybe_headroom_replace_truncated(&mut bash, tool_call_id.as_str());
 
             // Bare `echo "<msg>"` usage (common model anti-pattern for "just output something").
             // We tag it for statistics (ds_build backend) and can surface an educational
