@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-config-types"
-version = "0.1.10"
+version = "0.1.11"
 edition.workspace = true
 description = "Leaf configuration value types for the DS CLI, extracted from ds-shell for dependency inversion."
 
