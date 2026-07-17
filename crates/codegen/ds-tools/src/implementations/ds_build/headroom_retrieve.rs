@@ -12,6 +12,29 @@ pub struct HeadroomRetrieveInput {
         description = "The Headroom hash from a <headroom_compressed hash=\"...\"> marker."
     )]
     pub hash: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Optional case-sensitive substring to match against lines of the original. \
+                       Use this to recover middle content (e.g. a SECRET_ token or error line) \
+                       without reloading the full body into context."
+    )]
+    pub query: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(
+        description = "Max bytes of body to return (default 12000). Full originals larger than this \
+                       return head/tail plus a hint to pass query."
+    )]
+    pub max_chars: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Max matching lines when query is set (default 50).")]
+    pub max_matches: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Extra context lines around each query match (default 0).")]
+    pub context_lines: Option<u32>,
 }
 
 /// Retrieve exact original content compressed by Headroom in this process.
@@ -29,8 +52,9 @@ impl crate::types::tool_metadata::ToolMetadata for HeadroomRetrieveTool {
 
     fn description_template(&self) -> &str {
         "Retrieve exact original content that DS compressed with Headroom. \
-         Use when a <headroom_compressed hash=\"...\"> marker says exact content is needed \
-         (e.g. a middle line, full log, or full JSON body not present in the preview)."
+         Use when a <headroom_compressed hash=\"...\"> marker says exact content is needed. \
+         Prefer the `query` argument to fetch specific middle lines (tokens, errors) without \
+         reloading the full body — full dumps are capped to avoid re-truncation."
     }
 }
 
@@ -71,17 +95,23 @@ impl ds_tool_runtime::Tool for HeadroomRetrieveTool {
                 "Headroom is disabled. Enable with `/headroom on` or DS_HEADROOM=1.".into(),
             ));
         }
-        match ds_headroom::retrieve(&input.hash) {
-            Some(entry) => {
-                let text = format!(
-                    "HEADROOM_ORIGINAL hash={} original_chars={}\n\
-                     Exact original content follows.\n\n\
-                     {}",
-                    entry.hash, entry.original_chars, entry.content
-                );
-                Ok(ToolOutput::Text(text.into()))
-            }
-            None => Ok(ToolOutput::Text(
+        let opts = ds_headroom::RetrieveOptions {
+            query: input.query,
+            max_chars: input.max_chars.map(|n| n as usize),
+            max_matches: input.max_matches.map(|n| n as usize),
+            context_lines: input.context_lines.map(|n| n as usize),
+        };
+        match ds_headroom::retrieve_formatted(&input.hash, &opts) {
+            Ok(text) => Ok(ToolOutput::Text(text.into())),
+            Err(ds_headroom::RetrieveError::InvalidHash) => Ok(ToolOutput::Text(
+                format!(
+                    "Invalid Headroom hash '{}'. Expected a 64-char hex SHA-256 from a \
+                     <headroom_compressed hash=\"...\"> marker.",
+                    input.hash.trim()
+                )
+                .into(),
+            )),
+            Err(ds_headroom::RetrieveError::NotFound) => Ok(ToolOutput::Text(
                 format!(
                     "No Headroom content found for hash '{}' in this process. \
                      The original may have been evicted from the store or Headroom was off when the content was compressed.",

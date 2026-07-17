@@ -10,14 +10,14 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ds_token_estimation::estimate_tokens;
 use sha2::{Digest, Sha256};
 
 /// Env: enable Headroom for this process (`1`/`true`/`on`).
 pub const ENV_HEADROOM: &str = "DS_HEADROOM";
-/// Env: minimum tool-result size (chars) before compression is attempted.
+/// Env: minimum tool-result size (bytes) before compression is attempted.
 pub const ENV_MIN_CHARS: &str = "DS_HEADROOM_MIN_CHARS";
 /// Env: max tool results compressed per request.
 pub const ENV_MAX_SEGMENTS: &str = "DS_HEADROOM_MAX_SEGMENTS";
@@ -25,7 +25,7 @@ pub const ENV_MAX_SEGMENTS: &str = "DS_HEADROOM_MAX_SEGMENTS";
 pub const ENV_KEEP_LINES: &str = "DS_HEADROOM_KEEP_LINES";
 /// Env: max original store entries.
 pub const ENV_MAX_STORE_ENTRIES: &str = "DS_HEADROOM_MAX_STORE_ENTRIES";
-/// Env: max total stored original chars.
+/// Env: max total stored original chars (bytes).
 pub const ENV_MAX_STORE_CHARS: &str = "DS_HEADROOM_MAX_STORE_CHARS";
 
 const DEFAULT_MIN_CHARS: usize = 2_000;
@@ -34,11 +34,17 @@ const DEFAULT_KEEP_LINES: usize = 40;
 const DEFAULT_MAX_STORE_ENTRIES: usize = 256;
 const DEFAULT_MAX_STORE_CHARS: usize = 16 * 1024 * 1024;
 
+/// Default cap on full-body retrieve output (bytes). Keeps responses under
+/// typical tool-boundary windows; use [`RetrieveOptions::query`] for middles.
+pub const DEFAULT_RETRIEVE_MAX_CHARS: usize = 12_000;
+const DEFAULT_RETRIEVE_MAX_MATCHES: usize = 50;
+const DEFAULT_RETRIEVE_CONTEXT_LINES: usize = 0;
+
 /// Process override for min chars (0 = use env/default). Used by tests.
-static MIN_CHARS_OVERRIDE: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-static KEEP_LINES_OVERRIDE: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static MIN_CHARS_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static KEEP_LINES_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static MAX_STORE_ENTRIES_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
+static MAX_STORE_CHARS_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
 const MAX_SUMMARY_CHARS: usize = 8_000;
 const MAX_JSON_PREVIEW_INPUT: usize = 1024 * 1024;
 const DEFAULT_JSON_ITEMS: usize = 8;
@@ -78,6 +84,27 @@ pub struct SessionStats {
     pub tokens_after: u64,
     pub tokens_saved: u64,
     pub last_error: Option<String>,
+}
+
+/// Options for filtered / bounded retrieve.
+#[derive(Debug, Clone, Default)]
+pub struct RetrieveOptions {
+    /// Substring match (case-sensitive) against each line. When set, only
+    /// matching lines (+ optional context) are returned.
+    pub query: Option<String>,
+    /// Hard cap on returned body bytes (default [`DEFAULT_RETRIEVE_MAX_CHARS`]).
+    pub max_chars: Option<usize>,
+    /// Max matching lines when `query` is set (default 50).
+    pub max_matches: Option<usize>,
+    /// Extra lines of context around each match (default 0).
+    pub context_lines: Option<usize>,
+}
+
+/// Why retrieve failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrieveError {
+    InvalidHash,
+    NotFound,
 }
 
 struct Store {
@@ -138,7 +165,7 @@ pub fn session_stats() -> SessionStats {
     with_store(|s| s.session.clone())
 }
 
-/// Store occupancy.
+/// Store occupancy: (entries, max_entries, total_chars, max_chars).
 pub fn store_stats() -> (usize, usize, usize, usize) {
     with_store(|s| {
         (
@@ -156,12 +183,25 @@ pub fn retrieve(hash: &str) -> Option<StoredContent> {
     with_store(|s| s.entries.get(&key).cloned())
 }
 
+/// Retrieve and format for the tool: optional query filter + size cap so the
+/// model can recover middle content without re-blowing the tool-result window.
+pub fn retrieve_formatted(
+    hash: &str,
+    opts: &RetrieveOptions,
+) -> Result<String, RetrieveError> {
+    let key = normalize_hash(hash).ok_or(RetrieveError::InvalidHash)?;
+    let entry = with_store(|s| s.entries.get(&key).cloned()).ok_or(RetrieveError::NotFound)?;
+    Ok(format_retrieved(&entry, opts))
+}
+
 /// Reset store + stats (tests / live harness).
 pub fn reset_for_test() {
     ENABLED_SET.store(false, Ordering::Relaxed);
     ENABLED_OVERRIDE.store(false, Ordering::Relaxed);
     MIN_CHARS_OVERRIDE.store(0, Ordering::Relaxed);
     KEEP_LINES_OVERRIDE.store(0, Ordering::Relaxed);
+    MAX_STORE_ENTRIES_OVERRIDE.store(0, Ordering::Relaxed);
+    MAX_STORE_CHARS_OVERRIDE.store(0, Ordering::Relaxed);
     with_store(|s| {
         *s = Store::new();
     });
@@ -175,6 +215,16 @@ pub fn set_min_chars_override(n: usize) {
 /// Test/live harness: force keep-lines (0 clears override).
 pub fn set_keep_lines_override(n: usize) {
     KEEP_LINES_OVERRIDE.store(n, Ordering::Relaxed);
+}
+
+/// Test harness: force max store entries (0 clears).
+pub fn set_max_store_entries_override(n: usize) {
+    MAX_STORE_ENTRIES_OVERRIDE.store(n, Ordering::Relaxed);
+}
+
+/// Test harness: force max store chars (0 clears).
+pub fn set_max_store_chars_override(n: usize) {
+    MAX_STORE_CHARS_OVERRIDE.store(n, Ordering::Relaxed);
 }
 
 /// Compress a single large tool-result body if it qualifies.
@@ -210,6 +260,13 @@ fn keep_lines() -> usize {
     positive_usize_env(ENV_KEEP_LINES, DEFAULT_KEEP_LINES, 1000)
 }
 
+fn note_failed(stats: &mut CompressionStats, reason: &str) {
+    stats.failed_segments += 1;
+    with_store(|s| {
+        s.session.failed_segments += 1;
+        s.session.last_error = Some(reason.to_string());
+    });
+}
 
 fn compress_one(
     text: &str,
@@ -220,6 +277,7 @@ fn compress_one(
     with_store(|s| s.session.attempted_segments += 1);
 
     if text.len() > max_store_chars() {
+        note_failed(stats, "content exceeds max store chars");
         return None;
     }
 
@@ -227,10 +285,12 @@ fn compress_one(
     let hash = hash_content(text);
     let compressed = build_compressed_text(text, &hash, tool_call_id);
     if compressed == text {
+        note_failed(stats, "no smaller summary produced");
         return None;
     }
     let after = estimate_tokens(&compressed);
     if after >= before || compressed.len() >= text.len() {
+        note_failed(stats, "compressed form not smaller");
         return None;
     }
 
@@ -242,6 +302,7 @@ fn compress_one(
         tool_call_id: tool_call_id.map(str::to_owned),
     });
     if !remembered {
+        note_failed(stats, "store rejected entry");
         return None;
     }
 
@@ -283,7 +344,8 @@ fn build_compressed_text(text: &str, hash: &str, tool_call_id: Option<&str>) -> 
         .unwrap_or_default();
     format!(
         "<headroom_compressed hash=\"{hash}\" original_chars=\"{orig}\"{tool_attr}>\n\
-         Original content is stored in this DS session. Use the `{tool}` tool with hash \"{hash}\" if exact content is needed.\n\n\
+         Original content is stored in this DS session. Use the `{tool}` tool with hash \"{hash}\" if exact content is needed.\n\
+         Prefer `query` on `{tool}` to fetch middle lines without reloading the full body.\n\n\
          {summary}\n\
          </headroom_compressed>",
         orig = text.len(),
@@ -308,7 +370,10 @@ fn summarize_json(text: &str) -> Option<String> {
     let kind = match &value {
         serde_json::Value::Array(a) => format!("array with {} item(s)", a.len()),
         serde_json::Value::Object(o) => format!("object with {} top-level key(s)", o.len()),
-        _ => value.as_str().map(|_| "string".into()).unwrap_or_else(|| "value".into()),
+        _ => value
+            .as_str()
+            .map(|_| "string".into())
+            .unwrap_or_else(|| "value".into()),
     };
     Some(format!(
         "JSON {kind} compressed by Headroom local structural preview.\nPreview:\n{preview_text}"
@@ -340,18 +405,21 @@ fn summarize_plain_text(text: &str) -> Option<String> {
     }
 
     let excerpt = (MAX_SUMMARY_CHARS / 2).max(1_000);
-    if text.len() <= excerpt * 2 + 200 {
+    if text.chars().count() <= excerpt * 2 + 200 {
         return None;
     }
+    let head = take_chars_prefix(text, excerpt);
+    let tail = take_chars_suffix(text, excerpt);
+    let omitted = text
+        .chars()
+        .count()
+        .saturating_sub(head.chars().count() + tail.chars().count());
     Some(format!(
         "Text output compressed by Headroom local character preview ({} chars).\n\
-         First {excerpt} chars:\n{}\n\n\
-         [... {} chars omitted; retrieve hash for exact content ...]\n\n\
-         Last {excerpt} chars:\n{}",
+         First {excerpt} chars:\n{head}\n\n\
+         [... {omitted} chars omitted; retrieve hash for exact content ...]\n\n\
+         Last {excerpt} chars:\n{tail}",
         text.len(),
-        &text[..excerpt],
-        text.len().saturating_sub(excerpt * 2),
-        &text[text.len() - excerpt..],
     ))
 }
 
@@ -413,7 +481,7 @@ fn summarize_value(value: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Array(a) => serde_json::json!(format!("[array:{}]", a.len())),
         serde_json::Value::Object(o) => serde_json::json!(format!("{{object:{}}}", o.len())),
         serde_json::Value::String(s) if s.len() > 200 => {
-            serde_json::Value::String(format!("{}...", &s[..200]))
+            serde_json::Value::String(format!("{}...", take_chars_prefix(s, 200)))
         }
         other => other.clone(),
     }
@@ -423,7 +491,7 @@ fn remember(entry: StoredContent) -> bool {
     with_store(|s| {
         let max_entries = max_store_entries();
         let max_chars = max_store_chars();
-        if entry.original_chars > max_chars {
+        if entry.original_chars > max_chars || max_entries == 0 {
             return false;
         }
         if let Some(old) = s.entries.remove(&entry.hash) {
@@ -434,12 +502,19 @@ fn remember(entry: StoredContent) -> bool {
             || s.total_chars.saturating_add(entry.original_chars) > max_chars
         {
             let Some(oldest) = s.order.first().cloned() else {
-                break;
+                // Cannot free enough space (should not happen when entry fits alone).
+                return false;
             };
             if let Some(old) = s.entries.remove(&oldest) {
                 s.total_chars = s.total_chars.saturating_sub(old.original_chars);
             }
             s.order.remove(0);
+        }
+        // Final fit check after eviction.
+        if s.entries.len() >= max_entries
+            || s.total_chars.saturating_add(entry.original_chars) > max_chars
+        {
+            return false;
         }
         s.total_chars = s.total_chars.saturating_add(entry.original_chars);
         s.order.push(entry.hash.clone());
@@ -469,8 +544,10 @@ fn hash_content(text: &str) -> String {
 
 fn normalize_hash(hash: &str) -> Option<String> {
     let h = hash.trim().to_ascii_lowercase();
+    // Allow optional 0x prefix.
+    let h = h.strip_prefix("0x").unwrap_or(&h);
     if h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(h)
+        Some(h.to_string())
     } else {
         None
     }
@@ -497,10 +574,18 @@ fn positive_usize_env(name: &str, default: usize, cap: usize) -> usize {
 }
 
 fn max_store_entries() -> usize {
+    let o = MAX_STORE_ENTRIES_OVERRIDE.load(Ordering::Relaxed);
+    if o > 0 {
+        return o;
+    }
     positive_usize_env(ENV_MAX_STORE_ENTRIES, DEFAULT_MAX_STORE_ENTRIES, 4096)
 }
 
 fn max_store_chars() -> usize {
+    let o = MAX_STORE_CHARS_OVERRIDE.load(Ordering::Relaxed);
+    if o > 0 {
+        return o;
+    }
     positive_usize_env(ENV_MAX_STORE_CHARS, DEFAULT_MAX_STORE_CHARS, 128 * 1024 * 1024)
 }
 
@@ -508,13 +593,165 @@ fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    s.chars().take(max).collect::<String>() + "…"
+    take_chars_prefix(s, max) + "…"
+}
+
+fn take_chars_prefix(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+fn take_chars_suffix(s: &str, max: usize) -> String {
+    let total = s.chars().count();
+    if total <= max {
+        return s.to_string();
+    }
+    s.chars().skip(total - max).collect()
 }
 
 fn escape_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
+}
+
+fn format_retrieved(entry: &StoredContent, opts: &RetrieveOptions) -> String {
+    let max_chars = opts
+        .max_chars
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_RETRIEVE_MAX_CHARS);
+
+    let header = format!(
+        "HEADROOM_ORIGINAL hash={} original_chars={}\n",
+        entry.hash, entry.original_chars
+    );
+
+    if let Some(query) = opts.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        let max_matches = opts
+            .max_matches
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_RETRIEVE_MAX_MATCHES);
+        let context = opts
+            .context_lines
+            .unwrap_or(DEFAULT_RETRIEVE_CONTEXT_LINES);
+        let body = filter_lines(&entry.content, query, max_matches, context);
+        let body = truncate_bytes_message(&body, max_chars);
+        return format!(
+            "{header}\
+             Query filter: {query:?} (max_matches={max_matches}, context_lines={context})\n\
+             Matching content follows.\n\n\
+             {body}"
+        );
+    }
+
+    if entry.content.len() <= max_chars {
+        return format!(
+            "{header}\
+             Exact original content follows.\n\n\
+             {}",
+            entry.content
+        );
+    }
+
+    // Full dump would exceed cap: return head/tail + instruction to use query.
+    let half = max_chars / 2;
+    let head = take_bytes_prefix_safe(&entry.content, half);
+    let tail = take_bytes_suffix_safe(&entry.content, half.saturating_sub(200).max(1));
+    let omitted = entry
+        .content
+        .len()
+        .saturating_sub(head.len() + tail.len());
+    format!(
+        "{header}\
+         Exact original is {orig} chars; returning first/last ~{half} bytes \
+         (omitted ~{omitted}). Pass `query` to fetch middle lines without the full body.\n\n\
+         {head}\n\n\
+         [... {omitted} bytes omitted; re-call headroom_retrieve with query=... ...]\n\n\
+         {tail}",
+        orig = entry.original_chars,
+    )
+}
+
+fn filter_lines(content: &str, query: &str, max_matches: usize, context_lines: usize) -> String {
+    let lines: Vec<&str> = content.split('\n').collect();
+    let match_idxs: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(query))
+        .map(|(i, _)| i)
+        .take(max_matches)
+        .collect();
+
+    if match_idxs.is_empty() {
+        return format!("(no lines containing {query:?})");
+    }
+
+    // Expand with context, merge overlaps.
+    let mut include = vec![false; lines.len()];
+    for &idx in &match_idxs {
+        let start = idx.saturating_sub(context_lines);
+        let end = (idx + context_lines + 1).min(lines.len());
+        for slot in include.iter_mut().take(end).skip(start) {
+            *slot = true;
+        }
+    }
+
+    let total_matches = lines.iter().filter(|l| l.contains(query)).count();
+    let mut out = String::new();
+    if total_matches > match_idxs.len() {
+        out.push_str(&format!(
+            "(showing {} of {} matching lines)\n",
+            match_idxs.len(),
+            total_matches
+        ));
+    }
+
+    let mut last_included: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if !include[i] {
+            continue;
+        }
+        if let Some(prev) = last_included
+            && i > prev + 1
+        {
+            out.push_str(&format!("... (lines {}-{} omitted) ...\n", prev + 2, i));
+        }
+        // 1-based line numbers for model usability.
+        out.push_str(&format!("{}:{line}\n", i + 1));
+        last_included = Some(i);
+    }
+    out
+}
+
+fn truncate_bytes_message(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let head = take_bytes_prefix_safe(s, max.saturating_sub(80));
+    format!(
+        "{head}\n\n[… retrieve output truncated at {max} bytes; narrow `query` or raise max_chars …]"
+    )
+}
+
+fn take_bytes_prefix_safe(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+fn take_bytes_suffix_safe(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len().saturating_sub(max);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
 }
 
 /// Format a human-readable stats block for `/headroom stats`.
@@ -555,6 +792,29 @@ mod tests {
         set_keep_lines_override(6);
     }
 
+    fn big_lines(n: usize, mid_secret: Option<(usize, &str)>) -> String {
+        (1..=n)
+            .map(|i| match mid_secret {
+                Some((idx, secret)) if idx == i => secret.to_string(),
+                _ => format!("pad_{i}_{}", "y".repeat(30)),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn compress_and_hash(text: &str) -> (String, String, CompressionStats) {
+        let mut stats = CompressionStats::default();
+        let compressed = maybe_compress_content(text, Some("call-1"), &mut stats)
+            .expect("should compress");
+        let hash = compressed
+            .split("hash=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("hash")
+            .to_string();
+        (compressed, hash, stats)
+    }
+
     #[test]
     fn compresses_large_text_and_retrieves() {
         let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -564,24 +824,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(big.len() > 50, "fixture too small: {}", big.len());
-        let mut stats = CompressionStats::default();
-        let compressed = maybe_compress_content(&big, Some("call-1"), &mut stats)
-            .unwrap_or_else(|| {
-                panic!(
-                    "should compress: enabled={} len={} min={}",
-                    is_enabled(),
-                    big.len(),
-                    min_chars()
-                )
-            });
+        let (compressed, hash, stats) = compress_and_hash(&big);
         assert!(stats.tokens_saved > 0);
         assert!(compressed.contains("<headroom_compressed"));
-        let hash = compressed
-            .split("hash=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .expect("hash");
-        let entry = retrieve(hash).expect("stored");
+        let entry = retrieve(&hash).expect("stored");
         assert_eq!(entry.content, big);
     }
 
@@ -603,9 +849,249 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let mut stats = CompressionStats::default();
-        let once = maybe_compress_content(&big, Some("c1"), &mut stats)
-            .expect("first compress");
+        let once = maybe_compress_content(&big, Some("c1"), &mut stats).expect("first compress");
         let mut stats2 = CompressionStats::default();
         assert!(maybe_compress_content(&once, Some("c1"), &mut stats2).is_none());
+    }
+
+    #[test]
+    fn skips_below_min_chars_threshold() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(500);
+        let small = "line\n".repeat(10); // well under 500
+        let mut stats = CompressionStats::default();
+        assert!(maybe_compress_content(&small, None, &mut stats).is_none());
+        assert_eq!(stats.attempted_segments, 0);
+    }
+
+    #[test]
+    fn compresses_at_or_above_min_threshold() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(100);
+        set_keep_lines_override(4);
+        // Many short lines so line-preview path compresses.
+        let text = (0..40)
+            .map(|i| format!("row{i:03} {}", "abcdefghij".repeat(3)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.len() >= 100);
+        let mut stats = CompressionStats::default();
+        let out = maybe_compress_content(&text, None, &mut stats).expect("compress");
+        assert!(out.len() < text.len());
+        assert!(stats.tokens_saved > 0);
+    }
+
+    #[test]
+    fn store_evicts_oldest_when_entry_cap_hit() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_max_store_entries_override(2);
+        let a = big_lines(80, None);
+        let b = big_lines(81, None);
+        let c = big_lines(82, None);
+        let (_, ha, _) = compress_and_hash(&a);
+        let (_, hb, _) = compress_and_hash(&b);
+        assert!(retrieve(&ha).is_some());
+        assert!(retrieve(&hb).is_some());
+        let (_, hc, _) = compress_and_hash(&c);
+        assert!(
+            retrieve(&ha).is_none(),
+            "oldest entry A must be evicted at cap=2"
+        );
+        assert!(retrieve(&hb).is_some());
+        assert!(retrieve(&hc).is_some());
+        let (entries, max_e, _, _) = store_stats();
+        assert_eq!(entries, 2);
+        assert_eq!(max_e, 2);
+    }
+
+    #[test]
+    fn store_rejects_body_larger_than_max_store_chars() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_max_store_chars_override(200);
+        // Must exceed min_chars (50) and max_store_chars (200).
+        let huge = "x".repeat(500) + &"\nline\n".repeat(30);
+        let mut stats = CompressionStats::default();
+        assert!(maybe_compress_content(&huge, None, &mut stats).is_none());
+        assert!(stats.failed_segments >= 1);
+        assert!(retrieve(&hash_content(&huge)).is_none());
+    }
+
+    #[test]
+    fn store_evicts_by_char_budget() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        // Two multi-line payloads that each fit alone; total exceeds store budget so
+        // inserting B must evict A.
+        set_max_store_chars_override(2_000);
+        set_min_chars_override(50);
+        set_keep_lines_override(4);
+        let a = (0..80)
+            .map(|i| format!("A{i:02} {}", "zzzzzzzzzz"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let b = (0..80)
+            .map(|i| format!("B{i:02} {}", "yyyyyyyyyy"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(a.len() > 50 && b.len() > 50);
+        assert!(a.len() < 2_000 && b.len() < 2_000);
+        assert!(a.len() + b.len() > 2_000);
+        let mut stats = CompressionStats::default();
+        let ca = maybe_compress_content(&a, Some("a"), &mut stats)
+            .unwrap_or_else(|| panic!("A should compress: len={} failed={}", a.len(), stats.failed_segments));
+        let ha = ca
+            .split("hash=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .to_string();
+        let mut stats = CompressionStats::default();
+        let cb = maybe_compress_content(&b, Some("b"), &mut stats)
+            .unwrap_or_else(|| panic!("B should compress: len={} failed={}", b.len(), stats.failed_segments));
+        let hb = cb
+            .split("hash=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .to_string();
+        assert!(retrieve(&ha).is_none(), "A should be evicted for char budget");
+        assert_eq!(retrieve(&hb).unwrap().content, b);
+    }
+
+    #[test]
+    fn retrieve_invalid_hash_errors() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        assert_eq!(
+            retrieve_formatted("not-a-hash", &RetrieveOptions::default()),
+            Err(RetrieveError::InvalidHash)
+        );
+        assert_eq!(
+            retrieve_formatted(&"ab".repeat(32), &RetrieveOptions::default()),
+            Err(RetrieveError::NotFound)
+        );
+    }
+
+    #[test]
+    fn retrieve_query_finds_middle_secret_without_full_dump() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let secret = "SECRET_TOKEN_ZX7_2144";
+        let big = big_lines(2500, Some((2144, secret)));
+        let (_, hash, stats) = compress_and_hash(&big);
+        assert!(stats.tokens_saved > 0);
+        // Full body is large; query must recover the middle line alone.
+        let formatted = retrieve_formatted(
+            &hash,
+            &RetrieveOptions {
+                query: Some("SECRET_TOKEN_ZX7_".into()),
+                max_chars: Some(2_000),
+                ..Default::default()
+            },
+        )
+        .expect("retrieve");
+        assert!(formatted.contains(secret), "must contain secret: {formatted}");
+        assert!(
+            formatted.len() < 4_000,
+            "query retrieve must stay small: {}",
+            formatted.len()
+        );
+        // Must not dump thousands of pad lines.
+        assert!(
+            formatted.matches("pad_").count() < 5,
+            "should not dump pad lines"
+        );
+    }
+
+    #[test]
+    fn retrieve_full_body_capped_with_query_hint() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let big = big_lines(800, None);
+        let (_, hash, _) = compress_and_hash(&big);
+        let formatted = retrieve_formatted(
+            &hash,
+            &RetrieveOptions {
+                max_chars: Some(800),
+                ..Default::default()
+            },
+        )
+        .expect("retrieve");
+        assert!(formatted.contains("Pass `query`") || formatted.contains("query"));
+        assert!(formatted.len() < big.len());
+        assert!(formatted.len() <= 800 + 400); // header overhead
+    }
+
+    #[test]
+    fn retrieve_case_insensitive_hash() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let big = big_lines(60, None);
+        let (_, hash, _) = compress_and_hash(&big);
+        let upper = hash.to_ascii_uppercase();
+        assert_eq!(retrieve(&upper).unwrap().content, big);
+        assert!(retrieve_formatted(&format!("0x{hash}"), &RetrieveOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn utf8_character_preview_does_not_panic() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(20);
+        set_keep_lines_override(1000); // force character-preview path (few lines)
+        // Single long line of multi-byte chars so char-preview path runs.
+        let big = " ind ".repeat(2_000); // each char is multi-byte UTF-8
+        assert!(big.chars().count() > 2_500);
+        let mut stats = CompressionStats::default();
+        // May or may not compress depending on size vs summary; must not panic.
+        let _ = maybe_compress_content(&big, None, &mut stats);
+    }
+
+    #[test]
+    fn json_preview_compresses_arrays() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(50);
+        let arr: Vec<serde_json::Value> = (0..40)
+            .map(|i| serde_json::json!({"id": i, "payload": "x".repeat(20)}))
+            .collect();
+        let text = serde_json::to_string(&arr).unwrap();
+        assert!(text.len() > 50);
+        let mut stats = CompressionStats::default();
+        let compressed = maybe_compress_content(&text, None, &mut stats).expect("json compress");
+        assert!(compressed.contains("JSON"));
+        assert!(compressed.contains("__headroom_omitted_items") || compressed.contains("array"));
+        assert!(stats.tokens_saved > 0);
+    }
+
+    #[test]
+    fn tokens_saved_matches_estimator() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let big = big_lines(500, None);
+        let (compressed, _, stats) = compress_and_hash(&big);
+        let before = estimate_tokens(&big);
+        let after = estimate_tokens(&compressed);
+        assert_eq!(stats.tokens_before, before);
+        assert_eq!(stats.tokens_after, after);
+        assert_eq!(stats.tokens_saved, before.saturating_sub(after));
+        assert!(stats.tokens_saved > 0);
+    }
+
+    #[test]
+    fn protects_headroom_original_prefix() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let body = format!(
+            "HEADROOM_ORIGINAL hash={} original_chars=99\n{}",
+            "ab".repeat(32),
+            "x".repeat(5000)
+        );
+        let mut stats = CompressionStats::default();
+        assert!(maybe_compress_content(&body, None, &mut stats).is_none());
     }
 }

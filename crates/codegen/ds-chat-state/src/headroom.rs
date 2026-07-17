@@ -47,20 +47,28 @@ pub fn compress_tool_results(conversation: &mut [ConversationItem]) -> Compressi
 mod tests {
     use super::*;
     use ds_sampling_types::ConversationItem;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn big(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("L{i:04} {}", "ABCDEFGH".repeat(4)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn request_clone_tool_results_compress() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         ds_headroom::reset_for_test();
         set_enabled(true);
         ds_headroom::set_min_chars_override(50);
         ds_headroom::set_keep_lines_override(6);
-        let big = (0..150)
-            .map(|i| format!("L{i:04} {}", "ABCDEFGH".repeat(4)))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = big(150);
         let mut conv = vec![
             ConversationItem::user("go"),
-            ConversationItem::tool_result("t1", big.clone()),
+            ConversationItem::tool_result("t1", content.clone()),
         ];
         let stats = compress_tool_results(&mut conv);
         assert!(stats.compressed_segments >= 1);
@@ -75,6 +83,43 @@ mod tests {
             .nth(1)
             .and_then(|s| s.split('"').next())
             .unwrap();
-        assert_eq!(retrieve(hash).unwrap().content, big);
+        assert_eq!(retrieve(hash).unwrap().content, content);
+    }
+
+    #[test]
+    fn respects_max_segments_env() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        ds_headroom::reset_for_test();
+        set_enabled(true);
+        ds_headroom::set_min_chars_override(50);
+        ds_headroom::set_keep_lines_override(6);
+        // SAFETY: tests serialized via TEST_LOCK.
+        unsafe {
+            std::env::set_var(ds_headroom::ENV_MAX_SEGMENTS, "2");
+        }
+        let mut conv = vec![ConversationItem::user("go")];
+        for i in 0..5 {
+            conv.push(ConversationItem::tool_result(
+                format!("t{i}"),
+                big(120 + i),
+            ));
+        }
+        let stats = compress_tool_results(&mut conv);
+        unsafe {
+            std::env::remove_var(ds_headroom::ENV_MAX_SEGMENTS);
+        }
+        assert_eq!(
+            stats.compressed_segments, 2,
+            "only first max_segments tool results should compress"
+        );
+        let mut compressed = 0u32;
+        for item in &conv {
+            if let ConversationItem::ToolResult(tr) = item
+                && tr.content.contains("<headroom_compressed")
+            {
+                compressed += 1;
+            }
+        }
+        assert_eq!(compressed, 2);
     }
 }
