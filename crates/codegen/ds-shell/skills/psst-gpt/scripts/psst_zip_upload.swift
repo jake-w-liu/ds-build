@@ -336,30 +336,45 @@ if !attached {
   emit(["ok": false, "code": "ATTACHMENT_MISSING", "message": "Zip did not attach in Chat composer"], exitCode: 7)
 }
 
-_ = setAttr(composer, kAXValueAttribute as String, prompt as CFTypeRef)
-Thread.sleep(forTimeInterval: 0.35)
-if let send = bfsFirst(root, pred: { el, r in
-  r == "AXButton" && (s(el, kAXDescriptionAttribute as String) == "Send" || s(el, kAXTitleAttribute as String) == "Send")
-}) {
-  _ = press(send)
-} else {
-  key(36)
-}
-
-// Capture response — filter attachment/chrome labels
+// Baseline static texts before send (for diff-based capture of long audits).
 func isChromeText(_ t: String) -> Bool {
   let l = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
   if l.isEmpty { return true }
   let chrome = [
     "new chat", "projects", "plugins", "sites", "scheduled", "message chatgpt",
     "recents", "search", "send", "add files and more", "select chatgpt model",
+    "chatgpt", "work", "chat",
   ]
   if chrome.contains(l) { return true }
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("remove ") { return true }
-  if l == zipName || l.hasSuffix(".zip") && l.count < 80 { return true }
+  if l == zipName || (l.hasSuffix(".zip") && l.count < 80) { return true }
   if l.contains("source-archive") && l.count < 80 { return true }
+  // Sidebar recents / noise noise
+  if l.count < 3 { return true }
   return false
 }
+func allStaticTexts() -> [String] {
+  bfsAll(root, pred: { _, r in r == "AXStaticText" })
+    .map { s($0, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines) }
+    .filter { !$0.isEmpty && !isChromeText($0) }
+}
+let baseline = Set(allStaticTexts())
+log("baseline static texts=\(baseline.count)")
+
+_ = setAttr(composer, kAXValueAttribute as String, prompt as CFTypeRef)
+Thread.sleep(forTimeInterval: 0.35)
+// Include prompt fragments in baseline after set (user bubble)
+var baseline2 = baseline.union(Set(allStaticTexts()))
+if let send = bfsFirst(root, pred: { el, r in
+  r == "AXButton" && (s(el, kAXDescriptionAttribute as String) == "Send" || s(el, kAXTitleAttribute as String) == "Send")
+}) {
+  log("send=\(press(send))")
+} else {
+  key(36)
+  log("send=return")
+}
+Thread.sleep(forTimeInterval: 1.0)
+baseline2 = baseline2.union(Set(allStaticTexts().filter { prompt.contains($0) || $0.count < 40 && prompt.contains($0.prefix(20)) }))
 
 // Optional exact token from prompt (PSST_… / OK_…)
 let exactToken: String? = {
@@ -369,28 +384,49 @@ let exactToken: String? = {
   return nil
 }()
 
+func finishSuccess(_ text: String) -> Never {
+  pb.clearContents()
+  if let oldString { pb.setString(oldString, forType: .string) }
+  let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
+  try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
+  emit([
+    "ok": true,
+    "status": "complete",
+    "mode": "chat",
+    "workOn": false,
+    "attached": true,
+    "attachLabels": Array(labels.prefix(5)),
+    "zipPath": zipPath as Any,
+    "responsePath": respPath,
+    "finalDeliveryText": text,
+    "mustReturnFinalDelivery": true,
+    "mustReturnVerbatim": true,
+    "method": "clipboard-file-paste",
+    "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
+  ])
+}
+
 var stable = 0
-var last = ""
+var lastSig = ""
 var best = ""
-let fingerprint = String(prompt.prefix(min(48, prompt.count)))
+var sawGrowth = false
 let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
 while deadline == nil || Date() < deadline! {
-  Thread.sleep(forTimeInterval: 2)
+  Thread.sleep(forTimeInterval: 2.5)
   if isScreenLocked() {
     emit([
       "ok": false,
       "code": "PSST_GPT_SCREEN_LOCKED",
       "message": "Screen locked during wait. Unlock and re-run; attachment may still be in ChatGPT.",
       "partial": best,
+      "attached": attached,
     ], exitCode: 30)
   }
   if let work = bfsFirst(root, pred: { el, r in r.contains("Check") && s(el, kAXTitleAttribute as String) == "Work" }),
      s(work, kAXValueAttribute as String) == "1" {
-    emit(["ok": false, "code": "WORK_FLIP"], exitCode: 20)
+    emit(["ok": false, "code": "WORK_FLIP", "attached": attached], exitCode: 20)
   }
-  let texts = bfsAll(root, pred: { _, r in r == "AXStaticText" })
-    .map { s($0, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines) }
-    .filter { !$0.isEmpty && !isChromeText($0) }
+  let texts = allStaticTexts()
 
   if let token = exactToken {
     let hits = texts.filter {
@@ -399,61 +435,53 @@ while deadline == nil || Date() < deadline! {
     log("tick tokenHits=\(hits.count)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       if a == best { stable += 1 } else { stable = 0; best = a }
-      if stable >= 2 {
-        pb.clearContents()
-        if let oldString { pb.setString(oldString, forType: .string) }
-        let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-        try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
-        emit([
-          "ok": true,
-          "status": "complete",
-          "mode": "chat",
-          "workOn": false,
-          "attached": true,
-          "attachLabels": Array(labels.prefix(5)),
-          "zipPath": zipPath,
-          "responsePath": respPath,
-          "finalDeliveryText": best,
-          "mustReturnFinalDelivery": true,
-          "mustReturnVerbatim": true,
-          "method": "clipboard-file-paste",
-        ])
-      }
+      if stable >= 2 { finishSuccess(best) }
       continue
     }
   }
 
-  var after = false
-  var collected: [String] = []
-  for t in texts {
-    if t.contains(fingerprint) || t == prompt { after = true; collected = []; continue }
-    if after { collected.append(t) }
+  // Diff vs baseline: new non-chrome static texts are the assistant body
+  let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
+  // Drop tiny fragments that match prompt words only
+  let filtered = novel.filter { t in
+    if t.count < 12 && !t.contains(" ") { return false }
+    if t.lowercased().hasPrefix("audit only") { return false }
+    return true
   }
-  let assistant = collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  log("tick chars=\(assistant.count)")
-  let sig = "\(assistant.count)|\(assistant.prefix(60))"
-  if sig == last && !assistant.isEmpty { stable += 1 } else { stable = 0; last = sig; if !assistant.isEmpty { best = assistant } }
-  if stable >= 3 && !best.isEmpty && !isChromeText(best) {
-    pb.clearContents()
-    if let oldString { pb.setString(oldString, forType: .string) }
-    let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-    try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
-    emit([
-      "ok": true,
-      "status": "complete",
-      "mode": "chat",
-      "workOn": false,
-      "attached": true,
-      "attachLabels": Array(labels.prefix(5)),
-      "zipPath": zipPath,
-      "responsePath": respPath,
-      "finalDeliveryText": best,
-      "mustReturnFinalDelivery": true,
-      "mustReturnVerbatim": true,
-      "method": "clipboard-file-paste",
-    ])
+  let assistant = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  log("tick novel=\(filtered.count) chars=\(assistant.count) sawGrowth=\(sawGrowth)")
+  if assistant.count > best.count + 20 {
+    sawGrowth = true
+    best = assistant
+    stable = 0
+    lastSig = "\(assistant.count)"
+    continue
+  }
+  let sig = "\(assistant.count)"
+  if sig == lastSig && assistant.count > 80 {
+    stable += 1
+    if !assistant.isEmpty { best = assistant }
+  } else if assistant.count >= best.count && !assistant.isEmpty {
+    best = assistant
+    lastSig = sig
+    stable = sawGrowth ? 1 : 0
+  } else {
+    stable = 0
+    lastSig = sig
+  }
+  // Long audits: require growth then stability; min body length 80
+  if sawGrowth && stable >= 4 && best.count > 80 {
+    finishSuccess(best)
+  }
+  // Short replies
+  if !sawGrowth && stable >= 5 && best.count > 40 {
+    finishSuccess(best)
   }
 }
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
-emit(["ok": false, "code": "TIMEOUT", "attached": attached, "partial": best], exitCode: 1)
+if best.count > 80 {
+  // Prefer partial long body over hard fail after long wait
+  finishSuccess(best)
+}
+emit(["ok": false, "code": "TIMEOUT", "attached": attached, "partial": best, "partialChars": best.count], exitCode: 1)
