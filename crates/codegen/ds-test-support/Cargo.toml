@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-test-support"
-version = "0.1.9"
+version = "0.1.10"
 edition.workspace = true
 description = "Shared test-support for ds-build crates: mock inference server, SSE generators, ACP stdio client, headless runner, env sandbox"
 publish = false
