@@ -1,3 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# Local upstream-sync scratch (if created under repo)
+.upstream-sync/
+upstream/reviews/

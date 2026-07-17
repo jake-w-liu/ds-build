@@ -1,92 +1,78 @@
 ---
 name: upstream-sync
 description: >
-  Review and selectively port updates from upstream xai-org/grok-build into
-  this DS Build fork. Use when the user says upstream, grok-build update,
-  port from grok, sync upstream, or /upstream-sync.
+  Full upstream port cycle for xai-org/grok-build into DS Build: fetch, triage,
+  implement every verified item, verify correctness (build/tests), mark
+  reviewed. Use for /upstream-sync, upstream, grok-build update, port from grok.
 ---
 
-# Upstream sync (Grok Build → DS Build)
+# /upstream-sync — implement verified upstream fixes
+
+## What this skill does (end-to-end)
+
+When the user runs **`/upstream-sync`** (or equivalent), **do not stop at a
+review doc**. Run the full cycle:
+
+1. **Fetch** upstream and see what is pending  
+2. **Triage** changes (auto classes + judgment)  
+3. **Implement every verified item** (default: all `PORT-HIGH`; also
+   `PORT-REVIEW` when clearly relevant to DS)  
+4. **Check correctness** — build and targeted tests; fix regressions before
+   claiming done  
+5. **Mark reviewed** so the next run only sees newer upstream commits  
+6. **Report** a short table of ported / skipped / deferred + verification
+   evidence  
+
+Ephemeral reviews and cursors live under **`~/.ds/upstream-sync/`** (not in
+git). The only in-repo surface is this skill + `scripts/upstream-sync.sh`.
 
 ## Hard rules
 
-1. **Never** `git merge` / `git rebase` / `git cherry-pick` upstream onto `main`
-   without explicit user override. Histories diverge; crates are renamed.
+1. **Never** `git merge` / `rebase` / `cherry-pick` upstream onto `main`
+   unless the user explicitly overrides. Histories and crate names diverge.
 2. **Never** re-enable xAI Mixpanel/Sentry phone-home, xAI OAuth, or replace
    DeepSeek defaults with Grok API defaults unless the user asks.
-3. Port **behavior** with DS names (`ds_*`, `DS_HOME`, `~/.ds`). Do not leave
-   `xai_*` / `xai-grok-*` identifiers in the tree.
-4. Verify before claiming a port works: build (and tests when relevant).
-5. Record decisions in the review dossier + advance the ledger with
-   `mark-reviewed` when the cycle is done (or ask the user to).
+3. Port **behavior** with DS names (`ds_*`, `DS_HOME`, `~/.ds`). No leftover
+   `xai_*` / `xai-grok-*` in the tree.
+4. **Verify before assert.** A port is not done until build (and relevant
+   tests) succeed. Quote the command + outcome.
+5. Do **not** commit review dossiers, ledgers, or path-map markdown into the
+   repo. Keep the tree free of sync artifacts.
 
-## Canonical docs
-
-- Workflow: `docs/upstream-sync.md`
-- Path map: `upstream/path-map.md`
-- State cursor: `upstream/state.json`
-- Ledger: `upstream/LEDGER.md`
-- Reviews: `upstream/reviews/*.md`
-- CLI: `./scripts/upstream-sync.sh`
-
-## Standard procedure
-
-### A. Discover
+## CLI (helper only)
 
 ```bash
-./scripts/upstream-sync.sh setup   # once
+./scripts/upstream-sync.sh setup     # once: add remote + ~/.ds state
 ./scripts/upstream-sync.sh fetch
 ./scripts/upstream-sync.sh status
-./scripts/upstream-sync.sh review
+./scripts/upstream-sync.sh review    # → ~/.ds/upstream-sync/reviews/<sha>.md
+./scripts/upstream-sync.sh map-path <upstream/path>
+./scripts/upstream-sync.sh show <upstream/path> [@rev]
+./scripts/upstream-sync.sh mark-reviewed <sha> --ported N --skipped N --deferred N --note "…"
 ```
 
-Read the generated `upstream/reviews/<sha>.md`.
+## Triage classes
 
-### B. Triage
+| Class | Meaning | Action on `/upstream-sync` |
+|-------|---------|----------------------------|
+| `PORT-HIGH` | Security, crash, correctness, sandbox | **Must implement** |
+| `PORT-REVIEW` | Likely useful, needs judgment | **Implement if relevant to DS** |
+| `SKIP` | xAI product / OAuth / billing / STT / branding / phone-home | Skip |
+| `DEFER` | Large pure refactor / docs-only churn | Skip unless user asks |
 
-Use the dossier classes:
+### Skip keywords (non-exhaustive)
 
-| Class | Default |
-|-------|---------|
-| `PORT-HIGH` | Implement |
-| `PORT-REVIEW` | Implement if relevant to DS users |
-| `SKIP` | Skip (product/brand/phone-home) |
-| `DEFER` | Skip for now; note in Decisions |
+OAuth scopes, enterprise STT, billing URLs, Mixpanel, Sentry, xAI voice WSS,
+branding-only, welcome logo, Grok model catalog.
 
-Prefer security and correctness fixes. Skip enterprise STT, billing URLs,
-OAuth scope nits, branding-only, and telemetry.
+### High-priority keywords
 
-### C. Port one item
+`security`, SSRF, sandbox, crash, hang, leak, race, `fix(`, headless drain,
+invariants, authz.
 
-1. Map path:
-   ```bash
-   ./scripts/upstream-sync.sh map-path <upstream-path>
-   ```
-2. Read mapped upstream source:
-   ```bash
-   ./scripts/upstream-sync.sh show <upstream-path> @upstream/main
-   ```
-3. Open the DS file. Diff intent. Apply the minimal correct change.
-4. Build affected crates, e.g.:
-   ```bash
-   cargo build -p ds-pager-bin
-   # or crate-local tests when the change is small
-   ```
-5. Update the **Decisions** table in the review markdown.
+## Rename map (longest first)
 
-### D. Finish the cycle
-
-```bash
-./scripts/upstream-sync.sh mark-reviewed <sha> \
-  --ported N --skipped N --deferred N \
-  --note "short summary"
-```
-
-Only mark reviewed when triage is complete for that SHA (ports may be zero).
-
-## Rename cheatsheet (apply longest-first)
-
-Paths:
+**Paths**
 
 - `crates/codegen/xai-grok-*` → `crates/codegen/ds-*`
 - `crates/codegen/xai-*` → `crates/codegen/ds-*`
@@ -94,15 +80,37 @@ Paths:
 - `crates/build/xai-proto-build` → `crates/build/ds-proto-build`
 - `prod/mc/cli-chat-proxy-types` → `prod/mc/cli-proxy-types`
 
-Idents (script `map-text` / `show` already apply these):
+**Idents** (`show` / `map-text` apply these)
 
 - `xai_grok_` → `ds_`, `xai_` → `ds_`, `GROK_HOME` → `DS_HOME`, `~/.grok` → `~/.ds`
 
-## User-facing summary format
+## Implementation loop (per verified item)
 
-When done, report:
+1. Map path + `show` mapped upstream blob.  
+2. Open DS file; port the **minimal behavioral change** (not blind overwrite).  
+3. Keep DS product defaults.  
+4. **Correctness check** for that change:
+   - Prefer crate-scoped tests when they exist and are cheap.  
+   - At minimum: `cargo build -p ds-pager-bin` (or the affected package) must
+     succeed after the batch.  
+   - If a test fails, fix or revert that port — do not leave red builds.  
+5. Note the item as ported with file paths.
 
-1. Upstream tip SHA + how many commits/files pending or reviewed
-2. Table of ported / skipped / deferred with one-line reasons
-3. Build/test evidence for ports
-4. Whether `mark-reviewed` was run
+## Finish
+
+```bash
+./scripts/upstream-sync.sh mark-reviewed <sha> \
+  --ported N --skipped N --deferred N \
+  --note "one-line summary"
+```
+
+## User-facing report (required)
+
+| Upstream SHA | … |
+| Ported | item → DS paths |
+| Skipped | item → reason |
+| Deferred | item → reason |
+| Verification | commands run + pass/fail |
+
+Do not claim “everything is up to date” unless `status` shows no pending
+commits after `mark-reviewed`, and verification passed.

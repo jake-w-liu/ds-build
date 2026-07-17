@@ -43,8 +43,8 @@ is your DeepSeek (or other BYOK) API calls.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
-**→ Porting upstream Grok Build fixes:** [`docs/upstream-sync.md`](docs/upstream-sync.md)
-(`./scripts/upstream-sync.sh` — review → classify → selective port; never blind-merge)
+**→ Upstream fixes:** run **`/upstream-sync`** in the agent (fetch → triage →
+port verified items → build/test). Never blind-merge `xai-org/grok-build`.
 
 [Example config](config.example.toml) ·
 [User guide](crates/codegen/ds-pager/docs/user-guide/) ·

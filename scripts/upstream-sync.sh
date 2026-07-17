@@ -23,9 +23,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-STATE_FILE="$REPO_ROOT/upstream/state.json"
-LEDGER_FILE="$REPO_ROOT/upstream/LEDGER.md"
-REVIEWS_DIR="$REPO_ROOT/upstream/reviews"
+# Ephemeral state lives outside the repo so reviews/ledgers do not pollute git.
+STATE_DIR="${DS_UPSTREAM_SYNC_DIR:-$HOME/.ds/upstream-sync}"
+STATE_FILE="$STATE_DIR/state.json"
+REVIEWS_DIR="$STATE_DIR/reviews"
 DEFAULT_URL="https://github.com/xai-org/grok-build.git"
 DEFAULT_REMOTE="upstream"
 DEFAULT_BRANCH="main"
@@ -34,9 +35,28 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "→ $*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
+ensure_state() {
+  mkdir -p "$REVIEWS_DIR"
+  if [[ ! -f "$STATE_FILE" ]]; then
+    cat > "$STATE_FILE" <<EOF
+{
+  "upstream_remote": "$DEFAULT_REMOTE",
+  "upstream_url": "$DEFAULT_URL",
+  "upstream_branch": "$DEFAULT_BRANCH",
+  "last_reviewed_sha": null,
+  "last_reviewed_at": null,
+  "last_ported_sha": null,
+  "last_ported_at": null,
+  "policy": "selective-port"
+}
+EOF
+  fi
+}
+
 # ── state helpers ────────────────────────────────────────────────────────────
 
 state_get() {
+  ensure_state
   local key="$1"
   python3 - "$STATE_FILE" "$key" <<'PY'
 import json, sys
@@ -49,6 +69,7 @@ PY
 }
 
 state_set() {
+  ensure_state
   local key="$1" val="$2"
   python3 - "$STATE_FILE" "$key" "$val" <<'PY'
 import json, sys
@@ -153,7 +174,7 @@ cmd_help() {
 cmd_setup() {
   need git
   need python3
-  mkdir -p "$REVIEWS_DIR"
+  ensure_state
   local remote url
   remote="$(remote_name)"
   url="$(remote_url)"
@@ -169,7 +190,7 @@ cmd_setup() {
     info "adding remote $remote → $url"
     git remote add "$remote" "$url"
   fi
-  [[ -f "$STATE_FILE" ]] || die "missing $STATE_FILE"
+  info "state dir: $STATE_DIR (not in git)"
   info "setup OK. Next: ./scripts/upstream-sync.sh fetch && ./scripts/upstream-sync.sh status"
 }
 
@@ -438,41 +459,15 @@ cmd_mark_reviewed() {
     state_set last_ported_at "$date_utc"
   fi
 
-  local review_link="reviews/${short}.md"
-  [[ -f "$REVIEWS_DIR/${short}.md" ]] || review_link="—"
-
-  # Replace placeholder row if present; else append as last table row.
-  python3 - "$LEDGER_FILE" "$date_utc" "$short" "$note" "$ported" "$skipped" "$deferred" "$review_link" <<'PY'
-import sys
-path, date, short, note, ported, skipped, deferred, link = sys.argv[1:]
-note = note.replace("|", "\\|")
-row = f"| {date} | `{short}` | {note} | {ported} | {skipped} | {deferred} | {link} |"
-with open(path) as f:
-    text = f.read()
-placeholder = "| _(none yet)_ | | | | | | |"
-if placeholder in text:
-    text = text.replace(placeholder, row, 1)
-else:
-    lines = text.splitlines(keepends=True)
-    # Find the ledger table: first line starting with "| Reviewed"
-    start = next((i for i, l in enumerate(lines) if l.startswith("| Reviewed")), None)
-    if start is None:
-        text = text.rstrip() + "\n\n" + row + "\n"
-    else:
-        # Walk rows until a non-table line; insert before that.
-        end = start + 1
-        while end < len(lines) and lines[end].startswith("|"):
-            end += 1
-        lines.insert(end, row + "\n")
-        text = "".join(lines)
-with open(path, "w") as f:
-    f.write(text)
-print(row)
-PY
+  # Append a one-line history entry under ~/.ds (not in the git tree).
+  ensure_state
+  local hist="$STATE_DIR/history.log"
+  printf '%s\t%s\tported=%s skipped=%s deferred=%s\t%s\n' \
+    "$date_utc" "$short" "$ported" "$skipped" "$deferred" "$note" >> "$hist"
 
   info "marked reviewed: $short"
   info "state: last_reviewed_sha=$(state_get last_reviewed_sha)"
-  info "ledger updated: $LEDGER_FILE"
+  info "history: $hist"
 }
 
 # ── dispatch ─────────────────────────────────────────────────────────────────
