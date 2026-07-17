@@ -405,12 +405,23 @@ pub struct LeaderArgs {
 ///
 /// Uses a `OnceLock` so the formatting happens once and the result lives
 /// for `'static` (required by clap's `ArgAction::Version`).
+///
+/// Semver always comes from [`ds_version::VERSION`] (lockstepped product
+/// crate). The git short hash is taken from this crate's build-time
+/// `VERSION_WITH_COMMIT` env (set by `build.rs`). That way a partial bump of
+/// only `ds-pager-bin` cannot leave `ds --version` stuck on an older number.
 fn version_with_channel() -> &'static str {
     use std::sync::OnceLock;
     static V: OnceLock<String> = OnceLock::new();
     V.get_or_init(|| {
         let label = ds_update::channel_label();
-        ds_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), label)
+        let commit = env!("VERSION_WITH_COMMIT")
+            .rsplit_once('(')
+            .map(|(_, rest)| rest.trim_end_matches(')').trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+        let vwc = format!("{} ({})", ds_version::VERSION, commit);
+        ds_version::display_version_with_commit(&vwc, label)
     })
 }
 #[derive(Debug, Clone, Parser)]

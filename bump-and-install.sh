@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ── bump-and-install.sh ──────────────────────────────────────────────────────
-# Bump the patch version of ds-pager-bin and ds-version, commit + push to
-# origin/main, then build and install the binary to ~/.local/bin/ds.
+# Bump the patch version of ds-version, ds-pager-bin, and ds-pager; commit +
+# push to origin/main; then build and install the binary to ~/.local/bin/ds.
 #
 # Usage:  ./bump-and-install.sh [--help]
 #
@@ -23,7 +23,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 VERSION_FILE1="crates/codegen/ds-version/Cargo.toml"
 VERSION_FILE2="crates/codegen/ds-pager-bin/Cargo.toml"
+# ds-pager owns clap `ds --version` via its build.rs VERSION_WITH_COMMIT;
+# keep it lockstepped with ds-version (cli.rs also prefers ds_version::VERSION).
+VERSION_FILE3="crates/codegen/ds-pager/Cargo.toml"
 INSTALL_PATH="$HOME/.local/bin/ds"
+INSTALL_PATH_ALT="$HOME/.ds/bin/ds"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -49,13 +53,13 @@ What it does:
   1. Guards: verifies branch=main, clean tree, origin/main exists.
   2. Reads the current semver from ds-version/Cargo.toml.
   3. If HEAD is already a version-bump commit, exits early (idempotent).
-  4. Increments the patch component, writes the new version to both
-     ds-version/Cargo.toml and ds-pager-bin/Cargo.toml.
+  4. Increments the patch component, writes the new version to
+     ds-version, ds-pager-bin, and ds-pager Cargo.toml files.
   5. Builds ds-pager-bin in release mode with DS_VERSION set (this also
      updates Cargo.lock with the new version metadata).
-  6. Commits the version bump (both tomls + Cargo.lock) and pushes to
+  6. Commits the version bump (tomls + Cargo.lock) and pushes to
      origin/main.
-  7. Installs the binary to ~/.local/bin/ds (codesigned on macOS).
+  7. Installs the binary to ~/.local/bin/ds and ~/.ds/bin/ds (codesigned on macOS).
 
 Requirements:
   - cargo, git, install, codesign (macOS) on PATH
@@ -124,9 +128,9 @@ new_version="${major}.${minor}.${new_patch}"
 
 info "Current version: $current_version  →  new version: $new_version"
 
-# ── write new version to both Cargo.toml files ──────────────────────────────
+# ── write new version to product Cargo.toml files ──────────────────────────
 
-for f in "$VERSION_FILE1" "$VERSION_FILE2"; do
+for f in "$VERSION_FILE1" "$VERSION_FILE2" "$VERSION_FILE3"; do
     info "Writing version $new_version to $f ..."
     # Replace the first occurrence of version = "..." with the new version.
     # Using a tmp file for portability; sed -i differs between macOS and Linux.
@@ -137,7 +141,7 @@ done
 
 # ── verify the writes took effect ──────────────────────────────────────────
 
-for f in "$VERSION_FILE1" "$VERSION_FILE2"; do
+for f in "$VERSION_FILE1" "$VERSION_FILE2" "$VERSION_FILE3"; do
     written="$(grep -E '^version\s*=\s*"' "$f" | head -1 | sed 's/^version[[:space:]]*=[[:space:]]*"//;s/"//')"
     if [[ "$written" != "$new_version" ]]; then
         die "version write verification failed for $f: expected '$new_version', got '$written'"
@@ -152,7 +156,7 @@ DS_VERSION="$new_version" cargo build -p ds-pager-bin --release
 # ── commit + push (lockfile now reflects the bumped versions) ──────────────
 
 info "Committing version bump (tomls + Cargo.lock) ..."
-git add "$VERSION_FILE1" "$VERSION_FILE2" Cargo.lock
+git add "$VERSION_FILE1" "$VERSION_FILE2" "$VERSION_FILE3" Cargo.lock
 git commit -m "chore: bump to v$new_version"
 
 info "Pushing to origin/main ..."
@@ -160,14 +164,16 @@ git push origin main
 
 # ── install ────────────────────────────────────────────────────────────────
 
-info "Installing to $INSTALL_PATH ..."
-mkdir -p "$(dirname "$INSTALL_PATH")"
+info "Installing to $INSTALL_PATH and $INSTALL_PATH_ALT ..."
+mkdir -p "$(dirname "$INSTALL_PATH")" "$(dirname "$INSTALL_PATH_ALT")"
 install -m 755 target/release/ds-pager "$INSTALL_PATH"
+install -m 755 target/release/ds-pager "$INSTALL_PATH_ALT"
 
 # macOS: ad-hoc codesign to avoid Gatekeeper SIGKILL
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    info "Codesigning $INSTALL_PATH ..."
+    info "Codesigning install paths ..."
     codesign --force --sign - "$INSTALL_PATH"
+    codesign --force --sign - "$INSTALL_PATH_ALT"
 fi
 
 # ── verify installed binary reports the new version ────────────────────────
@@ -175,6 +181,9 @@ fi
 info "Verifying installed binary version ..."
 reported_version="$("$INSTALL_PATH" --version 2>&1 || true)"
 info "  $reported_version"
+if [[ "$reported_version" != *"$new_version"* ]]; then
+    die "installed binary did not report $new_version (got: $reported_version)"
+fi
 
 # ── report ─────────────────────────────────────────────────────────────────
 
