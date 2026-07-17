@@ -252,3 +252,7 @@ default-bazel = [
 jemalloc = []
 sandbox-enforce = ["ds-sandbox/enforce"]
 release-dist = []
+# Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
+# `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
+# by `ds-pager-minimal`'s unit tests. Never enabled in production builds.
+test-support = ["ds-pager-render/test-support"]

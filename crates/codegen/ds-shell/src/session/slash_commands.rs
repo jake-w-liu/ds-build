@@ -515,15 +515,23 @@ pub(super) fn available_commands(
                     // Multiple skills share a bare name → winner keeps bare
                     // (e.g. `/deep-debug`); losers are qualified only
                     // (`plugin:skill` or `user:skill`).
-                    // Unique bare name → bare only (no redundant qualified entry).
+                    // Unique bare name → bare only, *except* plugin skills also
+                    // advertise the qualified form so they stay reachable when a
+                    // client builtin occupies the bare name.
                     if collides_builtin {
                         vec![make_entry(qualified)]
                     } else if name_dupes {
                         if is_bare_winner {
-                            vec![make_entry(s.name.clone())]
+                            if s.plugin_name.is_some() {
+                                vec![make_entry(s.name.clone()), make_entry(qualified)]
+                            } else {
+                                vec![make_entry(s.name.clone())]
+                            }
                         } else {
                             vec![make_entry(qualified)]
                         }
+                    } else if s.plugin_name.is_some() {
+                        vec![make_entry(qualified), make_entry(s.name.clone())]
                     } else {
                         vec![make_entry(s.name.clone())]
                     }

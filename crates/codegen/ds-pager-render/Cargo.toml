@@ -108,3 +108,5 @@ tempfile = { workspace = true }
 # leaving cargo's `default` (and thus cargo production builds) without them.
 # The helpers are inert unless their mock setters are called.
 default-bazel = []
+# Empty feature flag so sibling crates can opt into test-only helpers.
+test-support = []
