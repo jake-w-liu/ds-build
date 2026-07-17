@@ -523,13 +523,49 @@ fn remember(entry: StoredContent) -> bool {
     })
 }
 
+/// Tool names whose results should not be Headroom-compressed.
+///
+/// These are coordination / meta tools: compressing them forces the model to
+/// immediately `headroom_retrieve` (often with full-body reloads), thrashing
+/// the live transcript without saving durable shell/file dumps.
+pub fn should_skip_tool_name(name: &str) -> bool {
+    let n = name.trim();
+    // Exact / common aliases across toolsets.
+    matches!(
+        n,
+        "headroom_retrieve"
+            | "spawn_subagent"
+            | "get_command_or_subagent_output"
+            | "get_task_output"
+            | "kill_command_or_subagent"
+            | "kill_task"
+            | "monitor"
+            | "Task"
+            | "task"
+            | "TodoWrite"
+            | "todo_write"
+            | "update_goal"
+            | "UpdateGoal"
+    ) || n.ends_with(":headroom_retrieve")
+        || n.ends_with(":spawn_subagent")
+        || n.ends_with(":get_command_or_subagent_output")
+        || n.ends_with(":get_task_output")
+        || n.contains("spawn_subagent")
+        || n.contains("get_command_or_subagent_output")
+        || n.contains("get_task_output")
+}
+
 fn is_protected_content(text: &str) -> bool {
+    // Pre-format the marker needle once per process (avoids per-call alloc).
+    static RETRIEVE_NEEDLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let needle = RETRIEVE_NEEDLE
+        .get_or_init(|| format!("`{HEADROOM_RETRIEVE_TOOL_NAME}`"));
     text.starts_with("<headroom_compressed")
         || text.starts_with("HEADROOM_ORIGINAL ")
         || text.starts_with("<headroom_original")
-        || text.contains(&format!("`{HEADROOM_RETRIEVE_TOOL_NAME}`"))
+        || (text.contains(needle.as_str())
             && text.contains("hash=\"")
-            && text.len() < DEFAULT_MIN_CHARS * 2
+            && text.len() < DEFAULT_MIN_CHARS * 2)
 }
 
 fn hash_content(text: &str) -> String {
@@ -1093,6 +1129,17 @@ mod tests {
         );
         let mut stats = CompressionStats::default();
         assert!(maybe_compress_content(&body, None, &mut stats).is_none());
+    }
+
+    #[test]
+    fn should_skip_coordination_tool_names() {
+        assert!(should_skip_tool_name("spawn_subagent"));
+        assert!(should_skip_tool_name("get_command_or_subagent_output"));
+        assert!(should_skip_tool_name("headroom_retrieve"));
+        assert!(should_skip_tool_name("ds_build:get_task_output"));
+        assert!(!should_skip_tool_name("run_terminal_command"));
+        assert!(!should_skip_tool_name("read_file"));
+        assert!(!should_skip_tool_name("grep"));
     }
 
     /// Regression: turning compression off must not brick retrieve for

@@ -33,14 +33,20 @@ Everything else runs the four stages **in order**.
 ## Stage 1 — PLAN
 
 1. Method Steps 0–3: classify, define done + named verification, state assumptions.
+   - **Scope freeze:** name files/modules/presets in scope. Expanding scope
+     requires rewriting done + verification first.
+   - **Claim discipline:** a "bug" needs a decisive check (path/test/repro).
+     Fail the check → label **REFUTED** yourself; do not plan a fix for it.
 2. **Evidence fan-out** — spawn gatherers as **parallel** subagents in **one**
    message (never sequential when independent), within bounds above:
    - codebase: `explore` per distinct area;
    - libraries/facts: research / web_search-oriented work;
-   - distilled findings only.
-3. **Plan artifact:** classification; done + verification; evidence (cited);
-   ONE approach (alternatives dismissed in one line each); risks/assumptions;
-   execution checklist.
+   - distilled findings only (file:line); forbid raw multi-KB dumps.
+   - If a result is Headroom-compressed, retrieve with **query** for the one
+     fact you need — do not reload full bodies by default.
+3. **Plan artifact:** classification; done + verification; **in-scope list**;
+   evidence (cited); ONE approach (alternatives dismissed in one line each);
+   risks/assumptions; execution checklist.
 4. **Decision gate:** task-shaped + reversible → Stage 2 without asking.
    Plan-first / irreversible / outward-facing → present plan and STOP for approval.
 
@@ -69,7 +75,9 @@ Everything else runs the four stages **in order**.
 
 1. Self-audit method steps: followed / skipped / faked; fix what one pass can.
 2. Outcome-first report (method Step 6). **No stage names or step numbers** in
-   user-facing text. Honest caveats. Follow-ups only if they emerged from the work.
+   user-facing text. Honest caveats. List self-refuted claims in one line each
+   when you considered and dropped them. Follow-ups only if they emerged from
+   the work.
 
 ## When NOT to use
 
