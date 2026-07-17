@@ -187,7 +187,7 @@ pub fn workspace_ds_build_toolset() -> ToolServerConfig {
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
     tools.push((&ds_build::LspTool).into());
-    tools.push((&ds_build::HeadroomRetrieveTool).into());
+    // HeadroomRetrieveTool already inherited from default_ds_build_toolset().
     ToolServerConfig {
         tools,
         behavior_preset: None,
@@ -205,6 +205,7 @@ fn ds_computer_toolset() -> ToolServerConfig {
         (&ds_build::GrepTool).into(),
         (&ds_build::KillTerminalCommandTool).into(),
         (&ds_build::GetTerminalCommandOutputTool).into(),
+        (&ds_build::HeadroomRetrieveTool).into(),
     ];
     ToolServerConfig {
         tools,
@@ -370,6 +371,7 @@ fn explore_toolset() -> ToolServerConfig {
             (&ds_build::ReadFileTool).into(),
             (&ds_build::ListDirTool).into(),
             (&ds_build::GrepTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -386,6 +388,7 @@ fn plan_toolset() -> ToolServerConfig {
             (&ds_build::ListDirTool).into(),
             (&ds_build::GrepTool).into(),
             (&ds_build::TodoWriteTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
