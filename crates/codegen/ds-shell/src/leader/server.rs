@@ -7,12 +7,8 @@ use std::time::{Duration, Instant};
 ///
 /// Compared against each registering client's `ClientCapabilities::client_version`
 /// to detect mismatches early and surface a structured ACP notification.
-/// In development builds where `VERSION_WITH_COMMIT` is not set, this is
-/// `"unknown"` and version-mismatch detection is disabled (no notification sent).
-const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
-    Some(v) => v,
-    None => "unknown",
-};
+/// Always lockstepped with [`ds_version::VERSION_WITH_COMMIT`].
+const LEADER_VERSION: &str = ds_version::VERSION_WITH_COMMIT;
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
     LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage, read_message,

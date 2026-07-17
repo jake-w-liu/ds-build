@@ -427,7 +427,7 @@ pub fn init_tracing() -> TracingHandle {
         ds_telemetry::otel_layer::OtelClientInfo {
             client_name: "ds-pager",
             client_version: ds_version::VERSION,
-            service_version: env!("VERSION_WITH_COMMIT"),
+            service_version: ds_version::VERSION_WITH_COMMIT,
             app_entrypoint: "tui",
         },
         ds_shell::auth::credential_provider::build_default_otel_layer_config(),
@@ -445,7 +445,7 @@ pub fn init_tracing() -> TracingHandle {
     ds_telemetry::external::init(
         ds_shell::agent::config::resolve_external_otel_config(
             ds_telemetry::external::config::ExternalClientInfo {
-                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
+                service_version: ds_version::VERSION_WITH_COMMIT.to_owned(),
                 client_version: ds_version::VERSION.to_owned(),
                 app_entrypoint: "tui".to_owned(),
             },

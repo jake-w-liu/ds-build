@@ -23,8 +23,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 VERSION_FILE1="crates/codegen/ds-version/Cargo.toml"
 VERSION_FILE2="crates/codegen/ds-pager-bin/Cargo.toml"
-# ds-pager owns clap `ds --version` via its build.rs VERSION_WITH_COMMIT;
-# keep it lockstepped with ds-version (cli.rs also prefers ds_version::VERSION).
+# Keep package versions lockstepped; CLI display always reads ds_version.
 VERSION_FILE3="crates/codegen/ds-pager/Cargo.toml"
 INSTALL_PATH="$HOME/.local/bin/ds"
 INSTALL_PATH_ALT="$HOME/.ds/bin/ds"

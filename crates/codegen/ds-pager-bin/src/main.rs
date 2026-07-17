@@ -131,7 +131,7 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
             ds_telemetry::otel_layer::OtelClientInfo {
                 client_name: "ds-pager",
                 client_version: ds_version::VERSION,
-                service_version: env!("VERSION_WITH_COMMIT"),
+                service_version: ds_version::VERSION_WITH_COMMIT,
                 app_entrypoint,
             },
             ds_shell::auth::credential_provider::build_default_otel_layer_config(),
@@ -140,7 +140,7 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
     ds_telemetry::external::init(
         ds_shell::agent::config::resolve_external_otel_config(
             ds_telemetry::external::config::ExternalClientInfo {
-                service_version: env!("VERSION_WITH_COMMIT").to_owned(),
+                service_version: ds_version::VERSION_WITH_COMMIT.to_owned(),
                 client_version: ds_version::VERSION.to_owned(),
                 app_entrypoint: app_entrypoint.to_owned(),
             },
@@ -879,10 +879,7 @@ async fn run_agent_command(
     if !is_stdio && !is_leader {
         eprintln!(
             "DS Build (pager) - v{}",
-            ds_version::display_version_with_commit(
-                env!("VERSION_WITH_COMMIT"),
-                ds_update::channel_label(),
-            )
+            ds_version::display_cli_version(ds_update::channel_label())
         );
         if should_check_for_updates(no_auto_update) {
             auto_update::run_update_if_available(
@@ -1483,7 +1480,7 @@ fn main() {
     let _sentry_guard = ds_telemetry::sentry::init(ds_telemetry::sentry::Config {
         client: "ds-pager",
         client_version: PAGER_CLIENT_VERSION,
-        release: env!("VERSION_WITH_COMMIT"),
+        release: ds_version::VERSION_WITH_COMMIT,
         disabled: ds_shell::agent::config::is_error_reporting_disabled_sync(),
     });
     ds_pager::docs::extract_user_guide_docs(&ds_shell::util::ds_home::ds_home());
@@ -1498,7 +1495,7 @@ fn main() {
             eprintln!();
         }
         if !ds_crash_handler::install(ds_crash_handler::CrashHandlerConfig {
-            app_version: env!("VERSION_WITH_COMMIT").to_string(),
+            app_version: ds_version::VERSION_WITH_COMMIT.to_string(),
             crash_dir: crash_dir.clone(),
         }) {
             eprintln!(
@@ -1599,17 +1596,14 @@ async fn async_main() -> Result<()> {
             Command::Version { json } => {
                 if json {
                     let payload = serde_json::json!(
-                        { "currentVersion" : env!("VERSION_WITH_COMMIT"), "channel" :
+                        { "currentVersion" : ds_version::VERSION_WITH_COMMIT, "channel" :
                         ds_update::channel_name().unwrap_or("unknown"), }
                     );
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
                     println!(
                         "ds {}",
-                        ds_version::display_version_with_commit(
-                            env!("VERSION_WITH_COMMIT"),
-                            ds_update::channel_label(),
-                        )
+                        ds_version::display_cli_version(ds_update::channel_label())
                     );
                 }
                 return Ok(());
