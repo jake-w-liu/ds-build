@@ -15,6 +15,32 @@ const DEEP_DEBUG_SKILL_MD: &str = include_str!("../skills/deep-debug/SKILL.md");
 const SILENCE_SKILL_MD: &str = include_str!("../skills/silence/SKILL.md");
 const FABLE_SKILL_MD: &str = include_str!("../skills/fable/SKILL.md");
 const FABLE_LOOP_SKILL_MD: &str = include_str!("../skills/fable-loop/SKILL.md");
+const PSST_GPT_SKILL_MD: &str = include_str!("../skills/psst-gpt/SKILL.md");
+
+/// Extra files shipped beside a skill's SKILL.md (e.g. scripts).
+/// Path is relative to `skills/<name>/`.
+const BUNDLED_SKILL_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "psst-gpt",
+        "scripts/psst_chat_relay.swift",
+        include_str!("../skills/psst-gpt/scripts/psst_chat_relay.swift"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/psst_gpt.mjs",
+        include_str!("../skills/psst-gpt/scripts/psst_gpt.mjs"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/psst_ax_upload.swift",
+        include_str!("../skills/psst-gpt/scripts/psst_ax_upload.swift"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/psst_zip_upload.swift",
+        include_str!("../skills/psst-gpt/scripts/psst_zip_upload.swift"),
+    ),
+];
 
 /// Legacy bundled skill names (renamed or removed).
 ///
@@ -66,6 +92,7 @@ const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("silence", SILENCE_SKILL_MD),
     ("fable", FABLE_SKILL_MD),
     ("fable-loop", FABLE_LOOP_SKILL_MD),
+    ("psst-gpt", PSST_GPT_SKILL_MD),
 ];
 
 /// True when a discovered skill is the copy `extract_bundled_files` wrote to
@@ -146,6 +173,7 @@ pub fn extract_bundled_files(ds_home: &std::path::Path) {
             tracing::debug!(error = %e, name, "Failed to write skill");
         }
     }
+    extract_skill_assets(ds_home);
 
     let _ = std::fs::write(&marker, version);
     tracing::debug!(version, "Extracted bundled files");
@@ -170,6 +198,28 @@ fn extract_missing_skills(ds_home: &std::path::Path) {
         let _ = std::fs::create_dir_all(skill_md.parent().unwrap());
         if let Err(e) = std::fs::write(&skill_md, &content) {
             tracing::debug!(error = %e, name, "Failed to write/refresh skill");
+        }
+    }
+    extract_skill_assets(ds_home);
+}
+
+/// Write skill-adjacent assets (scripts, helpers) under `skills/<name>/…`.
+/// Refreshes when on-disk content differs so script fixes ship without a
+/// full version-marker bump.
+fn extract_skill_assets(ds_home: &std::path::Path) {
+    for &(skill, rel, content) in BUNDLED_SKILL_ASSETS {
+        let path = ds_home.join("skills").join(skill).join(rel);
+        if path.exists()
+            && let Ok(existing) = std::fs::read_to_string(&path)
+            && existing == content
+        {
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, content) {
+            tracing::debug!(error = %e, skill, rel, "Failed to write skill asset");
         }
     }
 }
