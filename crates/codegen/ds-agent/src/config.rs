@@ -412,6 +412,7 @@ fn ds_build_plan_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&ds_build::UpdateGoalTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
             (&ds_build::EnterPlanModeTool).into(),
             (&ds_build::ExitPlanModeTool).into(),
             (&ds_build::AskUserQuestionTool).into(),
