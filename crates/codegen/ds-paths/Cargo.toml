@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "ds-paths"
-version = "0.1.6"
+version = "0.1.7"
 description = "Type-safe path wrappers for absolute and relative UTF-8 paths"
 
 [dependencies]
