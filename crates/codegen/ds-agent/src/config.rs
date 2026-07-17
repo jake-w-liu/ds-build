@@ -1676,6 +1676,43 @@ mod tests {
         assert!(explore.tools.len() < plan.tools.len());
         assert!(plan.tools.len() < gb.tools.len());
     }
+
+    /// Regression: Headroom compresses large tool results process-wide when
+    /// enabled; any preset whose tools can produce large output must also
+    /// expose `headroom_retrieve` (exactly once — no duplicate registrations).
+    #[test]
+    fn headroom_retrieve_present_once_on_presets_with_large_output_tools() {
+        let headroom_id = ToolConfig::from(&ds_build::HeadroomRetrieveTool).id;
+        // Presets that can emit large tool results under Headroom.
+        for name in [
+            "ds-build",
+            "ds-build-concise",
+            "ds-build-plan",
+            "codex",
+            "explore",
+            "plan",
+            "ds-computer",
+        ] {
+            let ts = toolset_for_preset(name).unwrap_or_else(|| panic!("missing preset {name}"));
+            let count = ts
+                .tools
+                .iter()
+                .filter(|t| t.id == headroom_id)
+                .count();
+            assert_eq!(
+                count, 1,
+                "preset `{name}` must register headroom_retrieve exactly once (got {count})"
+            );
+        }
+        // Workspace builder inherits default_ds_build then adds tools — must not
+        // double-register HeadroomRetrieveTool.
+        let ws = workspace_ds_build_toolset();
+        let ws_count = ws.tools.iter().filter(|t| t.id == headroom_id).count();
+        assert_eq!(
+            ws_count, 1,
+            "workspace_ds_build_toolset must not duplicate headroom_retrieve (got {ws_count})"
+        );
+    }
     fn ds_computer_exclusive_ids() -> Vec<String> {
         #[allow(unused_mut)]
         let mut ids: Vec<String> = vec![
