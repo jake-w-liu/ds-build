@@ -49,7 +49,10 @@ final class WakeHold {
   }
 
   func stop() {
-    guard let p = process else { return }
+    guard let p = process else {
+      caffeinatePid = nil
+      return
+    }
     if p.isRunning {
       p.terminate()
       let deadline = Date().addingTimeInterval(1.0)
@@ -59,6 +62,10 @@ final class WakeHold {
     log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?")")
     process = nil
     caffeinatePid = nil
+  }
+
+  deinit {
+    if let p = process, p.isRunning { p.terminate() }
   }
 }
 
@@ -393,6 +400,14 @@ func finishSuccess(_ text: String) -> Never {
   if let oldString { pb.setString(oldString, forType: .string) }
   let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
   try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
+  // Stage under project early so a concurrent DS reader can reverify mid-flight
+  _ = stageResultForDs([
+    "ok": true,
+    "status": "complete",
+    "finalDeliveryText": text,
+    "attached": true,
+    "zipPath": zipPath as Any,
+  ], responseText: text)
   emit([
     "ok": true,
     "status": "complete",
@@ -407,6 +422,8 @@ func finishSuccess(_ text: String) -> Never {
     "mustReturnVerbatim": true,
     "method": "clipboard-file-paste",
     "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
+    "wakeHoldPid": wakePid as Any,
+    "responseChars": text.count,
   ])
 }
 
@@ -414,21 +431,29 @@ var stable = 0
 var lastSig = ""
 var best = ""
 var sawGrowth = false
+var tick = 0
+let waitStarted = Date()
 let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
+log("wait-loop start timeoutSec=\(timeoutSec) (0=indefinite) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
 while deadline == nil || Date() < deadline! {
   Thread.sleep(forTimeInterval: 2.5)
+  tick += 1
+  let elapsed = Int(Date().timeIntervalSince(waitStarted))
   if isScreenLocked() {
     emit([
       "ok": false,
       "code": "PSST_GPT_SCREEN_LOCKED",
       "message": "Screen locked during wait. Unlock and re-run; attachment may still be in ChatGPT.",
       "partial": best,
+      "partialChars": best.count,
       "attached": attached,
+      "elapsedSec": elapsed,
+      "wakeHoldPid": wakePid as Any,
     ], exitCode: 30)
   }
   if let work = bfsFirst(root, pred: { el, r in r.contains("Check") && s(el, kAXTitleAttribute as String) == "Work" }),
      s(work, kAXValueAttribute as String) == "1" {
-    emit(["ok": false, "code": "WORK_FLIP", "attached": attached], exitCode: 20)
+    emit(["ok": false, "code": "WORK_FLIP", "attached": attached, "wakeHoldPid": wakePid as Any], exitCode: 20)
   }
   let texts = allStaticTexts()
 
@@ -436,7 +461,7 @@ while deadline == nil || Date() < deadline! {
     let hits = texts.filter {
       $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
     }
-    log("tick tokenHits=\(hits.count)")
+    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       if a == best { stable += 1 } else { stable = 0; best = a }
       if stable >= 2 { finishSuccess(best) }
@@ -453,15 +478,27 @@ while deadline == nil || Date() < deadline! {
     return true
   }
   let assistant = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  log("tick novel=\(filtered.count) chars=\(assistant.count) sawGrowth=\(sawGrowth)")
+  log("tick=\(tick) elapsed=\(elapsed)s novel=\(filtered.count) chars=\(assistant.count) best=\(best.count) stable=\(stable) sawGrowth=\(sawGrowth)")
+  // Stage partial progress so DS can observe wait (non-final)
+  if tick % 4 == 0, best.count > 0 {
+    _ = stageResultForDs([
+      "ok": false,
+      "status": "waiting",
+      "partialChars": best.count,
+      "elapsedSec": elapsed,
+      "attached": attached,
+    ], responseText: best)
+  }
   // Immediate accept: clear Chat/Work refusal or substantive short reply
   let lower = assistant.lowercased()
-  if assistant.count >= 30 && (
+  let looksComplete = assistant.count >= 30 && (
     lower.contains("work mode") || lower.contains("continue with work") ||
     lower.contains("cannot") || lower.contains("can't open") ||
     lower.contains("unable to") || lower.contains("out of") ||
-    lower.contains("risk") || lower.contains("finding") || lower.contains("##")
-  ) && stable >= 2 {
+    lower.contains("risk") || lower.contains("finding") || lower.contains("##") ||
+    lower.contains("severity") || lower.contains("recommend") || lower.contains("severity")
+  )
+  if looksComplete && stable >= 2 {
     if assistant == best || assistant.count >= best.count {
       finishSuccess(assistant.count >= best.count ? assistant : best)
     }
@@ -482,7 +519,11 @@ while deadline == nil || Date() < deadline! {
     lastSig = sig
     stable = sawGrowth ? 1 : 0
   } else {
-    stable = 0
+    // Do not reset stable to 0 when assistant temporarily shrinks (AX flicker);
+    // only reset if empty / much smaller.
+    if assistant.isEmpty || assistant.count + 80 < best.count {
+      stable = 0
+    }
     lastSig = sig
   }
   // Long audits: require growth then stability; min body length 40 (captures Work-nudge)
@@ -493,6 +534,11 @@ while deadline == nil || Date() < deadline! {
   if stable >= 4 && best.count > 30 {
     finishSuccess(best)
   }
+  // Keyword-complete body that stabilized once (stable path lag)
+  if looksComplete && stable >= 1 && best.count >= 40 && assistant.count >= best.count {
+    // Need one more stable tick next loop unless already high
+    if stable >= 2 { finishSuccess(best) }
+  }
 }
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
@@ -500,4 +546,12 @@ if best.count > 30 {
   // Prefer any non-empty complete-looking body over hard fail after long wait
   finishSuccess(best)
 }
-emit(["ok": false, "code": "TIMEOUT", "attached": attached, "partial": best, "partialChars": best.count], exitCode: 1)
+emit([
+  "ok": false,
+  "code": "TIMEOUT",
+  "attached": attached,
+  "partial": best,
+  "partialChars": best.count,
+  "elapsedSec": Int(Date().timeIntervalSince(waitStarted)),
+  "wakeHoldPid": wakePid as Any,
+], exitCode: 1)

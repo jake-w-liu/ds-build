@@ -54,9 +54,12 @@ final class WakeHold {
     #endif
   }
 
-  /// Explicit stop (also safe if already exited via -w).
+  /// Explicit stop (also safe if already exited via -w). Always clears state.
   func stop() {
-    guard let p = process else { return }
+    guard let p = process else {
+      caffeinatePid = nil
+      return
+    }
     if p.isRunning {
       p.terminate()
       // brief reap
@@ -69,6 +72,14 @@ final class WakeHold {
     log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?")")
     process = nil
     caffeinatePid = nil
+  }
+
+  deinit {
+    // Best-effort: if helper exits without emit/defer, Process -w still ends
+    // caffeinate when our PID dies; terminate child eagerly if still running.
+    if let p = process, p.isRunning {
+      p.terminate()
+    }
   }
 }
 
