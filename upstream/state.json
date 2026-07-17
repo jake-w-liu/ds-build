@@ -1,0 +1,11 @@
+{
+  "upstream_remote": "upstream",
+  "upstream_url": "https://github.com/xai-org/grok-build.git",
+  "upstream_branch": "main",
+  "last_reviewed_sha": null,
+  "last_reviewed_at": null,
+  "last_ported_sha": null,
+  "last_ported_at": null,
+  "policy": "selective-port",
+  "notes": "ds-build has independent git history (rebrand of Grok Build). Never git merge/rebase upstream. Always: fetch → review → classify → port mapped changes → mark-reviewed."
+}
