@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-tracing-macros"
-version = "0.1.7"
+version = "0.1.8"
 edition.workspace = true
 description = "Tracing-based utility macros for timestamped logging and timing"
 
