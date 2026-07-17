@@ -1094,4 +1094,83 @@ mod tests {
         let mut stats = CompressionStats::default();
         assert!(maybe_compress_content(&body, None, &mut stats).is_none());
     }
+
+    /// Regression: turning compression off must not brick retrieve for
+    /// already-stored originals (markers may still be in the transcript).
+    #[test]
+    fn retrieve_works_after_compression_disabled() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        let big = big_lines(100, Some((50, "NEEDLE_AFTER_OFF")));
+        let (_, hash, _) = compress_and_hash(&big);
+        set_enabled(false);
+        assert!(!is_enabled());
+        assert!(
+            maybe_compress_content(&"y".repeat(5000), None, &mut CompressionStats::default())
+                .is_none(),
+            "must not compress while disabled"
+        );
+        let entry = retrieve(&hash).expect("store must keep entry after disable");
+        assert_eq!(entry.content, big);
+        let formatted = retrieve_formatted(
+            &hash,
+            &RetrieveOptions {
+                query: Some("NEEDLE_AFTER_OFF".into()),
+                ..Default::default()
+            },
+        )
+        .expect("formatted retrieve after disable");
+        assert!(formatted.contains("NEEDLE_AFTER_OFF"));
+    }
+
+    /// max_segments-style scan: failures must not consume the success budget.
+    #[test]
+    fn failed_compress_does_not_block_later_success() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(50);
+        set_keep_lines_override(4);
+        // Tiny payloads skip before attempt (below min) — then a large one compresses.
+        let mut stats = CompressionStats::default();
+        assert!(maybe_compress_content("short", None, &mut stats).is_none());
+        assert_eq!(stats.attempted_segments, 0);
+        let big = big_lines(80, None);
+        assert!(maybe_compress_content(&big, None, &mut stats).is_some());
+        assert_eq!(stats.compressed_segments, 1);
+    }
+
+    /// Keep-lines edge: keep=1 (tail_count=0) must not panic and must still
+    /// compress when the body is large enough for the marker to win.
+    #[test]
+    fn keep_one_line_preview_does_not_panic() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_keep_lines_override(1);
+        set_min_chars_override(20);
+        let text = (0..80)
+            .map(|i| format!("line{i} {}", "abcdefghij".repeat(8)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut stats = CompressionStats::default();
+        // Must not panic on empty-tail path; prefer successful compress when body is fat.
+        let out = maybe_compress_content(&text, None, &mut stats);
+        if let Some(out) = out {
+            assert!(out.contains("<headroom_compressed"));
+            assert!(stats.tokens_saved > 0);
+        } else {
+            // Still acceptable: estimator may reject if summary not smaller.
+            assert!(stats.failed_segments >= 1 || stats.attempted_segments >= 1);
+        }
+    }
+
+    /// Empty / whitespace-only bodies must not compress or panic.
+    #[test]
+    fn whitespace_only_does_not_compress() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        enable();
+        set_min_chars_override(5);
+        let mut stats = CompressionStats::default();
+        assert!(maybe_compress_content("   \n\n\t  ", None, &mut stats).is_none());
+        assert!(maybe_compress_content("", None, &mut stats).is_none());
+    }
 }

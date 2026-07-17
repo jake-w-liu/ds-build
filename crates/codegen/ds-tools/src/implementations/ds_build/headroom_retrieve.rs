@@ -90,11 +90,9 @@ impl ds_tool_runtime::Tool for HeadroomRetrieveTool {
         _ctx: ds_tool_runtime::ToolCallContext,
         input: HeadroomRetrieveInput,
     ) -> Result<ToolOutput, ds_tool_runtime::ToolError> {
-        if !ds_headroom::is_enabled() {
-            return Ok(ToolOutput::Text(
-                "Headroom is disabled. Enable with `/headroom on` or DS_HEADROOM=1.".into(),
-            ));
-        }
+        // Retrieve is allowed even when compression is currently off: markers may
+        // still point at store entries from earlier in the process. Compression
+        // alone is gated by `is_enabled` / DS_HEADROOM.
         let opts = ds_headroom::RetrieveOptions {
             query: input.query,
             max_chars: input.max_chars.map(|n| n as usize),
@@ -111,14 +109,24 @@ impl ds_tool_runtime::Tool for HeadroomRetrieveTool {
                 )
                 .into(),
             )),
-            Err(ds_headroom::RetrieveError::NotFound) => Ok(ToolOutput::Text(
-                format!(
-                    "No Headroom content found for hash '{}' in this process. \
-                     The original may have been evicted from the store or Headroom was off when the content was compressed.",
-                    input.hash.trim()
-                )
-                .into(),
-            )),
+            Err(ds_headroom::RetrieveError::NotFound) => {
+                let hint = if ds_headroom::is_enabled() {
+                    "The original may have been evicted from the store, or was never compressed."
+                        .to_string()
+                } else {
+                    "Headroom compression is currently off (store may still hold older entries). \
+                     The original may have been evicted, or was never compressed. \
+                     Enable with `/headroom on` or DS_HEADROOM=1 to compress new results."
+                        .to_string()
+                };
+                Ok(ToolOutput::Text(
+                    format!(
+                        "No Headroom content found for hash '{}' in this process. {hint}",
+                        input.hash.trim()
+                    )
+                    .into(),
+                ))
+            }
         }
     }
 }

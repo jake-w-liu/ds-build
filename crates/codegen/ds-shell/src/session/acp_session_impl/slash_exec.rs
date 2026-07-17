@@ -107,7 +107,9 @@ impl SessionActor {
                     HeadroomMode::Help => {
                         "Usage: /headroom [on|off|status|stats]\n\n\
                          Run /headroom with no arguments (or `on`) to enable built-in Headroom for this process.\n\
-                         Large tool results are previewed in prompts; use `headroom_retrieve` with the hash for exact content."
+                         Large tool results are previewed in prompts; use `headroom_retrieve` with the hash for exact content.\n\
+                         Prefer headroom_retrieve query=\"...\" for middle lines (avoids reloading the full body).\n\
+                         Retrieve still works after /headroom off for entries already in the process store."
                             .to_string()
                     }
                 };
