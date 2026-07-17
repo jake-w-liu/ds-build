@@ -43,8 +43,9 @@ is your DeepSeek (or other BYOK) API calls.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
-**→ Upstream fixes:** run **`/upstream-sync`** in the agent (fetch → triage →
-port verified items → build/test). Never blind-merge `xai-org/grok-build`.
+**→ Upstream fixes:** run **`/upstream-sync`** (fetch → triage → port →
+verify → mark reviewed → **`./bump-and-install.sh`** patch bump, push main,
+rebuild dual install). Never blind-merge `xai-org/grok-build`.
 
 [Example config](config.example.toml) ·
 [User guide](crates/codegen/ds-pager/docs/user-guide/) ·

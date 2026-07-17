@@ -2,8 +2,9 @@
 name: upstream-sync
 description: >
   Full upstream port cycle for xai-org/grok-build into DS Build: fetch, triage,
-  implement every verified item, verify correctness (build/tests), mark
-  reviewed. Use for /upstream-sync, upstream, grok-build update, port from grok.
+  implement every verified item, verify correctness, mark reviewed, patch-bump,
+  push main, release-rebuild dual install. Use for /upstream-sync, upstream,
+  grok-build update, port from grok.
 ---
 
 # /upstream-sync — implement verified upstream fixes
@@ -19,12 +20,17 @@ review doc**. Run the full cycle:
    `PORT-REVIEW` when clearly relevant to DS)  
 4. **Check correctness** — build and targeted tests; fix regressions before
    claiming done  
-5. **Mark reviewed** so the next run only sees newer upstream commits  
-6. **Report** a short table of ported / skipped / deferred + verification
-   evidence  
+5. **Commit ports** (if any) and **mark reviewed** so the next run only sees
+   newer upstream commits  
+6. **If anything was ported** (or the user asked to ship): **patch-bump,
+   push `main`, release-rebuild and dual-install** via
+   `./bump-and-install.sh` so installed `ds` matches the new tip  
+7. **Report** ported / skipped / deferred + verification + new version /
+   `ds --version`  
 
 Ephemeral reviews and cursors live under **`~/.ds/upstream-sync/`** (not in
-git). The only in-repo surface is this skill + `scripts/upstream-sync.sh`.
+git). In-repo surface: this skill, `scripts/upstream-sync.sh`,
+`./bump-and-install.sh`.
 
 ## Hard rules
 
@@ -104,6 +110,32 @@ invariants, authz.
   --note "one-line summary"
 ```
 
+### Ship: bump + push + rebuild (required when ports landed)
+
+When **at least one item was ported**, after ports are committed and the
+tree is clean (except intentional untracked files), run the product ship
+path so crates, lockfile, remote, and both install paths stay lockstepped:
+
+```bash
+# Working tree must be clean of tracked changes (bump script enforces this).
+./bump-and-install.sh
+```
+
+That script:
+
+1. Bumps the product **patch** on every first-party crate  
+2. Release-builds with `DS_VERSION`  
+3. Commits `chore: bump to vX.Y.Z` and **pushes `origin/main`**  
+4. Rebuilds so the baked git SHA matches the bump commit  
+5. Installs `~/.local/bin/ds` and `~/.ds/bin/ds` (codesign on macOS)  
+6. Verifies crate versions + both binaries report the new version  
+
+If **zero** items were ported (review-only / all skip), do **not** bump
+unless the user explicitly asks.
+
+Do **not** hand-edit a few `Cargo.toml` versions — always use
+`./bump-and-install.sh` so nothing drifts.
+
 ## User-facing report (required)
 
 | Upstream SHA | … |
@@ -111,6 +143,8 @@ invariants, authz.
 | Skipped | item → reason |
 | Deferred | item → reason |
 | Verification | commands run + pass/fail |
+| Ship | bump commit / version / `ds --version` (or “no bump — nothing ported”) |
 
 Do not claim “everything is up to date” unless `status` shows no pending
-commits after `mark-reviewed`, and verification passed.
+commits after `mark-reviewed`, verification passed, and (when ports
+landed) bump + dual install succeeded.
