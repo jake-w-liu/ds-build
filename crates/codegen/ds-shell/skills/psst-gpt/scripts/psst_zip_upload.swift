@@ -156,14 +156,29 @@ func zipRoot(_ root: String) throws -> String {
   let outDir = fm.temporaryDirectory.appendingPathComponent("psst-gpt-zip-\(UUID().uuidString)", isDirectory: true)
   try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
   let zipPath = outDir.appendingPathComponent("source-archive.zip").path
+  // Exclude build/cache/VCS noise so "full codebase" audits stay attachable.
+  let excludes = [
+    "target/*", "*/target/*",
+    ".git/*",
+    "node_modules/*", "*/node_modules/*",
+    ".ds/sessions/*", ".ds/cache/*",
+    "*.o", "*.a", "*.rlib", "*.dylib", "*.so",
+    ".lyceum-trash/*",
+  ]
+  var args = ["-qr", zipPath, ".", "-x"]
+  args.append(contentsOf: excludes)
   let proc = Process()
   proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
-  proc.arguments = ["-qr", zipPath, "."]
+  proc.arguments = args
   proc.currentDirectoryURL = URL(fileURLWithPath: root)
   try proc.run()
   proc.waitUntilExit()
   guard proc.terminationStatus == 0, fm.fileExists(atPath: zipPath) else {
     throw NSError(domain: "psst", code: 1, userInfo: [NSLocalizedDescriptionKey: "zip failed"])
+  }
+  if let attrs = try? fm.attributesOfItem(atPath: zipPath),
+     let size = attrs[.size] as? NSNumber {
+    log("zip size bytes=\(size.intValue) path=\(zipPath)")
   }
   return zipPath
 }
