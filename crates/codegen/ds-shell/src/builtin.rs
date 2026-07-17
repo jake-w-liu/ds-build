@@ -40,6 +40,11 @@ const BUNDLED_SKILL_ASSETS: &[(&str, &str, &str)] = &[
         "scripts/psst_zip_upload.swift",
         include_str!("../skills/psst-gpt/scripts/psst_zip_upload.swift"),
     ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_wake.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_wake.sh"),
+    ),
 ];
 
 /// Legacy bundled skill names (renamed or removed).
