@@ -189,6 +189,7 @@ var rootPath: String?
 // 0 = wait indefinitely (heavy audits). Default 0 for long zip audits.
 var timeoutSec: Double = 0
 var newChat = true
+var packOnly = false
 var promptParts: [String] = []
 var args = Array(CommandLine.arguments.dropFirst())
 var i = 0
@@ -203,11 +204,36 @@ while i < args.count {
     continue
   }
   if a == "--no-new-chat" { newChat = false; i += 1; continue }
+  if a == "--pack-only" { packOnly = true; i += 1; continue }
   if a == "--" { promptParts.append(contentsOf: args[(i + 1)...]); break }
   if a.hasPrefix("-") { emit(["ok": false, "code": "BAD_ARGS", "message": "Unknown \(a)"], exitCode: 2) }
   promptParts.append(a); i += 1
 }
 let prompt = promptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+// --pack-only only needs a root (no ChatGPT / no prompt)
+if packOnly {
+  let wakePid = WakeHold.shared.start()
+  defer { WakeHold.shared.stop() }
+  guard let rootPath else {
+    emit(["ok": false, "code": "BAD_ARGS", "message": "--pack-only requires --root"], exitCode: 2)
+  }
+  do {
+    let path = try zipRoot(rootPath)
+    let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.intValue ?? -1
+    // Ensure excludes worked: refuse absurd sizes (> 200MB) as packaging failure for audits
+    let okSize = size > 0 && size < 200 * 1024 * 1024
+    emit([
+      "ok": okSize,
+      "status": "pack-only",
+      "zipPath": path,
+      "bytes": size,
+      "wakeHoldPid": wakePid as Any,
+      "excludesTargetGit": true,
+    ], exitCode: okSize ? 0 : 1)
+  } catch {
+    emit(["ok": false, "code": "ZIP_FAILED", "message": "\(error)"], exitCode: 3)
+  }
+}
 guard !prompt.isEmpty else {
   emit(["ok": false, "code": "EMPTY_PROMPT", "message": "Usage: --zip file.zip -- \"prompt\" | --root dir -- \"prompt\""], exitCode: 2)
 }
