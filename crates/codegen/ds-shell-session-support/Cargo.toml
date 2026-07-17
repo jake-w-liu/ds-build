@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-shell-session-support"
-version = "0.1.0"
+version = "0.1.3"
 edition.workspace = true
 description = "Session-support modules for the ds shell crate family: managed MCP credential/catalog caching and file-access tracking."
 

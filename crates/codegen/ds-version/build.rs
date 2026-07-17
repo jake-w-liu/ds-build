@@ -27,6 +27,9 @@ fn main() {
         .or_else(|_| std::env::var("CARGO_PKG_VERSION"))
         .unwrap_or_else(|_| "0.0.0".to_string());
 
+    // Emit all three so option_env!/env! in lib.rs never depend on rustc
+    // seeing the shell env — only cargo:rustc-env is guaranteed.
+    println!("cargo:rustc-env=DS_VERSION={version}");
     println!("cargo:rustc-env=DS_GIT_COMMIT={commit}");
     // Full string used by every CLI path — single compile-time source.
     println!("cargo:rustc-env=DS_VERSION_WITH_COMMIT={version} ({commit})");

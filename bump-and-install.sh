@@ -50,17 +50,31 @@ set_toml_version() {
     local ver="$2"
     local tmp
     tmp="$(mktemp)"
-    # Only rewrite the package version line (first version = "..." at BOL).
-    # Do not touch dependency version = "..." lines (they are indented or after [dependencies]).
-    awk -v ver="$ver" '
-        BEGIN { done = 0 }
-        !done && /^version[[:space:]]*=[[:space:]]*"/ {
-            print "version = \"" ver "\""
-            done = 1
-            next
-        }
-        { print }
-    ' "$f" > "$tmp"
+    if grep -qE '^version[[:space:]]*=' "$f"; then
+        # Only rewrite the package version line (first version = "..." at BOL).
+        # Do not touch dependency version = "..." lines.
+        awk -v ver="$ver" '
+            BEGIN { done = 0 }
+            !done && /^version[[:space:]]*=[[:space:]]*"/ {
+                print "version = \"" ver "\""
+                done = 1
+                next
+            }
+            { print }
+        ' "$f" > "$tmp"
+    else
+        # Package has no version field (rare path-only crates): insert after name=.
+        awk -v ver="$ver" '
+            BEGIN { done = 0 }
+            !done && /^name[[:space:]]*=/ {
+                print
+                print "version = \"" ver "\""
+                done = 1
+                next
+            }
+            { print }
+        ' "$f" > "$tmp"
+    fi
     mv "$tmp" "$f"
 }
 
@@ -96,10 +110,12 @@ What it does:
   3. Idempotent if HEAD is already "chore: bump to v*".
   4. Bumps patch and writes the same version into EVERY first-party
      ds-* (and ptyctl) Cargo.toml under crates/ and prod/.
-  5. Release-builds with DS_VERSION set (refreshes ds-version git bake).
-  6. Commits all version tomls + Cargo.lock; pushes origin/main.
-  7. Installs to ~/.local/bin/ds and ~/.ds/bin/ds (codesigned on macOS).
-  8. Verifies:
+  5. Release-builds with DS_VERSION set (refreshes Cargo.lock + version bake).
+  6. Commits all version tomls + Cargo.lock (+ bump script if dirty).
+  7. Rebuilds again so the baked git SHA matches the bump commit.
+  8. Pushes origin/main; installs to ~/.local/bin/ds and ~/.ds/bin/ds
+     (codesigned on macOS).
+  9. Verifies:
        - every product Cargo.toml reports the new version
        - both install paths exist and match each other (post-codesign)
        - `ds --version` and `ds version --json` both contain the new version
@@ -184,7 +200,7 @@ for f in "${PRODUCT_TOMLS[@]}"; do
     fi
 done
 
-# ── force a clean version bake (commit hash + semver) ──────────────────────
+# ── first release build (refreshes Cargo.lock under the new versions) ─────
 
 info "Forcing ds-version rebuild so git SHA is current ..."
 # Ensure build.rs re-runs even if sources look unchanged.
@@ -202,13 +218,25 @@ git add Cargo.lock
 for f in "${PRODUCT_TOMLS[@]}"; do
     git add "$f"
 done
+# Include the bump script itself when it changed (so tooling ships with the bump).
+if [[ -f bump-and-install.sh ]] && ! git diff --quiet -- bump-and-install.sh 2>/dev/null; then
+    git add bump-and-install.sh
+fi
 
-# Also stage bump script itself if it changed in a prior WIP — not usually.
 if ! git diff --cached --quiet; then
     git commit -m "chore: bump to v$new_version"
 else
     die "nothing staged after version bump — unexpected"
 fi
+
+# ── second bake: installed binary must carry the *bump commit* SHA ─────────
+# The first build ran before the commit, so its baked short-SHA was the parent.
+# Rebuild now so `ds --version` reports the commit users just pulled.
+
+info "Rebuilding ds-pager-bin so version string matches bump commit $(git rev-parse --short HEAD) ..."
+touch crates/codegen/ds-version/build.rs crates/codegen/ds-version/src/lib.rs
+cargo clean -p ds-version 2>/dev/null || true
+DS_VERSION="$new_version" cargo build -p ds-pager-bin --release
 
 info "Pushing to origin/main ..."
 git push origin main
