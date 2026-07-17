@@ -2760,7 +2760,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 
 [[package]]
 name = "ds-acp-lib"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "ds-agent"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -2804,7 +2804,7 @@ dependencies = [
 
 [[package]]
 name = "ds-agent-lifecycle"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "tokio",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "ds-announcements"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "ds-tools",
@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "ds-auth"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "http 1.4.0",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "ds-chat-state"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-compaction",
  "ds-headroom",
@@ -2857,14 +2857,14 @@ dependencies = [
 
 [[package]]
 name = "ds-circuit-breaker"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "ds-cli-proxy-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "serde",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "ds-codebase-graph"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ahash",
  "clap",
@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "ds-compaction"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "ds-computer-hub-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2940,7 +2940,7 @@ dependencies = [
 
 [[package]]
 name = "ds-computer-hub-mcp-adapter"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "ds-computer-hub-sdk",
@@ -2958,7 +2958,7 @@ dependencies = [
 
 [[package]]
 name = "ds-computer-hub-sdk"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "blake3",
@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "ds-announcements",
@@ -3036,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "ds-crash-handler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "backtrace",
  "libc",
@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "ds-env"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "tracing",
  "url",
@@ -3055,7 +3055,7 @@ dependencies = [
 
 [[package]]
 name = "ds-fast-worktree"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3087,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "ds-file-utils"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3130,7 +3130,7 @@ dependencies = [
 
 [[package]]
 name = "ds-fsnotify"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "criterion",
  "ds-tracing-macros",
@@ -3151,7 +3151,7 @@ dependencies = [
 
 [[package]]
 name = "ds-gix-status"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-test-utils",
  "gix",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "ds-headroom"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-token-estimation",
  "serde_json",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "ds-hooks"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-config",
  "ds-tools",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "ds-hooks-plugins-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3198,7 +3198,7 @@ dependencies = [
 
 [[package]]
 name = "ds-http"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-auth",
  "ds-sampler",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "ds-hunk-tracker"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "ds-gix-status",
@@ -3234,14 +3234,14 @@ dependencies = [
 
 [[package]]
 name = "ds-interjection-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ds-markdown"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anstyle",
  "anstyle-lossy",
@@ -3265,14 +3265,14 @@ dependencies = [
 
 [[package]]
 name = "ds-markdown-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "ds-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "async-trait",
@@ -3310,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "ds-memory"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "ds-mermaid"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-tty-utils",
  "fontdb",
@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "ds-mixpanel"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "ds-secrets",
@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "ds-models"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3381,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "ds-pager"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "ds-pager-bin"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -3505,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "ds-pager-minimal"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "crossterm",
@@ -3522,7 +3522,7 @@ dependencies = [
 
 [[package]]
 name = "ds-pager-pty-harness"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "ds-pager-render"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "anstyle",
@@ -3599,7 +3599,7 @@ dependencies = [
 
 [[package]]
 name = "ds-paths"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "camino",
  "serde",
@@ -3609,7 +3609,7 @@ dependencies = [
 
 [[package]]
 name = "ds-plugin-marketplace"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "ds-prompt-queue"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proto-build"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "pbjson-build",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ratatui-inline"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ansi-width",
  "anstyle-parse",
@@ -3666,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ratatui-textarea"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "arboard",
  "chrono",
@@ -3687,7 +3687,7 @@ dependencies = [
 
 [[package]]
 name = "ds-sampler"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-openai",
  "async-stream",
@@ -3710,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "ds-sampling-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "assert_matches",
  "async-openai",
@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "ds-sandbox"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3747,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "ds-secrets"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "regex",
  "serde_json",
@@ -3756,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "ds-shared"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3786,7 +3786,7 @@ dependencies = [
 
 [[package]]
 name = "ds-shell"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3928,7 +3928,7 @@ dependencies = [
 
 [[package]]
 name = "ds-shell-base"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3953,7 +3953,7 @@ dependencies = [
 
 [[package]]
 name = "ds-shell-session-support"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "axum",
@@ -3974,7 +3974,7 @@ dependencies = [
 
 [[package]]
 name = "ds-sqlite-journal"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "rusqlite",
@@ -3985,7 +3985,7 @@ dependencies = [
 
 [[package]]
 name = "ds-subagent-resolution"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-sampling-types",
  "ds-tool-types",
@@ -4000,7 +4000,7 @@ dependencies = [
 
 [[package]]
 name = "ds-system-power"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "windows-sys 0.59.0",
  "zbus",
@@ -4008,7 +4008,7 @@ dependencies = [
 
 [[package]]
 name = "ds-telemetry"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4058,7 +4058,7 @@ dependencies = [
 
 [[package]]
 name = "ds-test-support"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4081,7 +4081,7 @@ dependencies = [
 
 [[package]]
 name = "ds-test-utils"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "runfiles",
  "tracing",
@@ -4090,11 +4090,11 @@ dependencies = [
 
 [[package]]
 name = "ds-token-estimation"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "ds-tool-protocol"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-tool-types",
  "serde",
@@ -4105,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tool-runtime"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4122,7 +4122,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tool-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "minijinja",
  "schemars 1.0.4",
@@ -4132,7 +4132,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4212,7 +4212,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools-api"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-proto-build",
  "ds-tool-protocol",
@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tracing"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4255,11 +4255,11 @@ dependencies = [
 
 [[package]]
 name = "ds-tracing-macros"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "ds-tty-utils"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "nix 0.30.1",
@@ -4269,7 +4269,7 @@ dependencies = [
 
 [[package]]
 name = "ds-update"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "ds-shell",
@@ -4293,14 +4293,14 @@ dependencies = [
 
 [[package]]
 name = "ds-version"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "semver",
 ]
 
 [[package]]
 name = "ds-voice"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "cpal",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "ds-workspace"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "ds-workspace-client"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "ds-computer-hub-sdk",
  "ds-tool-protocol",
@@ -4429,7 +4429,7 @@ dependencies = [
 
 [[package]]
 name = "ds-workspace-types"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64",
  "chrono",
@@ -9596,7 +9596,7 @@ dependencies = [
 
 [[package]]
 name = "ptyctl"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -9614,7 +9614,7 @@ dependencies = [
 
 [[package]]
 name = "ptyctl-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "axum",
