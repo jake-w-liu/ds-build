@@ -187,6 +187,7 @@ pub fn workspace_ds_build_toolset() -> ToolServerConfig {
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
     tools.push((&ds_build::LspTool).into());
+    tools.push((&ds_build::HeadroomRetrieveTool).into());
     ToolServerConfig {
         tools,
         behavior_preset: None,
@@ -280,6 +281,7 @@ fn default_ds_build_toolset() -> ToolServerConfig {
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
             (&ds_build::UpdateGoalTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }

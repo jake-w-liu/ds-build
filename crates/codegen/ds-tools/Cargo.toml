@@ -21,6 +21,7 @@ ds-workspace-types = { path = "../ds-workspace-types" }
 ds-version = { workspace = true }
 ds-interjection-core = { workspace = true }
 ds-token-estimation = { workspace = true }
+ds-headroom = { path = "../ds-headroom" }
 async-lsp = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }

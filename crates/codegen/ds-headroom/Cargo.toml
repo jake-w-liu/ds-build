@@ -1,0 +1,15 @@
+[package]
+license = "Apache-2.0"
+name = "ds-headroom"
+version = "0.1.4"
+edition.workspace = true
+description = "Local Headroom compression store: preview large tool results, retrieve exact originals."
+
+[dependencies]
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+ds-token-estimation = { workspace = true }
+
+[lints]
+workspace = true

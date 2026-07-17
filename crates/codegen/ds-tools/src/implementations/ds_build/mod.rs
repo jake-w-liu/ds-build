@@ -15,6 +15,7 @@ pub mod deploy_app;
 pub mod enter_plan_mode;
 pub mod exit_plan_mode;
 pub mod grep;
+pub mod headroom_retrieve;
 pub mod image_edit;
 pub mod image_gen;
 pub mod kill_task;
@@ -38,6 +39,7 @@ pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
 pub use enter_plan_mode::EnterPlanModeTool;
 pub use exit_plan_mode::ExitPlanModeTool;
 pub use grep::GrepTool;
+pub use headroom_retrieve::HeadroomRetrieveTool;
 pub use image_edit::{IMAGE_EDIT_TOOL_NAME, ImageEditTool};
 pub use image_gen::{
     IMAGE_GEN_TOOL_NAME, IMAGINE_COMMAND_NAME, ImageGenTool, imagine_instruction,

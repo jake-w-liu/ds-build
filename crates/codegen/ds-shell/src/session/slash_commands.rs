@@ -113,6 +113,33 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         resolve: |_args| BuiltinAction::ContextInfo,
     },
     BuiltinCommand {
+        name: "headroom",
+        description: "Compress large tool results in prompts (token savings); use headroom_retrieve for exact content",
+        argument_hint: Some("on|off|status|stats"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| {
+            let trimmed = args.trim().to_lowercase();
+            match trimmed.as_str() {
+                "" | "on" | "enable" => BuiltinAction::Headroom {
+                    mode: HeadroomMode::On,
+                },
+                "off" | "disable" => BuiltinAction::Headroom {
+                    mode: HeadroomMode::Off,
+                },
+                "status" => BuiltinAction::Headroom {
+                    mode: HeadroomMode::Status,
+                },
+                "stats" => BuiltinAction::Headroom {
+                    mode: HeadroomMode::Stats,
+                },
+                _ => BuiltinAction::Headroom {
+                    mode: HeadroomMode::Help,
+                },
+            }
+        },
+    },
+    BuiltinCommand {
         name: "hooks-trust",
         description: "Trust this project for hook execution",
         argument_hint: None,
@@ -639,6 +666,15 @@ pub(super) enum SlashCommandOutcome {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HeadroomMode {
+    On,
+    Off,
+    Status,
+    Stats,
+    Help,
+}
+
 pub(super) enum BuiltinAction {
     Compact {
         user_context: Option<String>,
@@ -649,6 +685,9 @@ pub(super) enum BuiltinAction {
     FlushMemory,
     Dream,
     ContextInfo,
+    Headroom {
+        mode: HeadroomMode,
+    },
     HooksTrust,
     HooksList,
     HooksAdd {
@@ -704,6 +743,7 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
             BuiltinAction::ContextInfo => "context",
+            BuiltinAction::Headroom { .. } => "headroom",
             BuiltinAction::HooksTrust => "hooks-trust",
             BuiltinAction::HooksList => "hooks-list",
             BuiltinAction::HooksAdd { .. } => "hooks-add",
@@ -736,6 +776,7 @@ impl BuiltinAction {
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
             BuiltinAction::ContextInfo => false,
+            BuiltinAction::Headroom { mode } => !matches!(mode, HeadroomMode::On),
             BuiltinAction::HooksTrust => false,
             BuiltinAction::HooksList => false,
             BuiltinAction::HooksAdd { .. } => true,
@@ -1767,7 +1808,7 @@ mod tests {
             );
         }
         // Always-on commands are still present.
-        for required in ["compact", "always-approve", "context", "session-info"] {
+        for required in ["compact", "always-approve", "context", "headroom", "session-info"] {
             assert!(
                 names.iter().any(|n| n == required),
                 "{required} should be present, got: {names:?}",
@@ -2177,7 +2218,7 @@ mod tests {
                 "{forbidden} must not be advertised under default fail-closed availability, got: {names:?}",
             );
         }
-        for required in ["compact", "always-approve", "context", "session-info"] {
+        for required in ["compact", "always-approve", "context", "headroom", "session-info"] {
             assert!(
                 names.iter().any(|n| n == required),
                 "AlwaysOn {required} must always be advertised, got: {names:?}",

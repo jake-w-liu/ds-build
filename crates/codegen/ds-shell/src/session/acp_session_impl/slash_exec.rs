@@ -80,6 +80,40 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
+            BuiltinAction::Headroom { mode } => {
+                use crate::session::slash_commands::HeadroomMode;
+                let text = match mode {
+                    HeadroomMode::On => {
+                        ds_headroom::set_enabled(true);
+                        "Headroom enabled. Large tool results will be compressed in model prompts; exact originals remain available via the `headroom_retrieve` tool."
+                            .to_string()
+                    }
+                    HeadroomMode::Off => {
+                        ds_headroom::set_enabled(false);
+                        "Headroom disabled.".to_string()
+                    }
+                    HeadroomMode::Status => {
+                        let state = if ds_headroom::is_enabled() {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        };
+                        let (entries, max_e, chars, max_c) = ds_headroom::store_stats();
+                        format!(
+                            "Headroom {state}: built-in local compression, {entries}/{max_e} originals stored ({chars}/{max_c} chars)"
+                        )
+                    }
+                    HeadroomMode::Stats => ds_headroom::format_stats_report(),
+                    HeadroomMode::Help => {
+                        "Usage: /headroom [on|off|status|stats]\n\n\
+                         Run /headroom with no arguments (or `on`) to enable built-in Headroom for this process.\n\
+                         Large tool results are previewed in prompts; use `headroom_retrieve` with the hash for exact content."
+                            .to_string()
+                    }
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::HooksTrust => {
                 let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
                     Ok(root) => {

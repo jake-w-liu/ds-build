@@ -9,6 +9,7 @@ members = [
     "crates/codegen/ds-acp-lib",
     "crates/codegen/ds-agent-lifecycle",
     "crates/codegen/ds-chat-state",
+    "crates/codegen/ds-headroom",
     "crates/codegen/ds-codebase-graph",
     "crates/codegen/ds-crash-handler",
     "crates/codegen/ds-fast-worktree",
@@ -313,6 +314,7 @@ ds-sqlite-journal = { path = "crates/codegen/ds-sqlite-journal" }
 ds-system-power = { path = "crates/codegen/ds-system-power" }
 ds-test-utils = { path = "crates/common/ds-test-utils" }
 ds-token-estimation = { path = "crates/codegen/ds-token-estimation" }
+ds-headroom = { path = "crates/codegen/ds-headroom" }
 ds-tool-protocol = { path = "crates/common/ds-tool-protocol" }
 ds-tool-runtime = { path = "crates/common/ds-tool-runtime" }
 ds-tool-types = { path = "crates/common/ds-tool-types" }

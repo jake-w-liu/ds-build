@@ -671,6 +671,7 @@ impl ToolRegistryBuilder {
         b.register::<ds_build::KillTaskTool>();
         b.register::<ds_build::KillTerminalCommandTool>();
         b.register::<ds_build::TodoWriteTool>();
+        b.register::<ds_build::HeadroomRetrieveTool>();
         b.register::<ds_build::UpdateGoalTool>();
         b.register::<ds_build::TaskOutputTool>();
         b.register::<ds_build::GetTerminalCommandOutputTool>();

@@ -31,6 +31,7 @@ pub mod compaction_utils;
 pub mod conversation_util;
 pub mod events;
 pub mod handle;
+pub mod headroom;
 pub mod persistence;
 pub mod types;
 pub mod usage;

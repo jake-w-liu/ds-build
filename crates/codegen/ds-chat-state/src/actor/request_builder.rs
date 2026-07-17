@@ -47,6 +47,7 @@ impl ChatStateActor {
             self.state.total_tokens,
             self.state.sampling_config.context_window,
         );
+        let headroom_on = crate::headroom::is_enabled();
         let mut memory_reminder = memory_reminder;
         if let Some(reminder) = memory_reminder.as_deref()
             && persist_memory_reminder
@@ -71,7 +72,8 @@ impl ChatStateActor {
         let body_bytes = conversation_body_bytes(&self.state.conversation);
         let inline_images = inline_image_count(&self.state.conversation);
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
-        let needs_mutation = needs_prune || memory_reminder.is_some() || needs_image_compaction;
+        let needs_mutation =
+            needs_prune || memory_reminder.is_some() || needs_image_compaction || headroom_on;
 
         // Only allocate the mutable working copy when a mutation path is taken.
         let mut eviction: Option<ImageEvictionOutcome> = None;
@@ -94,6 +96,19 @@ impl ChatStateActor {
             // Step 2: Prune old tool results if context is > 50% utilized
             if needs_prune {
                 prune_conversation(&mut items, &self.pruning_config);
+            }
+
+            // Step 2b: Headroom — compress large tool results in the request
+            // clone only (actor conversation keeps full originals until prune).
+            if headroom_on {
+                let stats = crate::headroom::compress_tool_results(&mut items);
+                if stats.compressed_segments > 0 {
+                    tracing::debug!(
+                        compressed = stats.compressed_segments,
+                        tokens_saved = stats.tokens_saved,
+                        "headroom applied to conversation request"
+                    );
+                }
             }
 
             // Step 3: Inject memory reminder into the system message

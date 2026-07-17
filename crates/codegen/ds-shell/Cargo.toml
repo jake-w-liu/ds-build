@@ -129,6 +129,7 @@ ds-agent-lifecycle = { workspace = true }
 ds-interjection-core = { workspace = true }
 ds-sandbox = { path = "../ds-sandbox", default-features = false }
 ds-chat-state = { path = "../ds-chat-state" }
+ds-headroom = { path = "../ds-headroom" }
 ds-compaction = { path = "../../common/ds-compaction" }
 ds-sampler = { path = "../ds-sampler" }
 ds-sqlite-journal = { workspace = true }

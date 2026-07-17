@@ -18,6 +18,7 @@ tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 ds-compaction = { path = "../../common/ds-compaction" }
+ds-headroom = { path = "../ds-headroom" }
 ds-sampling-types = { path = "../ds-sampling-types" }
 ds-token-estimation = { workspace = true }
 
