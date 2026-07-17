@@ -292,8 +292,12 @@ if [[ "$reported_v" == *"$current_version"* && "$current_version" != "$new_versi
     fi
 fi
 
-# Working tree for tracked files should be clean after commit.
-if ! git diff-index --quiet HEAD --; then
+# Tracked tree should match HEAD after commit. Refresh the index first so
+# mtime-only noise from the rebuild doesn't trip a false dirty check;
+# ignore untracked files (e.g. local scratch dirs).
+git update-index --refresh -q >/dev/null 2>&1 || true
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    git status --porcelain --untracked-files=no >&2 || true
     die "tracked files dirty after bump commit — unexpected leftover changes"
 fi
 
