@@ -302,6 +302,7 @@ fn ds_build_concise_toolset() -> ToolServerConfig {
             (&ds_build::SchedulerListTool).into(),
             (&ds_build::MonitorTool).into(),
             (&ds_build::UpdateGoalTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -331,6 +332,7 @@ pub fn ds_build_hashline_toolset(
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
         (&ds_build::UpdateGoalTool).into(),
+        (&ds_build::HeadroomRetrieveTool).into(),
     ]);
     ToolServerConfig {
         tools,
@@ -350,6 +352,7 @@ fn codex_toolset() -> ToolServerConfig {
             task_output_tool_config(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -455,6 +458,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&ds_build::ReferenceToVideoTool).into(),
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -485,6 +489,7 @@ fn ds_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&ds_build::EnterPlanModeTool).into(),
             (&ds_build::ExitPlanModeTool).into(),
             (&ds_build::AskUserQuestionTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -514,6 +519,7 @@ fn ds_build_ask_user_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             (&ds_build::UpdateGoalTool).into(),
             (&ds_build::AskUserQuestionTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
@@ -531,6 +537,7 @@ fn opencode_toolset() -> ToolServerConfig {
             (&opencode::OpenCodeSkillTool).into(),
             kill_task_tool_config(),
             task_output_tool_config(),
+            (&ds_build::HeadroomRetrieveTool).into(),
         ],
         behavior_preset: None,
     }
