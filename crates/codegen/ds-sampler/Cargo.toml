@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-sampler"
-version = "0.1.8"
+version = "0.1.9"
 edition.workspace = true
 description = "Actor-based sampling/inference layer for DeepSeek ds (HTTP streaming + retry, no shell coupling)"
 
