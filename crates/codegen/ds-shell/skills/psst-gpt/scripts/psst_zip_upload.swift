@@ -164,6 +164,10 @@ func zipRoot(_ root: String) throws -> String {
     ".ds/sessions/*", ".ds/cache/*",
     "*.o", "*.a", "*.rlib", "*.dylib", "*.so",
     ".lyceum-trash/*",
+    "third_party/*", "*/third_party/*",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.pdf",
+    "*.mp4", "*.mov", "*.zip", "*.tar", "*.gz",
+    "*.wasm", "*.bin",
   ]
   var args = ["-qr", zipPath, ".", "-x"]
   args.append(contentsOf: excludes)
@@ -450,6 +454,18 @@ while deadline == nil || Date() < deadline! {
   }
   let assistant = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   log("tick novel=\(filtered.count) chars=\(assistant.count) sawGrowth=\(sawGrowth)")
+  // Immediate accept: clear Chat/Work refusal or substantive short reply
+  let lower = assistant.lowercased()
+  if assistant.count >= 30 && (
+    lower.contains("work mode") || lower.contains("continue with work") ||
+    lower.contains("cannot") || lower.contains("can't open") ||
+    lower.contains("unable to") || lower.contains("out of") ||
+    lower.contains("risk") || lower.contains("finding") || lower.contains("##")
+  ) && stable >= 2 {
+    if assistant == best || assistant.count >= best.count {
+      finishSuccess(assistant.count >= best.count ? assistant : best)
+    }
+  }
   if assistant.count > best.count + 20 {
     sawGrowth = true
     best = assistant
@@ -458,7 +474,7 @@ while deadline == nil || Date() < deadline! {
     continue
   }
   let sig = "\(assistant.count)"
-  if sig == lastSig && assistant.count > 80 {
+  if sig == lastSig && assistant.count > 40 {
     stable += 1
     if !assistant.isEmpty { best = assistant }
   } else if assistant.count >= best.count && !assistant.isEmpty {
@@ -469,19 +485,19 @@ while deadline == nil || Date() < deadline! {
     stable = 0
     lastSig = sig
   }
-  // Long audits: require growth then stability; min body length 80
-  if sawGrowth && stable >= 4 && best.count > 80 {
+  // Long audits: require growth then stability; min body length 40 (captures Work-nudge)
+  if sawGrowth && stable >= 3 && best.count > 40 {
     finishSuccess(best)
   }
   // Short replies
-  if !sawGrowth && stable >= 5 && best.count > 40 {
+  if stable >= 4 && best.count > 30 {
     finishSuccess(best)
   }
 }
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
-if best.count > 80 {
-  // Prefer partial long body over hard fail after long wait
+if best.count > 30 {
+  // Prefer any non-empty complete-looking body over hard fail after long wait
   finishSuccess(best)
 }
 emit(["ok": false, "code": "TIMEOUT", "attached": attached, "partial": best, "partialChars": best.count], exitCode: 1)
