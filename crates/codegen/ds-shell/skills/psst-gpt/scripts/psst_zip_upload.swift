@@ -555,27 +555,34 @@ func findStopButton() -> AXUIElement? {
   })
 }
 func messageLooksSent(preChars: Int, preValue: String) -> Bool {
-  if findStopButton() != nil { return true }
-  // Re-find composer; empty or drastically reduced value = submitted
+  // Stop generating = model is answering → send landed.
+  if findStopButton() != nil {
+    log("send-check: Stop button present")
+    return true
+  }
+  // Composer MUST be found. Missing composer used to return true (false positive)
+  // and left drafts unsent while the wait-loop hung forever.
   guard let c = bfsFirst(root, pred: { el, r in
     r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
   }) else {
-    // Composer temporarily gone while sending is OK
-    return true
+    log("send-check: composer missing — not treating as sent")
+    return false
   }
   let after = composerText(c).trimmingCharacters(in: .whitespacesAndNewlines)
+  log("send-check: composer chars=\(after.count) pre=\(preChars)")
+  // Still holds the audit draft → definitely not sent
+  if promptLooksSet(after, prompt) { return false }
+  if after.count >= max(40, preChars - 20) && preChars > 40 { return false }
+  // Empty (or nearly empty) composer = submitted
   if after.isEmpty { return true }
-  // Still full draft → not sent
-  if promptLooksSet(after, prompt) && after.count >= max(40, preChars - 20) { return false }
-  if after.count + 40 < preChars { return true }
-  // User bubble appeared as static text with a unique prompt fragment
+  if after.count + 80 < preChars { return true }
+  // User bubble appeared AND composer no longer has the draft
   let needle = String(prompt.prefix(60))
   let statics = allStaticTexts()
   if !needle.isEmpty && statics.contains(where: { $0.contains(String(needle.prefix(40))) }) {
-    // And composer no longer holds the full draft
-    if after.count < preChars / 2 { return true }
+    if after.count < max(20, preChars / 3) { return true }
   }
-  _ = preValue // silence unused if optimized
+  _ = preValue
   return false
 }
 
@@ -585,18 +592,15 @@ let preSend = setValue
 let preChars = preSend.count
 for attempt in 1...5 {
   focusComposer(liveComposer)
-  // Electron ChatGPT: try Return, AX Send, Cmd+Return. Never trust press() alone.
-  if attempt == 1 {
-    key(36) // Return
-    log("send attempt=\(attempt) method=return")
-  } else if attempt == 2, let sendBtn = findSendButton() {
+  // Multi-line composers: bare Return inserts a newline — it does NOT send.
+  // Prefer AX Send / mouse click / Cmd+Return only.
+  if attempt == 1, let sendBtn = findSendButton() {
     let ok = press(sendBtn)
     log("send attempt=\(attempt) method=axPress ok=\(ok)")
-  } else if attempt == 3 {
+  } else if attempt == 2 {
     key(36, flags: .maskCommand) // Cmd+Return
     log("send attempt=\(attempt) method=cmd-return")
-  } else if attempt == 4, let sendBtn = findSendButton() {
-    // Physical click center if geometry available
+  } else if attempt == 3, let sendBtn = findSendButton() {
     var pos: CFTypeRef?
     var size: CFTypeRef?
     if AXUIElementCopyAttributeValue(sendBtn, kAXPositionAttribute as CFString, &pos) == .success,
@@ -610,7 +614,7 @@ for attempt in 1...5 {
         CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
-        log("send attempt=\(attempt) method=mouseClick")
+        log("send attempt=\(attempt) method=mouseClick at=\(Int(c.x)),\(Int(c.y))")
       } else {
         _ = press(sendBtn)
         log("send attempt=\(attempt) method=axPress-fallback")
@@ -619,15 +623,25 @@ for attempt in 1...5 {
       _ = press(sendBtn)
       log("send attempt=\(attempt) method=axPress-fallback")
     }
+  } else if attempt == 4, let sendBtn = findSendButton() {
+    _ = press(sendBtn)
+    Thread.sleep(forTimeInterval: 0.2)
+    key(36, flags: .maskCommand)
+    log("send attempt=\(attempt) method=axPress+cmd-return")
   } else {
-    key(36)
-    log("send attempt=\(attempt) method=return-last")
+    key(36, flags: .maskCommand)
+    log("send attempt=\(attempt) method=cmd-return-last")
   }
   Thread.sleep(forTimeInterval: 1.2)
   if messageLooksSent(preChars: preChars, preValue: preSend) {
-    sendVerified = true
-    log("send VERIFIED on attempt=\(attempt)")
-    break
+    // Settle: Electron can briefly clear then restore draft; re-check once.
+    Thread.sleep(forTimeInterval: 0.6)
+    if messageLooksSent(preChars: preChars, preValue: preSend) {
+      sendVerified = true
+      log("send VERIFIED on attempt=\(attempt) (double-check ok)")
+      break
+    }
+    log("send attempt=\(attempt) flapped — draft returned after brief clear")
   }
   // Draft may have been wiped by a failed partial send — re-set prompt
   if let c = bfsFirst(root, pred: { el, r in
