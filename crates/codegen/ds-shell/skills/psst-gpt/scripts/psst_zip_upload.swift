@@ -282,18 +282,37 @@ func isIncompleteZipReply(_ t: String) -> Bool {
   }
   // Inflated transcript soup (sidebar history repeated) is never a finished reply.
   if isTranscriptSoup(trimmed) { return true }
-  // Zip audits need a substantive body; short stubs always incomplete
-  if trimmed.count < 300 { return true }
-  // Mostly our own prompt headings echoed back while zip is still opening
-  let promptish = ["architecture", "dependencies", "configuration", "do not suggest any code edits"]
-  let hits = promptish.filter { l.contains($0) }.count
-  if hits >= 2 && trimmed.count < 1500 {
-    let hasFinding = l.range(of: #"\b(severity|finding|risks?|recommend)\b"#, options: .regularExpression) != nil
+  // Hard floor: tiny chips / one-liners are never a finished deliverable.
+  // (Keep well above title chips; short Chat answers can still finish below 300.)
+  if trimmed.count < 100 { return true }
+  // Mid-sentence AX fragments are never a finished deliverable (even if long).
+  if looksLikeMidFragment(trimmed) { return true }
+  // Sentence / section shape — single-period terminal sentence counts (not only ". " mid-body).
+  let hasSentence =
+    trimmed.contains(". ") || trimmed.contains(".\n") || trimmed.hasSuffix(".") ||
+    trimmed.contains("##") || trimmed.contains("1.") || trimmed.contains("- ") ||
+    (trimmed.contains(": ") && trimmed.count >= 120)
+  // Soft band 100–299: accept only real sentence-shaped replies (not stubs without punctuation).
+  if trimmed.count < 300 {
+    if !hasSentence { return true }
+    return false
+  }
+  // Reject echo of *our* long audit-prompt headings without findings (not ordinary
+  // architecture/configuration prose in a real Chat answer — those words alone are fine).
+  let promptEcho = [
+    "do not suggest any code edits",
+    "do not edit code",
+    "top risks by severity",
+    "architecture notes",
+    "concrete recommendations",
+  ]
+  let echoHits = promptEcho.filter { l.contains($0) }.count
+  if echoHits >= 2 && trimmed.count < 1500 {
+    let hasFinding =
+      l.range(of: #"\b(severity|finding|risks?|recommend)\b"#, options: .regularExpression) != nil
     if !hasFinding { return true }
   }
-  // Require at least one sentence-like chunk or structured section
-  let hasSentence = trimmed.contains(". ") || trimmed.contains(".\n") || trimmed.contains("##") ||
-    trimmed.contains("1.") || trimmed.contains("- ")
+  // Longer bodies still need sentence/section shape unless quite long.
   if !hasSentence && trimmed.count < 1200 { return true }
   return false
 }
@@ -308,6 +327,14 @@ func isTranscriptSoup(_ text: String) -> Bool {
   guard lines.count >= 12 else { return false }
   let unique = Set(lines)
   let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
+  // Real structured Chat answers (numbered sections, markdown headings) are not sidebar soup.
+  let structuredHits = lines.filter {
+    let l = $0.lowercased()
+    return l.hasPrefix("#") || l.hasPrefix("1.") || l.hasPrefix("2.") || l.hasPrefix("3.") ||
+      l.hasPrefix("(1") || l.hasPrefix("(2") || l.hasPrefix("**") ||
+      l.range(of: #"^\d+[\.\)]\s"#, options: .regularExpression) != nil
+  }.count
+  if structuredHits >= 2 && text.count >= 200 { return false }
   // History lists: lots of short unique titles, or extreme line duplication.
   if avg < 64 && lines.count >= 20 { return true }
   if lines.count >= 40 && unique.count * 3 < lines.count { return true }
@@ -336,6 +363,32 @@ func isInflatedOver(base: String, candidate: String) -> Bool {
   return false
 }
 
+/// True when text looks like a mid-stream / mid-sentence AX fragment (not a full reply).
+/// Pure: used by merge, finish rules, and harvest scoring.
+func looksLikeMidFragment(_ t: String) -> Bool {
+  let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+  if s.isEmpty { return true }
+  let low = s.lowercased()
+  // Starts mid-sentence / mid-clause
+  if s.hasPrefix(",") || s.hasPrefix(";") || s.hasPrefix(")") || s.hasPrefix("]") {
+    return true
+  }
+  if low.hasPrefix("and ") || low.hasPrefix("which ") || low.hasPrefix("that ") ||
+    low.hasPrefix("with ") || low.hasPrefix("from ") || low.hasPrefix("for ") {
+    return true
+  }
+  if let first = s.unicodeScalars.first, CharacterSet.lowercaseLetters.contains(first) {
+    return true
+  }
+  // Ends mid-phrase (common when AX splits a paragraph)
+  if low.hasSuffix(", and") || low.hasSuffix(" and") || low.hasSuffix(" the") ||
+    low.hasSuffix(" a") || low.hasSuffix(" an") || low.hasSuffix(" of") ||
+    low.hasSuffix(" to") || low.hasSuffix(" in") || low.hasSuffix(",") {
+    return true
+  }
+  return false
+}
+
 /// Merge a new harvest into the current best body without concatenating full history blobs.
 /// Pure: same inputs → same output. Used by wait-loop + selfcheck.
 func mergeReplyBody(best: String, candidate: String, minDelta: Int = 20) -> String {
@@ -343,12 +396,19 @@ func mergeReplyBody(best: String, candidate: String, minDelta: Int = 20) -> Stri
   let c = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
   if c.isEmpty { return b }
   if b.isEmpty {
+    // Accept first non-soup candidate even if mid-fragment (stream may still be growing).
     return isTranscriptSoup(c) ? "" : c
   }
   if c == b { return b }
   // Never replace a good reply with sidebar soup.
   if isTranscriptSoup(c) && !isTranscriptSoup(b) { return b }
   if isInflatedOver(base: b, candidate: c) { return b }
+  // Mid-fragment never beats a complete-looking peer (any length).
+  if looksLikeMidFragment(c) && !looksLikeMidFragment(b) && b.count >= 80 { return b }
+  if looksLikeMidFragment(b) && !looksLikeMidFragment(c) && c.count >= 80 { return c }
+  // Full Copy-message harvests (much longer, non-fragment) win over short AX chips.
+  if c.count >= b.count + 100 && !isTranscriptSoup(c) { return c }
+  if b.count >= c.count + 100 && !isTranscriptSoup(b) && c.count < 80 { return b }
   // Stream growth: candidate is a superset of best.
   if c.count > b.count && c.contains(b) { return c }
   // Shrink supersede: best was noisy; candidate is cleaner and still substantial.
@@ -409,16 +469,32 @@ func ingestAxChips(
       parts.removeFirst(drop)
     }
   }
-  let longestChip = filtered.max(by: { $0.count < $1.count }) ?? ""
-  let joinedChips = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  // Prefer one long chip / live line over unbounded join of titles.
+  // Prefer complete-looking bodies; never let a mid-sentence ≥200-char chip suppress the rest.
+  // Pure logic only (no isChromeText) so --selfcheck-absorb can exercise this without AX/main path.
+  let pool = filtered.isEmpty ? parts : filtered
+  let nonFrag = pool.filter { !looksLikeMidFragment($0) }
+  let longestGood = nonFrag.max(by: { $0.count < $1.count }) ?? ""
+  let longestAny = pool.max(by: { $0.count < $1.count }) ?? ""
+  let joinSource = nonFrag.isEmpty ? pool : nonFrag
+  var joinSeen = Set<String>()
+  var uniq: [String] = []
+  for t in joinSource {
+    if joinSeen.contains(t) { continue }
+    if uniq.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
+    uniq.removeAll { t.contains($0) && t.count > $0.count + 10 }
+    joinSeen.insert(t)
+    uniq.append(t)
+  }
+  let joined = uniq.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   let assistant: String
-  if longestChip.count >= 200 {
-    assistant = longestChip
-  } else if !isTranscriptSoup(joinedChips) && joinedChips.count <= max(4_000, longestChip.count * 3) {
-    assistant = joinedChips.count >= longestChip.count ? joinedChips : longestChip
+  if longestGood.count >= 100 {
+    assistant = longestGood
+  } else if !isTranscriptSoup(joined) && joined.count > longestGood.count && joined.count >= 80 {
+    assistant = joined
+  } else if longestGood.count >= 40 {
+    assistant = longestGood
   } else {
-    assistant = longestChip
+    assistant = longestAny
   }
   return (assistant, novel.count, newParts)
 }
@@ -449,6 +525,35 @@ func runSelfcheckFinishRules() -> Never {
     Case(
       name: "work_nudge",
       text: "The task requires opening and systematically inspecting a large uploaded code archive; Work mode is the appropriate environment for repository-scale file analysis.",
+      expectIncomplete: false
+    ),
+    // Short Chat-only zip replies (confirm + list + one architecture sentence) must finish complete.
+    Case(
+      name: "short_complete_chat",
+      text: """
+      (1) I can see the attached source-archive.zip. (2) Top-level: crates, docs, scripts, prod, bin, third_party. \
+      (3) Overall architecture: a Cargo workspace multi-crate Rust monorepo with core modules separated from tooling.
+      """,
+      expectIncomplete: false
+    ),
+    Case(
+      name: "short_arch_only_sentence",
+      text: "Overall architecture: This appears to be a Cargo workspace organized as a multi-crate Rust monorepo, with core source modules separated from production tooling, binaries, documentation, audit utilities, and repository scripts.",
+      expectIncomplete: false
+    ),
+    Case(
+      name: "mid_sentence_fragment",
+      text: ", which contains the terminal AI agent, TUI/pager, model integration, shell execution, sandboxing, workspace management, authentication, configuration, tools, memory, telemetry, and subagent components, and",
+      expectIncomplete: true
+    ),
+    // Real short Chat zip answer: may say architecture+configuration without audit-prompt echo phrases.
+    Case(
+      name: "short_chat_arch_config_prose",
+      text: """
+      1. Attachment: Yes, I see source-archive.zip.
+      2. Top-level: crates/, docs/, scripts/, prod/, bin/.
+      3. Overall architecture: multi-crate Rust monorepo with configuration crates and modular tooling.
+      """,
       expectIncomplete: false
     ),
   ]
@@ -755,30 +860,84 @@ func scrollTranscript() {
 func harvestViaCopyMessageButtons() -> String {
   let buttons = bfsAll(root, pred: { el, r in
     guard r == "AXButton" else { return false }
-    let blob = (s(el, kAXDescriptionAttribute as String) + " " + s(el, kAXTitleAttribute as String)).lowercased()
-    return blob.contains("copy message") || blob == "copy message"
+    let blob = (
+      s(el, kAXDescriptionAttribute as String) + " " +
+      s(el, kAXTitleAttribute as String) + " " +
+      s(el, kAXHelpAttribute as String)
+    ).lowercased()
+    if blob.contains("copy message") || blob == "copy message" { return true }
+    // Some builds expose a short "Copy" action on the assistant bubble.
+    if blob.trimmingCharacters(in: .whitespacesAndNewlines) == "copy" { return true }
+    if blob.contains("copy") && blob.contains("message") { return true }
+    return false
   })
   if buttons.isEmpty {
     log("copy-harvest: no Copy message buttons")
     return ""
   }
+  log("copy-harvest: found \(buttons.count) copy-related button(s)")
   var bestClip = ""
   // Last assistant messages are usually the last copy buttons in the tree order.
-  for btn in buttons.suffix(6).reversed() {
+  for btn in buttons.suffix(8).reversed() {
+    // Hover so hover-only toolbars expose the control, then press.
+    var posRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &posRef) == .success,
+       let axPos = posRef {
+      var point = CGPoint.zero
+      if AXValueGetValue(axPos as! AXValue, .cgPoint, &point) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+          .post(tap: .cghidEventTap)
+        Thread.sleep(forTimeInterval: 0.12)
+      }
+    }
     pb.clearContents()
     _ = press(btn)
-    Thread.sleep(forTimeInterval: 0.45)
+    Thread.sleep(forTimeInterval: 0.55)
     let clip = (pb.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     if clip.count < 40 { continue }
     if isChromeText(clip) { continue }
+    if looksLikeMidFragment(clip) && clip.count < 400 { continue }
     // Reject pure prompt echo
     if promptLooksSet(clip, prompt) && clip.count < prompt.count + 80 { continue }
     if clip.count > bestClip.count {
       bestClip = clip
-      log("copy-harvest: clipboard chars=\(clip.count)")
+      log("copy-harvest: clipboard chars=\(clip.count) fragment=\(looksLikeMidFragment(clip))")
     }
   }
   return bestClip
+}
+
+/// Pick the best single-body view from AX capture texts (no history soup).
+func bestBodyFromAxTexts(_ texts: [String]) -> String {
+  let cleaned = texts
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    .filter { !$0.isEmpty && !isChromeText($0) }
+  if cleaned.isEmpty { return "" }
+  let nonFrag = cleaned.filter { !looksLikeMidFragment($0) }
+  let longestGood = nonFrag.max(by: { $0.count < $1.count }) ?? ""
+  let longestAny = cleaned.max(by: { $0.count < $1.count }) ?? ""
+  // Prefer a complete-looking long chip.
+  if longestGood.count >= 100 { return longestGood }
+  // Otherwise try a non-soup join of non-fragment chips (preserves multi-paragraph replies).
+  let joinSource = nonFrag.isEmpty ? cleaned : nonFrag
+  var seen = Set<String>()
+  var uniq: [String] = []
+  for t in joinSource {
+    if seen.contains(t) { continue }
+    // Skip chips fully contained in a longer chip we already have.
+    if uniq.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
+    // Replace shorter chips this one supersedes.
+    uniq.removeAll { t.contains($0) && t.count > $0.count + 10 }
+    seen.insert(t)
+    uniq.append(t)
+  }
+  let joined = uniq.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  if !isTranscriptSoup(joined) && joined.count > longestGood.count && joined.count >= 80 {
+    return joined
+  }
+  if longestGood.count >= 40 { return longestGood }
+  return longestAny
 }
 
 /// Deep harvest: scroll + AX tree + optional clipboard copy (when generation finished).
@@ -792,12 +951,14 @@ func deepHarvestReply(includeCopy: Bool) -> String {
     seen.insert(t)
     parts.append(t)
   }
-  var body = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  var body = bestBodyFromAxTexts(parts)
   if includeCopy {
     let clip = harvestViaCopyMessageButtons()
-    if clip.count > body.count {
+    if clip.count > body.count && !(looksLikeMidFragment(clip) && !looksLikeMidFragment(body) && body.count >= 80) {
       log("deepHarvest: preferring clipboard over AX tree (\(clip.count) > \(body.count))")
       body = clip
+    } else if !clip.isEmpty {
+      log("deepHarvest: clipboard chars=\(clip.count) kept AX body=\(body.count)")
     }
   }
   return body
@@ -1301,6 +1462,16 @@ func runSelfcheckAbsorb() -> Never {
       maxFinal: reply.count + 20,
       minFinal: reply.count,
       mustContain: "repository-scale"
+    ),
+    Case(
+      name: "prefer_complete_over_mid_fragment",
+      steps: [
+        "Overall architecture: multi-crate Rust monorepo with modular crates and solid tests for agents.",
+        ", which contains the terminal AI agent, TUI/pager, model integration, shell execution, sandboxing, workspace management, authentication, configuration, tools, memory, telemetry, and subagent components, and",
+      ],
+      maxFinal: 120,
+      minFinal: 70,
+      mustContain: "Overall architecture"
     ),
   ]
   var results: [[String: Any]] = []
