@@ -27,12 +27,13 @@ ad-hoc shell recipes.
 
 ## Scripts
 
-```text
-~/.ds/skills/psst-gpt/scripts/psst_chat_relay.swift   # text
-~/.ds/skills/psst-gpt/scripts/psst_zip_upload.swift    # zip/root audit (preferred for full codebase)
-```
+Prefer **scripts next to this `SKILL.md`** (project `.ds/skills/psst-gpt/scripts/` when the repo skill is installed, else `~/.ds/skills/psst-gpt/scripts/`). Keep them byte-identical to `crates/codegen/ds-shell/skills/psst-gpt/scripts/` — re-sync after installs if `run_full_codebase_audit.sh` exits `STALE_HELPER`.
 
-Also under the same `scripts/` next to this `SKILL.md` after extract.
+```text
+scripts/psst_chat_relay.swift          # text
+scripts/psst_zip_upload.swift           # zip/root audit
+scripts/run_full_codebase_audit.sh      # one-shot full-tree entry
+```
 
 ## Slash routing
 
@@ -50,11 +51,15 @@ Also under the same `scripts/` next to this `SKILL.md` after extract.
 **One shot. Foreground. `--timeout 0` only.** Do **not** use 30s timeouts, do **not** background the helper, do **not** fall back to text-only when the user asked for a zip attach.
 
 ```bash
+# Resolve scripts next to this skill (project first, then user install):
+SKILL_SCRIPTS=".ds/skills/psst-gpt/scripts"
+[[ -x "$SKILL_SCRIPTS/run_full_codebase_audit.sh" ]] || SKILL_SCRIPTS="$HOME/.ds/skills/psst-gpt/scripts"
+
 # Preferred entry (blocks until ChatGPT stabilizes; stages .ds/psst-gpt/*):
-bash "$HOME/.ds/skills/psst-gpt/scripts/run_full_codebase_audit.sh" "$PWD"
+bash "$SKILL_SCRIPTS/run_full_codebase_audit.sh" "$PWD"
 
 # Equivalent:
-swift "$HOME/.ds/skills/psst-gpt/scripts/psst_zip_upload.swift" \
+swift "$SKILL_SCRIPTS/psst_zip_upload.swift" \
   --root "$PWD" --timeout 0 -- \
   "AUDIT ONLY. Chat only — never Work. … structured audit …"
 ```
