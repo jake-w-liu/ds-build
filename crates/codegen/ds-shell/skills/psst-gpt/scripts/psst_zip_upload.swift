@@ -139,6 +139,92 @@ func bfsAll(_ root: AXUIElement, max: Int = 25000, pred: (AXUIElement, String) -
 func bfsFirst(_ root: AXUIElement, pred: (AXUIElement, String) -> Bool) -> AXUIElement? {
   bfsAll(root, pred: pred).first
 }
+
+/// True when AX text is still a loading/ingest shell, not a real ChatGPT answer.
+/// Pure function — also exercised by `--selfcheck-finish-rules`.
+func isIncompleteZipReply(_ t: String) -> Bool {
+  let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+  let l = trimmed.lowercased()
+  if trimmed.isEmpty { return true }
+  if l.contains("no sources yet") { return true }
+  if l.contains("audit request for codebase") && trimmed.count < 400 { return true }
+  // Chat title / one-line chips are not an audit body
+  if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 200) {
+    return true
+  }
+  // Fragment salad: many short lines (AX word chips) without a real paragraph
+  let lines = trimmed.split(whereSeparator: \.isNewline)
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    .filter { !$0.isEmpty }
+  if lines.count >= 3 {
+    let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
+    if avg < 48 && trimmed.count < 900 { return true }
+  }
+  // Zip audits need a substantive body; short stubs always incomplete
+  if trimmed.count < 300 { return true }
+  // Mostly our own prompt headings echoed back while zip is still opening
+  let promptish = ["architecture", "dependencies", "configuration", "do not suggest any code edits"]
+  let hits = promptish.filter { l.contains($0) }.count
+  if hits >= 2 && trimmed.count < 1500 {
+    let hasFinding = l.range(of: #"\b(severity|finding|risks?|recommend)\b"#, options: .regularExpression) != nil
+    if !hasFinding { return true }
+  }
+  // Require at least one sentence-like chunk or structured section
+  let hasSentence = trimmed.contains(". ") || trimmed.contains(".\n") || trimmed.contains("##") ||
+    trimmed.contains("1.") || trimmed.contains("- ")
+  if !hasSentence && trimmed.count < 1200 { return true }
+  return false
+}
+
+/// Drive real `isIncompleteZipReply` with known fixtures (no ChatGPT needed).
+func runSelfcheckFinishRules() -> Never {
+  struct Case { let name: String; let text: String; let expectIncomplete: Bool }
+  let longAudit = """
+  ## Executive assessment
+  The monorepo shows modular crates and solid tests. Top risk: sandbox fail-open
+  on unsupported platforms returns a permissive path without hard failure.
+  1. Severity high: AlwaysApprove defaults expand privilege.
+  2. Recommendation: fail closed when sandbox cannot apply.
+  Architecture notes: permission resolver, network hooks, plugin install.
+  """
+  let cases: [Case] = [
+    Case(name: "empty", text: "", expectIncomplete: true),
+    Case(name: "no_sources", text: "No sources yet", expectIncomplete: true),
+    Case(name: "title_only", text: "Audit Rust Monorepo", expectIncomplete: true),
+    Case(name: "short_stub", text: "Looks fine overall with some risks mentioned briefly.", expectIncomplete: true),
+    Case(name: "fragment_salad", text:
+      "Audit Rust Monorepo\narchitectural\nsubstantial:\nconcentrated\nauthentication,",
+      expectIncomplete: true),
+    Case(name: "real_audit", text: longAudit, expectIncomplete: false),
+  ]
+  var results: [[String: Any]] = []
+  var failed = 0
+  for c in cases {
+    let got = isIncompleteZipReply(c.text)
+    let pass = got == c.expectIncomplete
+    if !pass { failed += 1 }
+    results.append([
+      "name": c.name,
+      "expectIncomplete": c.expectIncomplete,
+      "gotIncomplete": got,
+      "pass": pass,
+      "chars": c.text.count,
+    ])
+  }
+  let ok = failed == 0
+  let out: [String: Any] = [
+    "ok": ok,
+    "status": "selfcheck-finish-rules",
+    "failed": failed,
+    "cases": results,
+  ]
+  if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]),
+     let str = String(data: d, encoding: .utf8) {
+    print(str)
+  }
+  exit(ok ? 0 : 1)
+}
+
 func emit(_ obj: [String: Any], exitCode: Int32 = 0, stageResponse: String? = nil) -> Never {
   var out = obj
   if exitCode == 0 || stageResponse != nil {
@@ -216,6 +302,7 @@ while i < args.count {
   }
   if a == "--no-new-chat" { newChat = false; i += 1; continue }
   if a == "--pack-only" { packOnly = true; i += 1; continue }
+  if a == "--selfcheck-finish-rules" { runSelfcheckFinishRules() }
   if a == "--" { promptParts.append(contentsOf: args[(i + 1)...]); break }
   if a.hasPrefix("-") { emit(["ok": false, "code": "BAD_ARGS", "message": "Unknown \(a)"], exitCode: 2) }
   promptParts.append(a); i += 1
@@ -371,40 +458,6 @@ func isChromeText(_ t: String) -> Bool {
   return false
 }
 
-/// True when AX text is still a loading/ingest shell, not a real ChatGPT answer.
-func isIncompleteZipReply(_ t: String) -> Bool {
-  let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
-  let l = trimmed.lowercased()
-  if trimmed.isEmpty { return true }
-  if l.contains("no sources yet") { return true }
-  if l.contains("audit request for codebase") && trimmed.count < 400 { return true }
-  // Chat title / one-line chips are not an audit body
-  if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 200) {
-    return true
-  }
-  // Fragment salad: many short lines (AX word chips) without a real paragraph
-  let lines = trimmed.split(whereSeparator: \.isNewline)
-    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-    .filter { !$0.isEmpty }
-  if lines.count >= 3 {
-    let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
-    if avg < 48 && trimmed.count < 900 { return true }
-  }
-  // Zip audits need a substantive body; short stubs always incomplete
-  if trimmed.count < 300 { return true }
-  // Mostly our own prompt headings echoed back while zip is still opening
-  let promptish = ["architecture", "dependencies", "configuration", "do not suggest any code edits"]
-  let hits = promptish.filter { l.contains($0) }.count
-  if hits >= 2 && trimmed.count < 1500 {
-    let hasFinding = l.range(of: #"\b(severity|finding|risks?|recommend)\b"#, options: .regularExpression) != nil
-    if !hasFinding { return true }
-  }
-  // Require at least one sentence-like chunk or structured section
-  let hasSentence = trimmed.contains(". ") || trimmed.contains(".\n") || trimmed.contains("##") ||
-    trimmed.contains("1.") || trimmed.contains("- ")
-  if !hasSentence && trimmed.count < 1200 { return true }
-  return false
-}
 func allStaticTexts() -> [String] {
   bfsAll(root, pred: { _, r in r == "AXStaticText" })
     .map { s($0, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines) }
