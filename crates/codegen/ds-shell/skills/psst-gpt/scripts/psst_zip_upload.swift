@@ -13,80 +13,162 @@ import AppKit
 import Foundation
 import CoreGraphics
 
-/// Process-scoped wake hold. Ends when we exit (`-w <self>`).
+/// Multi-layer macOS wake hold for long zip audits (host may use displaysleep≈2m).
 ///
-/// Flags (see `man caffeinate`):
-/// - `-d` display sleep  -i idle sleep  -m disk  -s system sleep (AC)
-/// - `-u -t <sec>` declare user active for the hold (resets idle/lock timer;
-///   bare `-u` only lasts 5s — that was not enough to stop screen lock)
+/// Layers (see `man caffeinate`):
+/// 1. **Primary** `caffeinate -dims -w <self>` — display/idle/disk/system; tied to helper.
+///    No `-u`/`-t` on primary so it cannot expire early while the helper is still up.
+/// 2. **User-active pulses** `caffeinate -u -t <pulse>` every ~45s — resets idle/lock
+///    timers (bare `-u` is only 5s; single long `-t` dies if the process is killed).
+/// 3. **`ensureAlive()`** — restart dead primary + fire due pulses; call from wait loops.
+///
+/// Does **not** unlock an already-locked screen. Stops cleanly on every exit.
 final class WakeHold {
   static let shared = WakeHold()
-  private var process: Process?
+  private var primary: Process?
+  private var pulse: Process?
+  private var pulsePids: [Int32] = []
   private(set) var caffeinatePid: Int32?
-  /// How long the user-active assertion may last (helper usually exits sooner).
-  private static let userActiveHoldSec = 24 * 60 * 60
+  private var stopped = false
+  private var lastPulseAt = Date.distantPast
+  private var restartCount = 0
+  private var pulseCount = 0
+
+  /// How often to re-assert user-active (must be < host displaysleep, often 2 min).
+  private static let pulseIntervalSec: TimeInterval = 45
+  /// Duration of each user-active assertion (man: bare `-u` defaults to 5s).
+  private static let pulseHoldSec = 120
+  private static let maxRestarts = 200
+  private static let caffeinatePath = "/usr/bin/caffeinate"
 
   @discardableResult
   func start() -> Int32? {
     #if os(macOS)
-    if process?.isRunning == true { return caffeinatePid }
-    let path = "/usr/bin/caffeinate"
-    guard FileManager.default.isExecutableFile(atPath: path) else {
-      log("wake-hold: caffeinate missing; continuing without hold")
-      return nil
-    }
-    let selfPid = ProcessInfo.processInfo.processIdentifier
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: path)
-    // -u without -t only asserts user-active for 5 seconds (man caffeinate).
-    p.arguments = [
-      "-dimsu",
-      "-t", "\(Self.userActiveHoldSec)",
-      "-w", "\(selfPid)",
-    ]
-    p.standardOutput = FileHandle.nullDevice
-    p.standardError = FileHandle.nullDevice
-    do {
-      try p.run()
-      process = p
-      caffeinatePid = p.processIdentifier
-      log("wake-hold: started caffeinate pid=\(p.processIdentifier) for self=\(selfPid) args=-dimsu -t \(Self.userActiveHoldSec) -w \(selfPid)")
-      // Verify the child is actually alive (catches silent launch failures).
-      Thread.sleep(forTimeInterval: 0.15)
-      if !p.isRunning {
-        log("wake-hold: WARNING caffeinate exited immediately — screen may lock")
-        process = nil
-        caffeinatePid = nil
-        return nil
-      }
-      return caffeinatePid
-    } catch {
-      log("wake-hold: failed to start: \(error)")
-      return nil
-    }
+    stopped = false
+    restartCount = 0
+    pulseCount = 0
+    pulsePids.removeAll()
+    let pid = ensurePrimary(reason: "start")
+    // Immediate user-active so idle clock does not start before first wait tick.
+    fireUserActivePulse(force: true)
+    return pid
     #else
     return nil
     #endif
   }
 
-  func stop() {
-    guard let p = process else {
-      caffeinatePid = nil
-      return
+  /// Call from long wait / poll loops. Restarts dead primary and refreshes user-active.
+  @discardableResult
+  func ensureAlive() -> Int32? {
+    #if os(macOS)
+    if stopped { return caffeinatePid }
+    let pid = ensurePrimary(reason: "ensureAlive")
+    fireUserActivePulse(force: false)
+    return pid
+    #else
+    return nil
+    #endif
+  }
+
+  private func ensurePrimary(reason: String) -> Int32? {
+    if let p = primary, p.isRunning { return caffeinatePid }
+    if stopped { return nil }
+    if restartCount >= Self.maxRestarts {
+      log("wake-hold: ERROR max restarts (\(Self.maxRestarts)) reached — screen may lock")
+      return nil
     }
+    guard FileManager.default.isExecutableFile(atPath: Self.caffeinatePath) else {
+      log("wake-hold: caffeinate missing; continuing without hold")
+      return nil
+    }
+    let selfPid = ProcessInfo.processInfo.processIdentifier
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: Self.caffeinatePath)
+    // Primary: prevent sleep only; lifetime bound to this helper via -w.
+    // User-active is handled by pulses (avoids -t expiry killing the whole hold).
+    p.arguments = ["-dims", "-w", "\(selfPid)"]
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    do {
+      try p.run()
+      let isRestart = primary != nil || caffeinatePid != nil
+      if isRestart { restartCount += 1 }
+      primary = p
+      caffeinatePid = p.processIdentifier
+      let tag = isRestart ? "restarted#\(restartCount)" : "started"
+      log("wake-hold: \(tag) primary pid=\(p.processIdentifier) self=\(selfPid) args=-dims -w \(selfPid) via=\(reason)")
+      Thread.sleep(forTimeInterval: 0.12)
+      if !p.isRunning {
+        log("wake-hold: WARNING primary exited immediately — screen may lock")
+        primary = nil
+        caffeinatePid = nil
+        return nil
+      }
+      return caffeinatePid
+    } catch {
+      log("wake-hold: failed to start primary: \(error)")
+      return nil
+    }
+  }
+
+  private func fireUserActivePulse(force: Bool) {
+    if stopped { return }
+    let now = Date()
+    if !force, now.timeIntervalSince(lastPulseAt) < Self.pulseIntervalSec { return }
+    guard FileManager.default.isExecutableFile(atPath: Self.caffeinatePath) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: Self.caffeinatePath)
+    // -u turns display on if off and declares user active for -t seconds.
+    p.arguments = ["-u", "-t", "\(Self.pulseHoldSec)"]
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    do {
+      try p.run()
+      pulse = p
+      pulsePids.append(p.processIdentifier)
+      // Cap bookkeeping list (oldest already expire via -t).
+      if pulsePids.count > 16 { pulsePids.removeFirst(pulsePids.count - 16) }
+      lastPulseAt = now
+      pulseCount += 1
+      if pulseCount == 1 || pulseCount % 10 == 0 {
+        log("wake-hold: user-active pulse#\(pulseCount) pid=\(p.processIdentifier) -u -t \(Self.pulseHoldSec)")
+      }
+    } catch {
+      log("wake-hold: pulse failed: \(error)")
+    }
+  }
+
+  func stop() {
+    stopped = true
+    for pid in pulsePids {
+      if kill(pid, 0) == 0 {
+        kill(pid, SIGTERM)
+        Thread.sleep(forTimeInterval: 0.05)
+        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+      }
+    }
+    pulsePids.removeAll()
+    terminateTracked(pulse)
+    pulse = nil
+    terminateTracked(primary)
+    log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?") restarts=\(restartCount) pulses=\(pulseCount)")
+    primary = nil
+    caffeinatePid = nil
+  }
+
+  private func terminateTracked(_ p: Process?) {
+    guard let p else { return }
     if p.isRunning {
       p.terminate()
       let deadline = Date().addingTimeInterval(1.0)
       while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
       if p.isRunning { kill(p.processIdentifier, SIGKILL) }
     }
-    log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?")")
-    process = nil
-    caffeinatePid = nil
   }
 
   deinit {
-    if let p = process, p.isRunning { p.terminate() }
+    if let p = primary, p.isRunning { p.terminate() }
+    if let p = pulse, p.isRunning { p.terminate() }
   }
 }
 
@@ -968,6 +1050,8 @@ func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, ne
 while Date() < deadline {
   Thread.sleep(forTimeInterval: 2.5)
   tick += 1
+  // Keep display/idle assertions alive for multi-minute GPT audits (displaysleep can be ~2m).
+  _ = WakeHold.shared.ensureAlive()
   let elapsed = Int(Date().timeIntervalSince(waitStarted))
   if isScreenLocked() {
     emit([

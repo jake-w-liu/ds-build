@@ -22,7 +22,7 @@ ad-hoc shell recipes.
 |------------|---------|
 | **Screen locked** | **Does not work.** Helpers exit `PSST_GPT_SCREEN_LOCKED`. |
 | **Work / Codex usage** | **Never.** Chat only (`Message ChatGPT`). |
-| **Wake hold** | On macOS, helpers **auto-start `caffeinate -dimsu -t 86400 -w <self>`** (display/idle/disk + long user-active assertion) and stop it on every exit. Only while the **Swift helper** runs — not after it exits. **Do not** wrap in an extra long-lived `caffeinate` unless the user asks. Already-locked screens still need a manual unlock (AX cannot run locked). |
+| **Wake hold** | On macOS, helpers use a **multi-layer** hold for long audits (host `displaysleep` can be ~2m): (1) primary `caffeinate -dims -w <self>`, (2) periodic `caffeinate -u -t 120` user-active pulses, (3) `ensureAlive()` restarts a dead primary from the wait loop. Released on every exit. Only while the **Swift helper** runs — **do not** wrap in an extra long-lived `caffeinate` unless the user asks. Already-locked screens still need a manual unlock (AX cannot run locked). |
 | **Vision** | None — shell + AX only. |
 
 ## Scripts
