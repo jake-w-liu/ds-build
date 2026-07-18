@@ -355,13 +355,31 @@ func isChromeText(_ t: String) -> Bool {
     "new chat", "projects", "plugins", "sites", "scheduled", "message chatgpt",
     "recents", "search", "send", "add files and more", "select chatgpt model",
     "chatgpt", "work", "chat",
+    // Zip-ingest / loading chrome — not a finished audit body
+    "no sources yet", "sources", "thinking", "searching", "analyzing",
+    "audit request for codebase", "rust codebase audit",
   ]
   if chrome.contains(l) { return true }
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("remove ") { return true }
   if l == zipName || (l.hasSuffix(".zip") && l.count < 80) { return true }
   if l.contains("source-archive") && l.count < 80 { return true }
-  // Sidebar recents / noise noise
+  if l.contains("no sources yet") { return true }
+  // Sidebar recents / icon noise
   if l.count < 3 { return true }
+  return false
+}
+
+/// True when AX text is still a loading/ingest shell, not a real ChatGPT answer.
+func isIncompleteZipReply(_ t: String) -> Bool {
+  let l = t.lowercased()
+  if l.contains("no sources yet") { return true }
+  if l.contains("audit request for codebase") && t.count < 400 { return true }
+  // Mostly our own prompt headings echoed back while zip is still opening
+  let promptish = ["architecture", "dependencies", "configuration", "do not suggest any code edits"]
+  let hits = promptish.filter { l.contains($0) }.count
+  if hits >= 2 && t.count < 1500 && !l.contains("severity") && !l.contains("finding") && !l.contains("risk") {
+    return true
+  }
   return false
 }
 func allStaticTexts() -> [String] {
@@ -395,12 +413,22 @@ let exactToken: String? = {
   return nil
 }()
 
-func finishSuccess(_ text: String) -> Never {
+/// Complete only when body is a real reply (not zip-loading chrome). Returns false to keep waiting.
+@discardableResult
+func finishIfReady(_ text: String) -> Bool {
+  if isIncompleteZipReply(text) {
+    log("finishIfReady: still loading/incomplete chars=\(text.count)")
+    return false
+  }
+  // Zip audits: require a substantive body; short tokens still OK via exactToken path.
+  if exactToken == nil && text.count < 80 {
+    log("finishIfReady: body too short for zip audit chars=\(text.count)")
+    return false
+  }
   pb.clearContents()
   if let oldString { pb.setString(oldString, forType: .string) }
   let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
   try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
-  // Stage under project early so a concurrent DS reader can reverify mid-flight
   _ = stageResultForDs([
     "ok": true,
     "status": "complete",
@@ -425,6 +453,8 @@ func finishSuccess(_ text: String) -> Never {
     "wakeHoldPid": wakePid as Any,
     "responseChars": text.count,
   ])
+  // emit is Never; keep compiler happy
+  return true
 }
 
 var stable = 0
@@ -464,7 +494,7 @@ while deadline == nil || Date() < deadline! {
     log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       if a == best { stable += 1 } else { stable = 0; best = a }
-      if stable >= 2 { finishSuccess(best) }
+      if stable >= 2 { _ = finishIfReady(best) }
       continue
     }
   }
@@ -500,7 +530,7 @@ while deadline == nil || Date() < deadline! {
   )
   if looksComplete && stable >= 2 {
     if assistant == best || assistant.count >= best.count {
-      finishSuccess(assistant.count >= best.count ? assistant : best)
+      _ = finishIfReady(assistant.count >= best.count ? assistant : best)
     }
   }
   if assistant.count > best.count + 20 {
@@ -528,23 +558,21 @@ while deadline == nil || Date() < deadline! {
   }
   // Long audits: require growth then stability; min body length 40 (captures Work-nudge)
   if sawGrowth && stable >= 3 && best.count > 40 {
-    finishSuccess(best)
+    _ = finishIfReady(best)
   }
-  // Short replies
-  if stable >= 4 && best.count > 30 {
-    finishSuccess(best)
+  // Short replies (still must pass incomplete filter)
+  if stable >= 4 && best.count > 80 {
+    _ = finishIfReady(best)
   }
   // Keyword-complete body that stabilized once (stable path lag)
-  if looksComplete && stable >= 1 && best.count >= 40 && assistant.count >= best.count {
-    // Need one more stable tick next loop unless already high
-    if stable >= 2 { finishSuccess(best) }
+  if looksComplete && stable >= 1 && best.count >= 80 && assistant.count >= best.count {
+    if stable >= 2 { _ = finishIfReady(best) }
   }
 }
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
-if best.count > 30 {
-  // Prefer any non-empty complete-looking body over hard fail after long wait
-  finishSuccess(best)
+if best.count > 80, !isIncompleteZipReply(best) {
+  _ = finishIfReady(best)
 }
 emit([
   "ok": false,
