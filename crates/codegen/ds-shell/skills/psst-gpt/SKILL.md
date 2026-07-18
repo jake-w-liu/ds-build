@@ -44,7 +44,9 @@ scripts/run_full_codebase_audit.sh      # one-shot full-tree entry
 | Existing zip | `swift …/psst_zip_upload.swift --zip PATH --timeout 0 -- "…"` |
 | Same chat follow-up | add `--no-new-chat` |
 
-`--timeout 0` = wait until ChatGPT reply stabilizes (heavy audits).
+`--timeout 0` = long-wait mode (hard-capped ~60m). The zip helper **scrolls**,
+**accumulates** streaming AX chips, and after Stop clears uses **Copy message**
+clipboard harvest so long audits reach `.ds/psst-gpt/last-response.md` in full.
 
 ### Full-codebase audit (default for “zip this full codebase…”)
 
