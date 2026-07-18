@@ -1360,6 +1360,9 @@ func emitComplete(_ text: String, finishNote: String) -> Never {
     "attached": true,
     "zipPath": zipPath as Any,
     "finishNote": finishNote,
+    "wakeHoldPid": wakePid as Any,
+    "wakeHoldReleased": true,
+    "responseChars": text.count,
   ], responseText: text)
   emit([
     "ok": true,
