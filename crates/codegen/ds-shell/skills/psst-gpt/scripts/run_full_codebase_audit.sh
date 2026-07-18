@@ -19,8 +19,10 @@ if ! grep -q 'double-check' "$HELPER" \
   || ! grep -q 'avg < 48' "$HELPER" \
   || ! grep -q 'generation-state-machine' "$HELPER" \
   || ! grep -q 'classifyGenerationPhase' "$HELPER" \
-  || ! grep -q 'ComposerControls' "$HELPER"; then
-  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
+  || ! grep -q 'ComposerControls' "$HELPER" \
+  || ! grep -q 'mergeReplyBody' "$HELPER" \
+  || ! grep -q 'merge=non-dup' "$HELPER"; then
+  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine/non-dup-merge markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
   exit 2
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then

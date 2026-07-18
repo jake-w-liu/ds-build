@@ -258,6 +258,15 @@ func isIncompleteZipReply(_ t: String) -> Bool {
     "before responding", "may be less capable",
   ]
   if loadingChrome.contains(where: { l.contains($0) }) { return true }
+  // Explicit Chat refusal / Work-mode redirect is a complete deliverable for zip audits.
+  let completeNudge = [
+    "work mode is the appropriate", "continue with work", "switch to work",
+    "cannot open the zip", "can't open the zip", "unable to open",
+    "cannot open", "can't open the attachment", "repository-scale file analysis",
+  ]
+  if completeNudge.contains(where: { l.contains($0) }) && trimmed.count >= 40 {
+    return false
+  }
   // Chat title / one-line chips are not an audit body
   if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 400) {
     return true
@@ -271,6 +280,8 @@ func isIncompleteZipReply(_ t: String) -> Bool {
     let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
     if avg < 48 && trimmed.count < 900 { return true }
   }
+  // Inflated transcript soup (sidebar history repeated) is never a finished reply.
+  if isTranscriptSoup(trimmed) { return true }
   // Zip audits need a substantive body; short stubs always incomplete
   if trimmed.count < 300 { return true }
   // Mostly our own prompt headings echoed back while zip is still opening
@@ -285,6 +296,131 @@ func isIncompleteZipReply(_ t: String) -> Bool {
     trimmed.contains("1.") || trimmed.contains("- ")
   if !hasSentence && trimmed.count < 1200 { return true }
   return false
+}
+
+// MARK: - Pure body merge (no AX). Prevents exponential deep-harvest inflation.
+
+/// Many short unique lines with low information density → sidebar/history soup, not one reply.
+func isTranscriptSoup(_ text: String) -> Bool {
+  let lines = text.split(whereSeparator: \.isNewline)
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    .filter { !$0.isEmpty }
+  guard lines.count >= 12 else { return false }
+  let unique = Set(lines)
+  let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
+  // History lists: lots of short unique titles, or extreme line duplication.
+  if avg < 64 && lines.count >= 20 { return true }
+  if lines.count >= 40 && unique.count * 3 < lines.count { return true }
+  return false
+}
+
+/// True when candidate looks like base repeated/joined rather than a longer single reply.
+func isInflatedOver(base: String, candidate: String) -> Bool {
+  let b = base.trimmingCharacters(in: .whitespacesAndNewlines)
+  let c = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !b.isEmpty, c.count >= b.count * 2 else { return false }
+  if isTranscriptSoup(c) && !isTranscriptSoup(b) { return true }
+  // base (or long prefix) appears ≥2 times → concatenation of prior harvests
+  var hits = 0
+  var search = c.startIndex
+  let needle = String(b.prefix(min(80, b.count)))
+  if needle.count >= 24 {
+    while let r = c.range(of: needle, range: search..<c.endIndex) {
+      hits += 1
+      if hits >= 2 { return true }
+      search = r.upperBound
+    }
+  }
+  // Hard ceiling: never accept multi-MB bodies unless base was already huge
+  if c.count > 200_000 && c.count > b.count * 3 { return true }
+  return false
+}
+
+/// Merge a new harvest into the current best body without concatenating full history blobs.
+/// Pure: same inputs → same output. Used by wait-loop + selfcheck.
+func mergeReplyBody(best: String, candidate: String, minDelta: Int = 20) -> String {
+  let b = best.trimmingCharacters(in: .whitespacesAndNewlines)
+  let c = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+  if c.isEmpty { return b }
+  if b.isEmpty {
+    return isTranscriptSoup(c) ? "" : c
+  }
+  if c == b { return b }
+  // Never replace a good reply with sidebar soup.
+  if isTranscriptSoup(c) && !isTranscriptSoup(b) { return b }
+  if isInflatedOver(base: b, candidate: c) { return b }
+  // Stream growth: candidate is a superset of best.
+  if c.count > b.count && c.contains(b) { return c }
+  // Shrink supersede: best was noisy; candidate is cleaner and still substantial.
+  if b.contains(c) && c.count >= 40 && !isTranscriptSoup(c) {
+    // Prefer shorter non-soup only when best looks like soup or massive inflation.
+    if isTranscriptSoup(b) || b.count > c.count * 3 { return c }
+  }
+  if c.count > b.count + minDelta { return c }
+  if c.count > b.count { return c }
+  return b
+}
+
+/// Ingest streaming AX chips into a running part list; returns best single-body view.
+/// Does **not** return joined(all historical supersets) — that caused exponential growth.
+func ingestAxChips(
+  texts: [String],
+  baseline: Set<String>,
+  prompt: String,
+  parts: inout [String],
+  partSet: inout Set<String>
+) -> (assistant: String, novel: Int, newParts: Int) {
+  let novel = texts.filter { !baseline.contains($0) && !prompt.contains($0) }
+  let filtered = novel.filter { t in
+    let low = t.lowercased()
+    if t.count < 2 { return false }
+    if low.hasPrefix("audit only") { return false }
+    if low == "audit rust monorepo" || low == "audit request rust repo" { return false }
+    if t.count < 12 && !t.contains(" ") {
+      let outlineish =
+        t.hasSuffix(",") || t.hasSuffix(":") || t.hasSuffix(".") || t.hasSuffix(";") ||
+        t.hasSuffix("-") || t.contains("/") ||
+        t.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil ||
+        t.range(of: #"^[A-Z]-\d+"#, options: .regularExpression) != nil
+      if !outlineish { return false }
+    }
+    return true
+  }
+  var newParts = 0
+  for t in filtered {
+    // Only accumulate short/medium chips for streaming outlines — never multi-KB blobs.
+    if t.count > 2_000 { continue }
+    if partSet.contains(t) { continue }
+    if parts.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
+    if let idx = parts.firstIndex(where: { t.contains($0) && t.count > $0.count + 10 }) {
+      partSet.remove(parts[idx])
+      parts[idx] = t
+      partSet.insert(t)
+      newParts += 1
+      continue
+    }
+    partSet.insert(t)
+    parts.append(t)
+    newParts += 1
+    // Cap part bookkeeping
+    if parts.count > 200 {
+      let drop = parts.count - 200
+      for old in parts.prefix(drop) { partSet.remove(old) }
+      parts.removeFirst(drop)
+    }
+  }
+  let longestChip = filtered.max(by: { $0.count < $1.count }) ?? ""
+  let joinedChips = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  // Prefer one long chip / live line over unbounded join of titles.
+  let assistant: String
+  if longestChip.count >= 200 {
+    assistant = longestChip
+  } else if !isTranscriptSoup(joinedChips) && joinedChips.count <= max(4_000, longestChip.count * 3) {
+    assistant = joinedChips.count >= longestChip.count ? joinedChips : longestChip
+  } else {
+    assistant = longestChip
+  }
+  return (assistant, novel.count, newParts)
 }
 
 /// Drive real `isIncompleteZipReply` with known fixtures (no ChatGPT needed).
@@ -310,6 +446,11 @@ func runSelfcheckFinishRules() -> Never {
       "Untitled conversation\nChatGPT is responding\nOur systems are thinking a bit more about this request before responding.",
       expectIncomplete: true),
     Case(name: "real_audit", text: longAudit, expectIncomplete: false),
+    Case(
+      name: "work_nudge",
+      text: "The task requires opening and systematically inspecting a large uploaded code archive; Work mode is the appropriate environment for repository-scale file analysis.",
+      expectIncomplete: false
+    ),
   ]
   var results: [[String: Any]] = []
   var failed = 0
@@ -418,6 +559,7 @@ while i < args.count {
   if a == "--pack-only" { packOnly = true; i += 1; continue }
   if a == "--selfcheck-finish-rules" { runSelfcheckFinishRules() }
   if a == "--selfcheck-generation-policy" { runSelfcheckGenerationPolicy() }
+  if a == "--selfcheck-absorb" { runSelfcheckAbsorb() }
   if a == "--" { promptParts.append(contentsOf: args[(i + 1)...]); break }
   if a.hasPrefix("-") { emit(["ok": false, "code": "BAD_ARGS", "message": "Unknown \(a)"], exitCode: 2) }
   promptParts.append(a); i += 1
@@ -938,13 +1080,18 @@ struct ComposerControls: Equatable {
   }
 
   /// Strong evidence the turn ended (user can send again).
+  /// Weak `!stop && !send` is **ambiguous** (AX flicker) — not treated as ended here.
   var isGenerationEnded: Bool {
     if loadingChrome { return false }
     if isGenerationActive { return false }
-    // Send ready, or Stop gone (Send may lag one frame), or sticky Stop with Send.
+    // Canonical: Send is back (optionally with sticky Stop still listed).
     if send { return true }
-    if !stop { return true }
     return false
+  }
+
+  /// Stop cleared and Send not yet visible — weak end signal for settle (needs body proof).
+  var stopClearedAmbiguous: Bool {
+    !loadingChrome && !stop && !send
   }
 }
 
@@ -994,22 +1141,25 @@ func classifyGenerationPhase(_ s: GenerationSample, exactToken: String? = nil) -
   if !s.sawThisTurn {
     return .awaitingStart
   }
-  // This turn ran; UI no longer shows active generation.
-  guard s.controls.isGenerationEnded else {
-    // Ambiguous (e.g. neither Stop nor Send): stay active-safe if we already saw the turn.
+  let acceptable = bodyAcceptableForFinish(s.body, exactToken: exactToken)
+  // Strong end: Send ready. Weak end: Stop cleared + acceptable body + stable harvests
+  // (covers AX where Send is briefly missing after a short Work-nudge reply).
+  let strongEnd = s.controls.isGenerationEnded
+  let weakEnd =
+    s.controls.stopClearedAmbiguous && acceptable && s.consecutiveStableSnapshots >= 3
+  guard strongEnd || weakEnd else {
+    // Ambiguous without acceptable body: stay active-safe (Pro may still be thinking).
     return .active
   }
-  let acceptable = bodyAcceptableForFinish(s.body, exactToken: exactToken)
-  // Need a few consecutive "ended" observations so one AX flicker does not finish early.
-  if s.consecutiveEndedObservations < 2 {
+  // Need a few consecutive "ended" observations for strong end so one AX flicker is ignored.
+  if strongEnd && s.consecutiveEndedObservations < 2 {
     return .settling
   }
   if acceptable && s.consecutiveStableSnapshots >= 3 {
     return .complete
   }
   // Generation ended but capture never became a full audit — only after long settle.
-  // Thresholds are consecutive *observations while ended*, not wall-clock while thinking.
-  if !acceptable && s.consecutiveEndedObservations >= 40 && s.consecutiveStableSnapshots >= 20 {
+  if strongEnd && !acceptable && s.consecutiveEndedObservations >= 40 && s.consecutiveStableSnapshots >= 20 {
     return .captureFailed
   }
   return .settling
@@ -1107,6 +1257,108 @@ func emitStablePartial(_ text: String, code: String, message: String, elapsed: I
     "elapsedSec": elapsed,
     "responseChars": text.count,
   ], exitCode: 1)
+}
+
+/// Pure absorb/merge selfcheck — proves deep harvest cannot exponential-duplicate.
+func runSelfcheckAbsorb() -> Never {
+  struct Case {
+    let name: String
+    let steps: [String]
+    let maxFinal: Int
+    let minFinal: Int
+    let mustContain: String?
+  }
+  let reply =
+    "The task requires opening and systematically inspecting a large uploaded code archive; Work mode is the appropriate environment for repository-scale file analysis."
+  let stream1 = "Top risks by severity:"
+  let stream2 = "Top risks by severity:\n1. Sandbox fail-open on unsupported platforms."
+  let soup = (0..<80).map { "Chat title \($0) audit request" }.joined(separator: "\n")
+  let cases: [Case] = [
+    Case(
+      name: "same_deep_harvest_twice",
+      steps: [reply, reply, reply],
+      maxFinal: reply.count + 5,
+      minFinal: reply.count,
+      mustContain: "Work mode is the appropriate"
+    ),
+    Case(
+      name: "stream_growth_not_concat",
+      steps: [stream1, stream2, stream2],
+      maxFinal: stream2.count + 5,
+      minFinal: stream2.count,
+      mustContain: "Sandbox fail-open"
+    ),
+    Case(
+      name: "reject_history_soup_after_reply",
+      steps: [reply, soup, soup + "\n" + reply],
+      maxFinal: reply.count + 20,
+      minFinal: 40,
+      mustContain: "Work mode is the appropriate"
+    ),
+    Case(
+      name: "reject_exact_doubling",
+      steps: [reply, reply + "\n" + reply, (reply + "\n").count > 0 ? String(repeating: reply + "\n", count: 8) : reply],
+      maxFinal: reply.count + 20,
+      minFinal: reply.count,
+      mustContain: "repository-scale"
+    ),
+  ]
+  var results: [[String: Any]] = []
+  var failed = 0
+  for c in cases {
+    var best = ""
+    for step in c.steps {
+      best = mergeReplyBody(best: best, candidate: step, minDelta: 5)
+    }
+    var pass = best.count >= c.minFinal && best.count <= c.maxFinal
+    if let m = c.mustContain, !best.contains(m) { pass = false }
+    if isTranscriptSoup(best) && c.name != "reject_history_soup_after_reply" { pass = false }
+    // doubling selfcheck: final must not be many multiples of reply
+    if c.name == "reject_exact_doubling" && best.count > reply.count * 2 { pass = false }
+    if !pass { failed += 1 }
+    results.append([
+      "name": c.name,
+      "finalChars": best.count,
+      "maxFinal": c.maxFinal,
+      "minFinal": c.minFinal,
+      "pass": pass,
+      "head": String(best.prefix(80)),
+    ])
+  }
+  // Chip ingest: joining must stay linear
+  var parts: [String] = []
+  var partSet = Set<String>()
+  var chipBest = ""
+  for i in 0..<30 {
+    let texts = (0..<i + 1).map { "chip\($0)" } + [stream2]
+    let ing = ingestAxChips(
+      texts: texts,
+      baseline: [],
+      prompt: "prompt",
+      parts: &parts,
+      partSet: &partSet
+    )
+    chipBest = mergeReplyBody(best: chipBest, candidate: ing.assistant, minDelta: 5)
+  }
+  let chipPass = chipBest.count < 5_000 && chipBest.contains("Sandbox")
+  if !chipPass { failed += 1 }
+  results.append([
+    "name": "chip_ingest_linear",
+    "finalChars": chipBest.count,
+    "pass": chipPass,
+  ])
+  let ok = failed == 0
+  let out: [String: Any] = [
+    "ok": ok,
+    "status": "selfcheck-absorb",
+    "failed": failed,
+    "cases": results,
+  ]
+  if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]),
+     let str = String(data: d, encoding: .utf8) {
+    print(str)
+  }
+  exit(ok ? 0 : 1)
 }
 
 /// Deterministic policy selfcheck (no ChatGPT). Invoked via --selfcheck-generation-policy.
@@ -1239,7 +1491,7 @@ var phaseEnteredAt = Date()
 var lastFingerprint = ""
 var consecutiveStableSnapshots = 0
 var consecutiveEndedObservations = 0
-// Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
+// Short streaming chips only (never full deep-harvest blobs).
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
@@ -1250,63 +1502,18 @@ log(
   "wait-loop start timeoutSec=\(timeoutSec) " +
   "deadline=\(deadline.map { "\($0.timeIntervalSince(waitStarted))s" } ?? "none(unlimited)") " +
   "wakeHoldPid=\(wakePid.map(String.init) ?? "none") " +
-  "policy=generation-state-machine"
+  "policy=generation-state-machine merge=non-dup"
 )
 
-func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, newParts: Int) {
-  let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
-  let filtered = novel.filter { t in
-    let low = t.lowercased()
-    if t.count < 2 { return false }
-    if low.hasPrefix("audit only") { return false }
-    if low == "audit rust monorepo" || low == "audit request rust repo" { return false }
-    // Keep outline chips ("dependencies,", "H-1.") — ChatGPT streams these as short StaticTexts.
-    if t.count < 12 && !t.contains(" ") {
-      let outlineish =
-        t.hasSuffix(",") || t.hasSuffix(":") || t.hasSuffix(".") || t.hasSuffix(";") ||
-        t.hasSuffix("-") || t.contains("/") ||
-        t.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil ||
-        t.range(of: #"^[A-Z]-\d+"#, options: .regularExpression) != nil
-      if !outlineish { return false }
-    }
-    return true
-  }
-  var newParts = 0
-  for t in filtered {
-    if accumulatedSet.contains(t) { continue }
-    if accumulatedParts.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
-    if let idx = accumulatedParts.firstIndex(where: { t.contains($0) && t.count > $0.count + 10 }) {
-      accumulatedSet.remove(accumulatedParts[idx])
-      accumulatedParts[idx] = t
-      accumulatedSet.insert(t)
-      newParts += 1
-      continue
-    }
-    accumulatedSet.insert(t)
-    accumulatedParts.append(t)
-    newParts += 1
-  }
-  let live = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  let accumulated = accumulatedParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  let assistant = accumulated.count >= live.count ? accumulated : live
-  return (assistant, novel.count, newParts)
-}
-
 func absorbBody(_ text: String, minDelta: Int = 20) {
-  guard text.count > best.count + minDelta else {
-    if text.count > best.count { best = text }
-    return
-  }
-  if !text.isEmpty && !accumulatedSet.contains(text) {
-    accumulatedSet.insert(text)
-    accumulatedParts.append(text)
-  }
-  if text.count >= best.count + 100 {
+  let merged = mergeReplyBody(best: best, candidate: text, minDelta: minDelta)
+  if merged == best { return }
+  if merged.count >= best.count + 100 {
     lastSignificantGrowthAt = Date()
   }
-  best = text
-  sawGrowth = true
-  sawThisTurn = true
+  if merged.count > best.count { sawGrowth = true }
+  best = merged
+  if !merged.isEmpty { sawThisTurn = true }
   // Growth invalidates settle fingerprint stability.
   consecutiveStableSnapshots = 0
 }
@@ -1371,7 +1578,13 @@ while true {
       sawThisTurn = true
     }
   }
-  let ing = ingestCaptureTexts(texts)
+  let ing = ingestAxChips(
+    texts: texts,
+    baseline: baseline2,
+    prompt: prompt,
+    parts: &accumulatedParts,
+    partSet: &accumulatedSet
+  )
   absorbBody(ing.assistant, minDelta: 5)
 
   // Re-read controls after harvest (chrome may appear in body).
@@ -1385,7 +1598,10 @@ while true {
     consecutiveStableSnapshots = best.isEmpty ? 0 : 1
     lastFingerprint = fp
   }
-  if controls.isGenerationEnded {
+  // Count strong (Send) ends and weak (Stop cleared + acceptable body) ends.
+  let weakEnded =
+    controls.stopClearedAmbiguous && bodyAcceptableForFinish(best, exactToken: exactToken)
+  if controls.isGenerationEnded || weakEnded {
     consecutiveEndedObservations += 1
   } else {
     consecutiveEndedObservations = 0
