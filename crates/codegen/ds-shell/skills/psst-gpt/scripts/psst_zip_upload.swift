@@ -148,10 +148,18 @@ func isIncompleteZipReply(_ t: String) -> Bool {
   if trimmed.isEmpty { return true }
   if l.contains("no sources yet") { return true }
   if l.contains("audit request for codebase") && trimmed.count < 400 { return true }
+  // Mid-stream / loading chrome (must never finalize as complete)
+  let loadingChrome = [
+    "chatgpt is responding", "systems are thinking", "thinking a bit more",
+    "untitled conversation", "for a quicker response", "learn more",
+    "before responding", "may be less capable",
+  ]
+  if loadingChrome.contains(where: { l.contains($0) }) { return true }
   // Chat title / one-line chips are not an audit body
-  if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 200) {
+  if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 400) {
     return true
   }
+  if l.hasPrefix("untitled") && trimmed.count < 400 { return true }
   // Fragment salad: many short lines (AX word chips) without a real paragraph
   let lines = trimmed.split(whereSeparator: \.isNewline)
     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -194,6 +202,9 @@ func runSelfcheckFinishRules() -> Never {
     Case(name: "short_stub", text: "Looks fine overall with some risks mentioned briefly.", expectIncomplete: true),
     Case(name: "fragment_salad", text:
       "Audit Rust Monorepo\narchitectural\nsubstantial:\nconcentrated\nauthentication,",
+      expectIncomplete: true),
+    Case(name: "loading_chrome", text:
+      "Untitled conversation\nChatGPT is responding\nOur systems are thinking a bit more about this request before responding.",
       expectIncomplete: true),
     Case(name: "real_audit", text: longAudit, expectIncomplete: false),
   ]
@@ -446,13 +457,16 @@ func isChromeText(_ t: String) -> Bool {
     "no sources yet", "sources", "thinking", "searching", "analyzing",
     "audit request for codebase", "rust codebase audit",
     // Auto chat titles / chips (not body)
-    "audit rust monorepo",
+    "audit rust monorepo", "untitled conversation",
+    "chatgpt is responding", "learn more",
   ]
   if chrome.contains(l) { return true }
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("remove ") { return true }
   if l == zipName || (l.hasSuffix(".zip") && l.count < 80) { return true }
   if l.contains("source-archive") && l.count < 80 { return true }
   if l.contains("no sources yet") { return true }
+  if l.contains("chatgpt is responding") || l.contains("systems are thinking") { return true }
+  if l.contains("thinking a bit more") || l.contains("for a quicker response") { return true }
   // Sidebar recents / icon noise
   if l.count < 3 { return true }
   return false
@@ -701,6 +715,11 @@ let exactToken: String? = {
 func finishIfReady(_ text: String) -> Bool {
   if isIncompleteZipReply(text) {
     log("finishIfReady: still loading/incomplete chars=\(text.count)")
+    return false
+  }
+  // Still generating → never finalize (Stop visible means stream not done).
+  if findStopButton() != nil {
+    log("finishIfReady: Stop still present — waiting for generation to finish")
     return false
   }
   // Zip audits: require a substantive body; short tokens still OK via exactToken path.
