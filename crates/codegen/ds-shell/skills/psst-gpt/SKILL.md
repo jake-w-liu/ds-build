@@ -47,17 +47,21 @@ Also under the same `scripts/` next to this `SKILL.md` after extract.
 
 ### Full-codebase audit (default for “zip this full codebase…”)
 
-```bash
-SCRIPT="$HOME/.ds/skills/psst-gpt/scripts/psst_zip_upload.swift"
-# Prefer skill-dir script if present:
-SKILL_DIR="$(dirname "$(find …)")"  # use path of this SKILL.md's scripts/
+**One shot. Foreground. `--timeout 0` only.** Do **not** use 30s timeouts, do **not** background the helper, do **not** fall back to text-only when the user asked for a zip attach.
 
+```bash
+# Preferred entry (blocks until ChatGPT stabilizes; stages .ds/psst-gpt/*):
+bash "$HOME/.ds/skills/psst-gpt/scripts/run_full_codebase_audit.sh" "$PWD"
+
+# Equivalent:
 swift "$HOME/.ds/skills/psst-gpt/scripts/psst_zip_upload.swift" \
   --root "$PWD" --timeout 0 -- \
-  "Audit-only instructions for ChatGPT…"
+  "AUDIT ONLY. Chat only — never Work. … structured audit …"
 ```
 
-Use a **long** `run_terminal_command` timeout (or no cap) so DS does not kill the helper mid-wait.
+Host tool timeout for this command must be **long / unlimited** (zip + multi-minute GPT audit).
+
+If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open zip in Chat** body with `ok: true` and non-empty `finalDeliveryText`, that **is** a complete result — **stop**, report it, do not invent more retries or text-only substitutes.
 
 **Do not make code edits** when the user asked for audit-only — report ChatGPT’s findings.
 
@@ -95,3 +99,6 @@ Use a **long** `run_terminal_command` timeout (or no cap) so DS does not kill th
 
 Never use Work. Never invent an audit if the helper failed.  
 When complete with non-empty `finalDeliveryText`, that text is the audit deliverable for DS continuation.
+
+For **zip / full codebase**: run `run_full_codebase_audit.sh` (or zip helper with `--timeout 0`) **once**, wait for exit, read staged JSON/md.  
+**Forbidden:** short timeouts, background+poll loops, abandoning zip for a text-only “describe the tree” substitute when the user asked to attach the zip.
