@@ -886,6 +886,7 @@ var sawGrowth = false
 var tick = 0
 var stopGoneTicks = 0
 var lastCopyAttemptTick = -100
+var lastSignificantGrowthAt = Date()
 // Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
@@ -899,6 +900,9 @@ let stopGoneHarvestTicks = 6
 // Stable after full harvest attempts (~2.5 min at 2.5s) before stall partial.
 let stallTicksStopGone = 60
 let stallTicksNoGrowth = 150
+// Wall-clock: no +100 char growth for this long → force harvest / exit (Stop can stick true).
+let noGrowthForceHarvestSec: Double = 90
+let noGrowthForceExitSec: Double = 180
 log("wait-loop start timeoutSec=\(timeoutSec) effectiveTimeoutSec=\(effectiveTimeoutSec) hardCap=\(timeoutSec <= 0) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
 
 func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, newParts: Int) {
@@ -967,16 +971,21 @@ while Date() < deadline {
   // Periodically scroll while streaming so long replies stay in the AX tree.
   if tick % 3 == 0 { scrollTranscript() }
 
-  // When generation ends (or every ~8 ticks while streaming), deep-harvest including Copy message.
-  let shouldCopy = !stopPresent || (tick - lastCopyAttemptTick >= 8 && best.count > 200)
+  // Copy harvest: always when Stop gone; also when body is large & frozen (Stop can stick true).
+  let stagnantSec = Date().timeIntervalSince(lastSignificantGrowthAt)
+  let forceCopyDespiteStop = stopPresent && best.count >= 800 && stagnantSec >= noGrowthForceHarvestSec
+  let shouldCopy = !stopPresent || forceCopyDespiteStop || (tick - lastCopyAttemptTick >= 10 && best.count > 500)
   if shouldCopy { lastCopyAttemptTick = tick }
-  let deep = deepHarvestReply(includeCopy: shouldCopy && !stopPresent)
+  let deep = deepHarvestReply(includeCopy: shouldCopy)
   if deep.count > best.count + 20 {
-    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(!stopPresent))")
+    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(shouldCopy) forceStop=\(forceCopyDespiteStop))")
     // Feed clipboard body into accumulation as one blob
     if !deep.isEmpty && !accumulatedSet.contains(deep) {
       accumulatedSet.insert(deep)
       accumulatedParts.append(deep)
+    }
+    if deep.count >= best.count + 100 {
+      lastSignificantGrowthAt = Date()
     }
     best = deep
     sawGrowth = true
@@ -1028,6 +1037,9 @@ while Date() < deadline {
   )
 
   if assistant.count > best.count + 5 {
+    if assistant.count >= best.count + 100 {
+      lastSignificantGrowthAt = Date()
+    }
     sawGrowth = true
     best = assistant
     stable = 0
@@ -1047,12 +1059,12 @@ while Date() < deadline {
     }
   }
 
-  // Prefer finishing only after Stop is gone + a few harvest ticks (full body via Copy).
+  // Prefer finishing after Stop is gone + harvest ticks (full body via Copy).
   if !stopPresent && stopGoneTicks >= stopGoneHarvestTicks {
-    // Final deep harvest before finish attempts
     if stopGoneTicks == stopGoneHarvestTicks || stopGoneTicks % 4 == 0 {
       let h = deepHarvestReply(includeCopy: true)
       if h.count > best.count {
+        if h.count >= best.count + 100 { lastSignificantGrowthAt = Date() }
         best = h
         sawGrowth = true
         stable = 0
@@ -1070,9 +1082,60 @@ while Date() < deadline {
     }
   }
 
-  // While still generating, only early-finish on huge stable bodies (rare).
-  if stopPresent && best.count >= 8000 && stable >= 8 {
-    log("large body while Stop present; waiting for Stop to clear before finish")
+  // Stop button can stick true after ChatGPT finished — don't wait forever.
+  // After 90s no significant growth with a large body: harvest+try complete ignoring Stop.
+  let stagnant = Date().timeIntervalSince(lastSignificantGrowthAt)
+  if sawGrowth && best.count >= 800 && stagnant >= noGrowthForceHarvestSec {
+    log("force path: stagnant \(Int(stagnant))s best=\(best.count) stop=\(stopPresent) — copy harvest")
+    let h = deepHarvestReply(includeCopy: true)
+    if h.count > best.count {
+      if h.count >= best.count + 100 { lastSignificantGrowthAt = Date() }
+      best = h
+      stable = 0
+      log("force harvest chars=\(h.count)")
+    }
+    // If still complete-looking and Stop may be false-positive, try finish.
+    if best.count >= 1000 && !isIncompleteZipReply(best) {
+      // Temporarily allow finish even if Stop still listed (sticky AX).
+      if findStopButton() != nil {
+        log("force finish attempt despite Stop (sticky AX) chars=\(best.count)")
+      }
+      // Bypass Stop check only after long stagnation + large body
+      if stagnant >= noGrowthForceExitSec {
+        pb.clearContents()
+        if let oldString { pb.setString(oldString, forType: .string) }
+        let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
+        try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
+        if !isIncompleteZipReply(best) && best.count >= 300 {
+          _ = stageResultForDs([
+            "ok": true,
+            "status": "complete",
+            "finalDeliveryText": best,
+            "attached": true,
+            "zipPath": zipPath as Any,
+            "note": "finished after Stop stuck + copy harvest",
+          ], responseText: best)
+          emit([
+            "ok": true,
+            "status": "complete",
+            "mode": "chat",
+            "workOn": false,
+            "attached": true,
+            "attachLabels": Array(labels.prefix(5)),
+            "zipPath": zipPath as Any,
+            "responsePath": respPath,
+            "finalDeliveryText": best,
+            "mustReturnFinalDelivery": true,
+            "mustReturnVerbatim": true,
+            "method": "clipboard-file-paste",
+            "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
+            "wakeHoldPid": wakePid as Any,
+            "responseChars": best.count,
+            "finishNote": "stop-sticky-force",
+          ])
+        }
+      }
+    }
   }
 
   // --- Stall backstops: deep harvest first, then honest partial (never hang) ---
@@ -1088,17 +1151,47 @@ while Date() < deadline {
       elapsed: elapsed
     )
   }
-  if sawGrowth && stable >= stallTicksNoGrowth && best.count >= 40 {
-    log("stall backstop: no-growth stable=\(stable) stop=\(stopPresent)")
-    if !stopPresent {
-      let h = deepHarvestReply(includeCopy: true)
-      if h.count > best.count { best = h }
-      if finishIfReady(best) { /* Never */ }
+  if sawGrowth && (stable >= stallTicksNoGrowth || stagnant >= noGrowthForceExitSec + 60) && best.count >= 40 {
+    log("stall backstop: no-growth stable=\(stable) stagnant=\(Int(stagnant))s stop=\(stopPresent)")
+    let h = deepHarvestReply(includeCopy: true)
+    if h.count > best.count { best = h }
+    if finishIfReady(best) { /* Never */ }
+    // Large frozen body after harvest: accept as complete if substantive
+    if best.count >= 1000 && !isIncompleteZipReply(best) {
+      pb.clearContents()
+      if let oldString { pb.setString(oldString, forType: .string) }
+      let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
+      try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
+      _ = stageResultForDs([
+        "ok": true,
+        "status": "complete",
+        "finalDeliveryText": best,
+        "attached": true,
+        "zipPath": zipPath as Any,
+      ], responseText: best)
+      emit([
+        "ok": true,
+        "status": "complete",
+        "mode": "chat",
+        "workOn": false,
+        "attached": true,
+        "attachLabels": Array(labels.prefix(5)),
+        "zipPath": zipPath as Any,
+        "responsePath": respPath,
+        "finalDeliveryText": best,
+        "mustReturnFinalDelivery": true,
+        "mustReturnVerbatim": true,
+        "method": "clipboard-file-paste",
+        "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
+        "wakeHoldPid": wakePid as Any,
+        "responseChars": best.count,
+        "finishNote": "stagnant-large-body",
+      ])
     }
     emitStablePartial(
       best,
       code: "AX_CAPTURE_STALL",
-      message: "No body growth for \(stable) ticks. Returning best capture (chars=\(best.count)).",
+      message: "No significant body growth for \(Int(stagnant))s. Returning best capture (chars=\(best.count)).",
       elapsed: elapsed
     )
   }
