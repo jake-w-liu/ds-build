@@ -358,6 +358,8 @@ func isChromeText(_ t: String) -> Bool {
     // Zip-ingest / loading chrome — not a finished audit body
     "no sources yet", "sources", "thinking", "searching", "analyzing",
     "audit request for codebase", "rust codebase audit",
+    // Auto chat titles / chips (not body)
+    "audit rust monorepo",
   ]
   if chrome.contains(l) { return true }
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("remove ") { return true }
@@ -371,15 +373,36 @@ func isChromeText(_ t: String) -> Bool {
 
 /// True when AX text is still a loading/ingest shell, not a real ChatGPT answer.
 func isIncompleteZipReply(_ t: String) -> Bool {
-  let l = t.lowercased()
+  let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+  let l = trimmed.lowercased()
+  if trimmed.isEmpty { return true }
   if l.contains("no sources yet") { return true }
-  if l.contains("audit request for codebase") && t.count < 400 { return true }
+  if l.contains("audit request for codebase") && trimmed.count < 400 { return true }
+  // Chat title / one-line chips are not an audit body
+  if l == "audit rust monorepo" || (l.contains("audit rust monorepo") && trimmed.count < 200) {
+    return true
+  }
+  // Fragment salad: many short lines (AX word chips) without a real paragraph
+  let lines = trimmed.split(whereSeparator: \.isNewline)
+    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    .filter { !$0.isEmpty }
+  if lines.count >= 3 {
+    let avg = lines.map(\.count).reduce(0, +) / max(lines.count, 1)
+    if avg < 48 && trimmed.count < 900 { return true }
+  }
+  // Zip audits need a substantive body; short stubs always incomplete
+  if trimmed.count < 300 { return true }
   // Mostly our own prompt headings echoed back while zip is still opening
   let promptish = ["architecture", "dependencies", "configuration", "do not suggest any code edits"]
   let hits = promptish.filter { l.contains($0) }.count
-  if hits >= 2 && t.count < 1500 && !l.contains("severity") && !l.contains("finding") && !l.contains("risk") {
-    return true
+  if hits >= 2 && trimmed.count < 1500 {
+    let hasFinding = l.range(of: #"\b(severity|finding|risks?|recommend)\b"#, options: .regularExpression) != nil
+    if !hasFinding { return true }
   }
+  // Require at least one sentence-like chunk or structured section
+  let hasSentence = trimmed.contains(". ") || trimmed.contains(".\n") || trimmed.contains("##") ||
+    trimmed.contains("1.") || trimmed.contains("- ")
+  if !hasSentence && trimmed.count < 1200 { return true }
   return false
 }
 func allStaticTexts() -> [String] {
@@ -390,19 +413,212 @@ func allStaticTexts() -> [String] {
 let baseline = Set(allStaticTexts())
 log("baseline static texts=\(baseline.count)")
 
-_ = setAttr(composer, kAXValueAttribute as String, prompt as CFTypeRef)
-Thread.sleep(forTimeInterval: 0.35)
-// Include prompt fragments in baseline after set (user bubble)
-var baseline2 = baseline.union(Set(allStaticTexts()))
-if let send = bfsFirst(root, pred: { el, r in
-  r == "AXButton" && (s(el, kAXDescriptionAttribute as String) == "Send" || s(el, kAXTitleAttribute as String) == "Send")
-}) {
-  log("send=\(press(send))")
-} else {
-  key(36)
-  log("send=return")
+// --- Put prompt into composer and PROVE it stuck (Electron often ignores silent AX set) ---
+func composerText(_ el: AXUIElement) -> String {
+  s(el, kAXValueAttribute as String)
 }
-Thread.sleep(forTimeInterval: 1.0)
+func focusComposer(_ el: AXUIElement) {
+  _ = AXUIElementSetAttributeValue(el, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+  Thread.sleep(forTimeInterval: 0.15)
+}
+func promptLooksSet(_ value: String, _ expected: String) -> Bool {
+  let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+  if v.isEmpty { return false }
+  let needle = String(expected.prefix(48)).trimmingCharacters(in: .whitespacesAndNewlines)
+  if !needle.isEmpty && v.contains(needle) { return true }
+  // Long prompts: accept substantial length match even if AX truncates slightly
+  return v.count >= min(80, max(20, expected.count / 3))
+}
+func setComposerPrompt(_ el: AXUIElement, _ text: String) -> String {
+  focusComposer(el)
+  // 1) AX set
+  let axOk = setAttr(el, kAXValueAttribute as String, text as CFTypeRef)
+  Thread.sleep(forTimeInterval: 0.35)
+  var cv = composerText(el)
+  log("composer AX set ok=\(axOk) chars=\(cv.count) head=\(String(cv.prefix(80)).replacingOccurrences(of: "\n", with: " "))")
+  if promptLooksSet(cv, text) { return cv }
+
+  // 2) Clipboard string paste (updates React state more reliably than pure AX set)
+  focusComposer(el)
+  // Do NOT Cmd+A (would risk deselecting/clearing attachment chip). Paste at caret.
+  pb.clearContents()
+  pb.setString(text, forType: .string)
+  key(9, flags: .maskCommand) // Cmd+V
+  Thread.sleep(forTimeInterval: 0.5)
+  cv = composerText(el)
+  log("composer paste chars=\(cv.count) head=\(String(cv.prefix(80)).replacingOccurrences(of: "\n", with: " "))")
+  if promptLooksSet(cv, text) { return cv }
+
+  // 3) Last resort: AX set again after re-focus
+  focusComposer(el)
+  _ = setAttr(el, kAXValueAttribute as String, text as CFTypeRef)
+  Thread.sleep(forTimeInterval: 0.35)
+  cv = composerText(el)
+  log("composer retry AX chars=\(cv.count)")
+  return cv
+}
+
+var liveComposer = composer
+var setValue = setComposerPrompt(liveComposer, prompt)
+if !promptLooksSet(setValue, prompt) {
+  // Re-resolve composer (window may have re-rendered after attach)
+  if let c2 = bfsFirst(root, pred: { el, r in
+    r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
+  }) {
+    liveComposer = c2
+    setValue = setComposerPrompt(liveComposer, prompt)
+  }
+}
+if !promptLooksSet(setValue, prompt) {
+  emit([
+    "ok": false,
+    "code": "PROMPT_SET_FAILED",
+    "message": "Could not put audit prompt into Chat composer (AX/paste both failed). Message was NOT sent.",
+    "composerChars": setValue.count,
+    "attached": attached,
+    "wakeHoldPid": wakePid as Any,
+  ], exitCode: 8)
+}
+log("composer prompt ready chars=\(setValue.count)")
+
+// Include prompt fragments in baseline after set (user bubble / draft)
+var baseline2 = baseline.union(Set(allStaticTexts()))
+
+func findSendButton() -> AXUIElement? {
+  bfsFirst(root, pred: { el, r in
+    r == "AXButton" && (
+      s(el, kAXDescriptionAttribute as String) == "Send" ||
+      s(el, kAXTitleAttribute as String) == "Send" ||
+      s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Send message")
+    )
+  })
+}
+func findStopButton() -> AXUIElement? {
+  bfsFirst(root, pred: { el, r in
+    r == "AXButton" && (
+      s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Stop") ||
+      s(el, kAXTitleAttribute as String).localizedCaseInsensitiveContains("Stop")
+    )
+  })
+}
+func messageLooksSent(preChars: Int, preValue: String) -> Bool {
+  if findStopButton() != nil { return true }
+  // Re-find composer; empty or drastically reduced value = submitted
+  guard let c = bfsFirst(root, pred: { el, r in
+    r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
+  }) else {
+    // Composer temporarily gone while sending is OK
+    return true
+  }
+  let after = composerText(c).trimmingCharacters(in: .whitespacesAndNewlines)
+  if after.isEmpty { return true }
+  // Still full draft → not sent
+  if promptLooksSet(after, prompt) && after.count >= max(40, preChars - 20) { return false }
+  if after.count + 40 < preChars { return true }
+  // User bubble appeared as static text with a unique prompt fragment
+  let needle = String(prompt.prefix(60))
+  let statics = allStaticTexts()
+  if !needle.isEmpty && statics.contains(where: { $0.contains(String(needle.prefix(40))) }) {
+    // And composer no longer holds the full draft
+    if after.count < preChars / 2 { return true }
+  }
+  _ = preValue // silence unused if optimized
+  return false
+}
+
+// --- Send with verification (AXPress success alone is NOT enough) ---
+var sendVerified = false
+let preSend = setValue
+let preChars = preSend.count
+for attempt in 1...5 {
+  focusComposer(liveComposer)
+  // Electron ChatGPT: try Return, AX Send, Cmd+Return. Never trust press() alone.
+  if attempt == 1 {
+    key(36) // Return
+    log("send attempt=\(attempt) method=return")
+  } else if attempt == 2, let sendBtn = findSendButton() {
+    let ok = press(sendBtn)
+    log("send attempt=\(attempt) method=axPress ok=\(ok)")
+  } else if attempt == 3 {
+    key(36, flags: .maskCommand) // Cmd+Return
+    log("send attempt=\(attempt) method=cmd-return")
+  } else if attempt == 4, let sendBtn = findSendButton() {
+    // Physical click center if geometry available
+    var pos: CFTypeRef?
+    var size: CFTypeRef?
+    if AXUIElementCopyAttributeValue(sendBtn, kAXPositionAttribute as CFString, &pos) == .success,
+       AXUIElementCopyAttributeValue(sendBtn, kAXSizeAttribute as CFString, &size) == .success {
+      var p = CGPoint.zero
+      var sz = CGSize.zero
+      if AXValueGetValue(pos as! AXValue, .cgPoint, &p),
+         AXValueGetValue(size as! AXValue, .cgSize, &sz) {
+        let c = CGPoint(x: p.x + sz.width / 2, y: p.y + sz.height / 2)
+        let src = CGEventSource(stateID: .hidSystemState)
+        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
+        CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
+        log("send attempt=\(attempt) method=mouseClick")
+      } else {
+        _ = press(sendBtn)
+        log("send attempt=\(attempt) method=axPress-fallback")
+      }
+    } else {
+      _ = press(sendBtn)
+      log("send attempt=\(attempt) method=axPress-fallback")
+    }
+  } else {
+    key(36)
+    log("send attempt=\(attempt) method=return-last")
+  }
+  Thread.sleep(forTimeInterval: 1.2)
+  if messageLooksSent(preChars: preChars, preValue: preSend) {
+    sendVerified = true
+    log("send VERIFIED on attempt=\(attempt)")
+    break
+  }
+  // Draft may have been wiped by a failed partial send — re-set prompt
+  if let c = bfsFirst(root, pred: { el, r in
+    r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
+  }) {
+    liveComposer = c
+    let cur = composerText(c)
+    if !promptLooksSet(cur, prompt) {
+      log("send retry: re-setting prompt (composer chars=\(cur.count))")
+      // Re-check attachment still present
+      var stillAttached = false
+      for el in bfsAll(root, pred: { _, _ in true }) {
+        let blob = [s(el, kAXTitleAttribute as String), s(el, kAXDescriptionAttribute as String), s(el, kAXValueAttribute as String)].joined(separator: " ").lowercased()
+        if blob.contains(zipName) || (blob.contains(".zip") && blob.count < 120) { stillAttached = true; break }
+      }
+      if !stillAttached {
+        log("send retry: re-pasting zip attachment")
+        pb.clearContents()
+        _ = pb.writeObjects([zipURL as NSURL])
+        focusComposer(liveComposer)
+        key(9, flags: .maskCommand)
+        Thread.sleep(forTimeInterval: 1.5)
+      }
+      _ = setComposerPrompt(liveComposer, prompt)
+    }
+  }
+  Thread.sleep(forTimeInterval: 0.4)
+}
+if !sendVerified {
+  let stuck = bfsFirst(root, pred: { el, r in
+    r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
+  }).map { composerText($0) } ?? ""
+  emit([
+    "ok": false,
+    "code": "SEND_FAILED",
+    "message": "Composer still holds the draft after send attempts — message was NOT submitted to ChatGPT.",
+    "composerChars": stuck.count,
+    "composerHead": String(stuck.prefix(120)),
+    "attached": attached,
+    "wakeHoldPid": wakePid as Any,
+  ], exitCode: 9)
+}
+log("send confirmed; entering wait-loop")
+Thread.sleep(forTimeInterval: 0.8)
 baseline2 = baseline2.union(Set(allStaticTexts().filter { prompt.contains($0) || $0.count < 40 && prompt.contains($0.prefix(20)) }))
 
 // Optional exact token from prompt (PSST_… / OK_…)
@@ -421,7 +637,7 @@ func finishIfReady(_ text: String) -> Bool {
     return false
   }
   // Zip audits: require a substantive body; short tokens still OK via exactToken path.
-  if exactToken == nil && text.count < 80 {
+  if exactToken == nil && text.count < 300 {
     log("finishIfReady: body too short for zip audit chars=\(text.count)")
     return false
   }
@@ -462,6 +678,9 @@ var lastSig = ""
 var best = ""
 var sawGrowth = false
 var tick = 0
+// Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
+var accumulatedParts: [String] = []
+var accumulatedSet = Set<String>()
 let waitStarted = Date()
 let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
 log("wait-loop start timeoutSec=\(timeoutSec) (0=indefinite) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
@@ -503,12 +722,34 @@ while deadline == nil || Date() < deadline! {
   let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
   // Drop tiny fragments that match prompt words only
   let filtered = novel.filter { t in
+    if t.count < 4 { return false }
     if t.count < 12 && !t.contains(" ") { return false }
     if t.lowercased().hasPrefix("audit only") { return false }
+    if t.lowercased() == "audit rust monorepo" { return false }
     return true
   }
-  let assistant = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  log("tick=\(tick) elapsed=\(elapsed)s novel=\(filtered.count) chars=\(assistant.count) best=\(best.count) stable=\(stable) sawGrowth=\(sawGrowth)")
+  var newParts = 0
+  for t in filtered {
+    // Prefer longer supersets: drop shorter prefixes already stored
+    if accumulatedSet.contains(t) { continue }
+    if accumulatedParts.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
+    // Replace shorter part that is a prefix of this longer string
+    if let idx = accumulatedParts.firstIndex(where: { t.contains($0) && t.count > $0.count + 10 }) {
+      accumulatedSet.remove(accumulatedParts[idx])
+      accumulatedParts[idx] = t
+      accumulatedSet.insert(t)
+      newParts += 1
+      continue
+    }
+    accumulatedSet.insert(t)
+    accumulatedParts.append(t)
+    newParts += 1
+  }
+  // Live snapshot (current tree) OR accumulated stream — take the richer body
+  let live = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  let accumulated = accumulatedParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  let assistant = accumulated.count >= live.count ? accumulated : live
+  log("tick=\(tick) elapsed=\(elapsed)s novel=\(filtered.count) newParts=\(newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) sawGrowth=\(sawGrowth)")
   // Stage partial progress so DS can observe wait (non-final)
   if tick % 4 == 0, best.count > 0 {
     _ = stageResultForDs([
@@ -519,16 +760,19 @@ while deadline == nil || Date() < deadline! {
       "attached": attached,
     ], responseText: best)
   }
-  // Immediate accept: clear Chat/Work refusal or substantive short reply
+  // Immediate accept: clear Chat/Work refusal or substantive reply (word-boundary, not "architectural"⊃"architecture")
   let lower = assistant.lowercased()
-  let looksComplete = assistant.count >= 30 && (
-    lower.contains("work mode") || lower.contains("continue with work") ||
-    lower.contains("cannot") || lower.contains("can't open") ||
+  func hasWB(_ word: String) -> Bool {
+    lower.range(of: "\\b\(NSRegularExpression.escapedPattern(for: word))\\b", options: .regularExpression) != nil
+  }
+  let looksComplete = assistant.count >= 300 && (
+    hasWB("work mode") || lower.contains("continue with work") ||
+    hasWB("cannot") || lower.contains("can't open") ||
     lower.contains("unable to") || lower.contains("out of") ||
-    lower.contains("risk") || lower.contains("finding") || lower.contains("##") ||
-    lower.contains("severity") || lower.contains("recommend") || lower.contains("severity")
+    hasWB("risk") || hasWB("risks") || hasWB("finding") || hasWB("findings") ||
+    assistant.contains("##") || hasWB("severity") || hasWB("recommend") || hasWB("recommendation")
   )
-  if looksComplete && stable >= 2 {
+  if looksComplete && stable >= 3 {
     if assistant == best || assistant.count >= best.count {
       _ = finishIfReady(assistant.count >= best.count ? assistant : best)
     }
@@ -556,22 +800,26 @@ while deadline == nil || Date() < deadline! {
     }
     lastSig = sig
   }
-  // Long audits: require growth then stability; min body length 40 (captures Work-nudge)
-  if sawGrowth && stable >= 3 && best.count > 40 {
+  // Long audits: require growth then stability; refuse short fragment bodies
+  if sawGrowth && stable >= 4 && best.count >= 300 {
     _ = finishIfReady(best)
   }
-  // Short replies (still must pass incomplete filter)
-  if stable >= 4 && best.count > 80 {
+  // Stabilized substantive replies (still pass incomplete filter)
+  if stable >= 5 && best.count >= 300 {
     _ = finishIfReady(best)
   }
-  // Keyword-complete body that stabilized once (stable path lag)
-  if looksComplete && stable >= 1 && best.count >= 80 && assistant.count >= best.count {
-    if stable >= 2 { _ = finishIfReady(best) }
+  // Keyword-complete body that stabilized
+  if looksComplete && stable >= 3 && best.count >= 300 && assistant.count >= best.count {
+    _ = finishIfReady(best)
+  }
+  // No growth for a long time after a tiny chip body: keep waiting (do not finish)
+  if tick >= 40 && best.count < 120 && !sawGrowth {
+    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count)")
   }
 }
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
-if best.count > 80, !isIncompleteZipReply(best) {
+if best.count >= 300, !isIncompleteZipReply(best) {
   _ = finishIfReady(best)
 }
 emit([
