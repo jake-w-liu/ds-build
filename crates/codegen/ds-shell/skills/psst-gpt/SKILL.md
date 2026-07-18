@@ -44,9 +44,12 @@ scripts/run_full_codebase_audit.sh      # one-shot full-tree entry
 | Existing zip | `swift …/psst_zip_upload.swift --zip PATH --timeout 0 -- "…"` |
 | Same chat follow-up | add `--no-new-chat` |
 
-`--timeout 0` = long-wait mode (hard-capped ~60m). The zip helper **scrolls**,
-**accumulates** streaming AX chips, and after Stop clears uses **Copy message**
-clipboard harvest so long audits reach `.ds/psst-gpt/last-response.md` in full.
+`--timeout 0` = **wait until ChatGPT finishes** (no wall-clock cap — Pro thinking
+can take **hours**). The zip helper never treats “no body growth for a few minutes”
+as done while **Stop** is active without **Send**. It **scrolls**, **accumulates**
+streaming AX chips, and after generation ends (Stop gone / Send back) uses **Copy
+message** harvest so full audits reach `.ds/psst-gpt/last-response.md`.
+`--timeout N` (N>0) is an optional user wall-clock cap only.
 
 ### Full-codebase audit (default for “zip this full codebase…”)
 
@@ -70,7 +73,7 @@ swift "$SKILL_SCRIPTS/psst_zip_upload.swift" \
 - **For DS / this skill:** stay in Chat, never Work, audit-only (no code edits), wait for full capture.
 - **For ChatGPT (the string after `--`):** only the audit ask about the zip — do **not** paste operator meta (“Chat only — never Work”, “AUDIT ONLY for the assistant”, etc.).
 
-Host tool timeout for this command must be **long / unlimited** (zip + multi-minute GPT audit).
+Host tool timeout for this command must be **unlimited / multi-hour** (zip + Pro thinking + long audit).
 
 If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open zip in Chat** body with `ok: true` and non-empty `finalDeliveryText`, that **is** a complete result — **stop**, report it, do not invent more retries or text-only substitutes.
 

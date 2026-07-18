@@ -893,16 +893,45 @@ let exactToken: String? = {
   return nil
 }()
 
+func hasLoadingChrome(_ text: String) -> Bool {
+  let l = text.lowercased()
+  let markers = [
+    "chatgpt is responding", "systems are thinking", "thinking a bit more",
+    "for a quicker response", "before responding", "may be less capable",
+  ]
+  return markers.contains(where: { l.contains($0) })
+}
+
+/// True while ChatGPT is still thinking/streaming. Pro thinking can last hours with little body growth.
+/// Rule: Stop without Send ⇒ active. Loading chrome ⇒ active. Never treat pure stagnation as done.
+func isGenerationActive(stopPresent: Bool, sendPresent: Bool, body: String) -> Bool {
+  if hasLoadingChrome(body) { return true }
+  // Normal generating UX: Stop replaces Send.
+  if stopPresent && !sendPresent { return true }
+  // Stop + Send both present is ambiguous sticky AX — not treated as active generation.
+  return false
+}
+
 /// Complete only when body is a real reply (not zip-loading chrome). Returns false to keep waiting.
 @discardableResult
-func finishIfReady(_ text: String) -> Bool {
+func finishIfReady(_ text: String, allowStickyStop: Bool = false, finishNote: String? = nil) -> Bool {
   if isIncompleteZipReply(text) {
     log("finishIfReady: still loading/incomplete chars=\(text.count)")
     return false
   }
-  // Still generating → never finalize (Stop visible means stream not done).
-  if findStopButton() != nil {
-    log("finishIfReady: Stop still present — waiting for generation to finish")
+  if hasLoadingChrome(text) {
+    log("finishIfReady: loading chrome still present — waiting")
+    return false
+  }
+  let stopPresent = findStopButton() != nil
+  let sendPresent = findSendButton() != nil
+  if isGenerationActive(stopPresent: stopPresent, sendPresent: sendPresent, body: text) {
+    log("finishIfReady: generation still active stop=\(stopPresent) send=\(sendPresent) — waiting")
+    return false
+  }
+  // Sticky Stop: only accept complete body when Send is back (model finished) or caller proved idle.
+  if stopPresent && !allowStickyStop {
+    log("finishIfReady: Stop still present — waiting for generation to finish (Pro may think for hours)")
     return false
   }
   // Zip audits: require a substantive body; short tokens still OK via exactToken path.
@@ -914,14 +943,16 @@ func finishIfReady(_ text: String) -> Bool {
   if let oldString { pb.setString(oldString, forType: .string) }
   let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
   try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
-  _ = stageResultForDs([
+  var stage: [String: Any] = [
     "ok": true,
     "status": "complete",
     "finalDeliveryText": text,
     "attached": true,
     "zipPath": zipPath as Any,
-  ], responseText: text)
-  emit([
+  ]
+  if let finishNote { stage["finishNote"] = finishNote }
+  _ = stageResultForDs(stage, responseText: text)
+  var payload: [String: Any] = [
     "ok": true,
     "status": "complete",
     "mode": "chat",
@@ -937,7 +968,9 @@ func finishIfReady(_ text: String) -> Bool {
     "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
     "wakeHoldPid": wakePid as Any,
     "responseChars": text.count,
-  ])
+  ]
+  if let finishNote { payload["finishNote"] = finishNote }
+  emit(payload)
   // emit is Never; keep compiler happy
   return true
 }
@@ -986,27 +1019,30 @@ var stable = 0
 var lastSig = ""
 var best = ""
 var sawGrowth = false
+/// Must observe Stop/generating (or body growth) after send before any finish — avoid capturing a prior reply.
+var sawGenerating = false
 var tick = 0
 var stopGoneTicks = 0
 var lastCopyAttemptTick = -100
 var lastSignificantGrowthAt = Date()
+var idleDoneStableTicks = 0
 // Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
-// --timeout 0 means "long audit", not "hang forever": hard cap 60 min for full zip audits.
-let hardCapSec: Double = 60 * 60
-let effectiveTimeoutSec: Double = timeoutSec > 0 ? timeoutSec : hardCapSec
-let deadline = Date().addingTimeInterval(effectiveTimeoutSec)
-// After Stop gone: allow deep harvest for ~45s then require complete or partial.
+// --timeout 0 / omitted = wait until ChatGPT finishes (Pro thinking can take hours).
+// --timeout N = wall-clock cap of N seconds only. Never invent a 60m hard cap.
+let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
+// After Stop gone: a few harvest ticks so Copy-message can land the full body.
 let stopGoneHarvestTicks = 6
-// Stable after full harvest attempts (~2.5 min at 2.5s) before stall partial.
-let stallTicksStopGone = 60
-let stallTicksNoGrowth = 150
-// Wall-clock: no +100 char growth for this long → force harvest / exit (Stop can stick true).
-let noGrowthForceHarvestSec: Double = 90
-let noGrowthForceExitSec: Double = 180
-log("wait-loop start timeoutSec=\(timeoutSec) effectiveTimeoutSec=\(effectiveTimeoutSec) hardCap=\(timeoutSec <= 0) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
+// Only when Stop is gone: if body never becomes complete, emit partial (AX failure, not slow think).
+let stallTicksAfterStopGone = 80
+log(
+  "wait-loop start timeoutSec=\(timeoutSec) " +
+  "deadline=\(deadline.map { "\($0.timeIntervalSince(waitStarted))s" } ?? "none(unlimited)") " +
+  "wakeHoldPid=\(wakePid.map(String.init) ?? "none") " +
+  "policy=wait-until-generation-done"
+)
 
 func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, newParts: Int) {
   let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
@@ -1047,10 +1083,24 @@ func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, ne
   return (assistant, novel.count, newParts)
 }
 
-while Date() < deadline {
-  Thread.sleep(forTimeInterval: 2.5)
+// Adaptive poll: snappy while streaming; back off during long Pro thinking so we can wait hours.
+func pollIntervalSec(generating: Bool, stagnantSec: TimeInterval) -> TimeInterval {
+  if !generating { return 2.0 }
+  if stagnantSec < 30 { return 2.5 }
+  if stagnantSec < 120 { return 5.0 }
+  if stagnantSec < 600 { return 8.0 }
+  return 12.0
+}
+
+while true {
+  if let deadline, Date() >= deadline { break }
+  let preStop = findStopButton() != nil
+  let preSend = findSendButton() != nil
+  let preActive = isGenerationActive(stopPresent: preStop, sendPresent: preSend, body: best)
+  let stagnantPre = Date().timeIntervalSince(lastSignificantGrowthAt)
+  Thread.sleep(forTimeInterval: pollIntervalSec(generating: preActive, stagnantSec: stagnantPre))
   tick += 1
-  // Keep display/idle assertions alive for multi-minute GPT audits (displaysleep can be ~2m).
+  // Keep display/idle assertions alive for multi-hour Pro audits.
   _ = WakeHold.shared.ensureAlive()
   let elapsed = Int(Date().timeIntervalSince(waitStarted))
   if isScreenLocked() {
@@ -1071,20 +1121,24 @@ while Date() < deadline {
   }
 
   let stopPresent = findStopButton() != nil
+  let sendPresent = findSendButton() != nil
   if stopPresent { stopGoneTicks = 0 } else { stopGoneTicks += 1 }
+  let generating = isGenerationActive(stopPresent: stopPresent, sendPresent: sendPresent, body: best)
+  if generating { sawGenerating = true }
+  let stagnantSec = Date().timeIntervalSince(lastSignificantGrowthAt)
 
   // Periodically scroll while streaming so long replies stay in the AX tree.
   if tick % 3 == 0 { scrollTranscript() }
 
-  // Copy harvest: always when Stop gone; also when body is large & frozen (Stop can stick true).
-  let stagnantSec = Date().timeIntervalSince(lastSignificantGrowthAt)
-  let forceCopyDespiteStop = stopPresent && best.count >= 800 && stagnantSec >= noGrowthForceHarvestSec
-  let shouldCopy = !stopPresent || forceCopyDespiteStop || (tick - lastCopyAttemptTick >= 10 && best.count > 500)
+  // Copy harvest: when idle/done; while generating only occasionally (stream still growing in AX).
+  let shouldCopy =
+    !generating ||
+    (tick - lastCopyAttemptTick >= 8 && best.count > 200) ||
+    (generating && stagnantSec >= 45 && tick - lastCopyAttemptTick >= 4)
   if shouldCopy { lastCopyAttemptTick = tick }
   let deep = deepHarvestReply(includeCopy: shouldCopy)
   if deep.count > best.count + 20 {
-    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(shouldCopy) forceStop=\(forceCopyDespiteStop))")
-    // Feed clipboard body into accumulation as one blob
+    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(shouldCopy) gen=\(generating))")
     if !deep.isEmpty && !accumulatedSet.contains(deep) {
       accumulatedSet.insert(deep)
       accumulatedParts.append(deep)
@@ -1095,6 +1149,7 @@ while Date() < deadline {
     best = deep
     sawGrowth = true
     stable = 0
+    idleDoneStableTicks = 0
   }
 
   let texts = allCaptureTexts()
@@ -1102,7 +1157,7 @@ while Date() < deadline {
     let hits = texts.filter {
       $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
     }
-    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count) stop=\(stopPresent)")
+    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count) stop=\(stopPresent) gen=\(generating)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       if a == best { stable += 1 } else { stable = 0; best = a }
       if stable >= 2 { _ = finishIfReady(best) }
@@ -1115,31 +1170,25 @@ while Date() < deadline {
   if deep.count > assistant.count { assistant = deep }
   if best.count > assistant.count { assistant = best }
 
-  log("tick=\(tick) elapsed=\(elapsed)s novel=\(ing.novel) kept newParts=\(ing.newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) stop=\(stopPresent) stopGone=\(stopGoneTicks) sawGrowth=\(sawGrowth)")
+  log(
+    "tick=\(tick) elapsed=\(elapsed)s novel=\(ing.novel) newParts=\(ing.newParts) " +
+    "chars=\(assistant.count) best=\(best.count) stable=\(stable) " +
+    "stop=\(stopPresent) send=\(sendPresent) gen=\(generating) stopGone=\(stopGoneTicks) " +
+    "stagnant=\(Int(stagnantSec))s sawGrowth=\(sawGrowth)"
+  )
 
-  if tick % 4 == 0, best.count > 0 {
+  if tick % 4 == 0, best.count > 0 || generating {
     _ = stageResultForDs([
       "ok": false,
-      "status": "waiting",
+      "status": generating ? "waiting-generation" : "waiting",
       "partialChars": best.count,
       "elapsedSec": elapsed,
       "attached": attached,
       "stopPresent": stopPresent,
-    ], responseText: best)
+      "sendPresent": sendPresent,
+      "generationActive": generating,
+    ], responseText: best.isEmpty ? nil : best)
   }
-
-  let lower = assistant.lowercased()
-  func hasWB(_ word: String) -> Bool {
-    lower.range(of: "\\b\(NSRegularExpression.escapedPattern(for: word))\\b", options: .regularExpression) != nil
-  }
-  let looksComplete = assistant.count >= 300 && (
-    hasWB("work mode") || lower.contains("continue with work") ||
-    hasWB("cannot") || lower.contains("can't open") ||
-    lower.contains("unable to") || lower.contains("out of") ||
-    hasWB("risk") || hasWB("risks") || hasWB("finding") || hasWB("findings") ||
-    assistant.contains("##") || hasWB("severity") || hasWB("recommend") || hasWB("recommendation") ||
-    lower.contains("executive") || lower.contains("architecture")
-  )
 
   if assistant.count > best.count + 5 {
     if assistant.count >= best.count + 100 {
@@ -1148,6 +1197,7 @@ while Date() < deadline {
     sawGrowth = true
     best = assistant
     stable = 0
+    idleDoneStableTicks = 0
     lastSig = "\(assistant.count)"
   } else {
     let sig = "\(assistant.count)"
@@ -1164,87 +1214,57 @@ while Date() < deadline {
     }
   }
 
-  // Prefer finishing after Stop is gone + harvest ticks (full body via Copy).
-  if !stopPresent && stopGoneTicks >= stopGoneHarvestTicks {
-    if stopGoneTicks == stopGoneHarvestTicks || stopGoneTicks % 4 == 0 {
-      let h = deepHarvestReply(includeCopy: true)
-      if h.count > best.count {
-        if h.count >= best.count + 100 { lastSignificantGrowthAt = Date() }
-        best = h
-        sawGrowth = true
-        stable = 0
-        log("post-stop harvest chars=\(h.count)")
-      }
+  // --- Still thinking / streaming (including multi-hour Pro): never force complete ---
+  if generating {
+    idleDoneStableTicks = 0
+    if elapsed > 0 && elapsed % 300 < 15 {
+      log("still generating after \(elapsed)s best=\(best.count) stop=\(stopPresent) send=\(sendPresent) — keep waiting")
     }
-    if looksComplete && stable >= 2 {
-      _ = finishIfReady(best.count >= assistant.count ? best : assistant)
-    }
-    if sawGrowth && stable >= 3 && best.count >= 300 {
-      _ = finishIfReady(best)
-    }
-    if stable >= 4 && best.count >= 300 {
-      _ = finishIfReady(best)
-    }
+    continue
   }
 
-  // Stop button can stick true after ChatGPT finished — don't wait forever.
-  // After 90s no significant growth with a large body: harvest+try complete ignoring Stop.
-  let stagnant = Date().timeIntervalSince(lastSignificantGrowthAt)
-  if sawGrowth && best.count >= 800 && stagnant >= noGrowthForceHarvestSec {
-    log("force path: stagnant \(Int(stagnant))s best=\(best.count) stop=\(stopPresent) — copy harvest")
+  // Do not finish on a pre-send leftover reply — wait until this turn starts generating.
+  if !sawGenerating && !sawGrowth {
+    idleDoneStableTicks = 0
+    if elapsed > 0 && elapsed % 60 < 15 {
+      log("waiting for generation to start after send elapsed=\(elapsed)s")
+    }
+    continue
+  }
+
+  // --- Generation idle: Stop gone and/or Send back. Harvest fully, then finish. ---
+  idleDoneStableTicks += 1
+  if idleDoneStableTicks == 1 || idleDoneStableTicks % 3 == 0 || stopGoneTicks == stopGoneHarvestTicks {
     let h = deepHarvestReply(includeCopy: true)
     if h.count > best.count {
       if h.count >= best.count + 100 { lastSignificantGrowthAt = Date() }
       best = h
+      sawGrowth = true
       stable = 0
-      log("force harvest chars=\(h.count)")
-    }
-    // If still complete-looking and Stop may be false-positive, try finish.
-    if best.count >= 1000 && !isIncompleteZipReply(best) {
-      // Temporarily allow finish even if Stop still listed (sticky AX).
-      if findStopButton() != nil {
-        log("force finish attempt despite Stop (sticky AX) chars=\(best.count)")
-      }
-      // Bypass Stop check only after long stagnation + large body
-      if stagnant >= noGrowthForceExitSec {
-        pb.clearContents()
-        if let oldString { pb.setString(oldString, forType: .string) }
-        let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-        try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
-        if !isIncompleteZipReply(best) && best.count >= 300 {
-          _ = stageResultForDs([
-            "ok": true,
-            "status": "complete",
-            "finalDeliveryText": best,
-            "attached": true,
-            "zipPath": zipPath as Any,
-            "note": "finished after Stop stuck + copy harvest",
-          ], responseText: best)
-          emit([
-            "ok": true,
-            "status": "complete",
-            "mode": "chat",
-            "workOn": false,
-            "attached": true,
-            "attachLabels": Array(labels.prefix(5)),
-            "zipPath": zipPath as Any,
-            "responsePath": respPath,
-            "finalDeliveryText": best,
-            "mustReturnFinalDelivery": true,
-            "mustReturnVerbatim": true,
-            "method": "clipboard-file-paste",
-            "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
-            "wakeHoldPid": wakePid as Any,
-            "responseChars": best.count,
-            "finishNote": "stop-sticky-force",
-          ])
-        }
-      }
+      idleDoneStableTicks = 1
+      log("idle harvest chars=\(h.count) stop=\(stopPresent) send=\(sendPresent)")
     }
   }
 
-  // --- Stall backstops: deep harvest first, then honest partial (never hang) ---
-  if !stopPresent && sawGrowth && stable >= stallTicksStopGone && best.count >= 40 {
+  // Sticky Stop (Stop still listed) but Send is back + complete body: model finished.
+  let stickyOk = stopPresent && sendPresent && !isIncompleteZipReply(best) && !hasLoadingChrome(best)
+  if stickyOk && idleDoneStableTicks >= 3 {
+    _ = finishIfReady(best, allowStickyStop: true, finishNote: "stop-sticky-send-ready")
+  }
+
+  // Normal path: Stop gone after a few harvest ticks.
+  if !stopPresent && stopGoneTicks >= stopGoneHarvestTicks {
+    if stable >= 2 || idleDoneStableTicks >= 3 {
+      _ = finishIfReady(best)
+    }
+    if sawGrowth && stable >= 3 && best.count >= 300 {
+      _ = finishIfReady(best)
+    }
+  }
+
+  // Stop gone but body never became a complete audit → honest partial (AX/capture failure).
+  // Does NOT fire while generating (Pro think hours).
+  if !stopPresent && sawGrowth && stable >= stallTicksAfterStopGone && best.count >= 40 {
     log("stall backstop: Stop gone + stable=\(stable) — final deep harvest")
     let h = deepHarvestReply(includeCopy: true)
     if h.count > best.count { best = h }
@@ -1256,67 +1276,30 @@ while Date() < deadline {
       elapsed: elapsed
     )
   }
-  if sawGrowth && (stable >= stallTicksNoGrowth || stagnant >= noGrowthForceExitSec + 60) && best.count >= 40 {
-    log("stall backstop: no-growth stable=\(stable) stagnant=\(Int(stagnant))s stop=\(stopPresent)")
-    let h = deepHarvestReply(includeCopy: true)
-    if h.count > best.count { best = h }
-    if finishIfReady(best) { /* Never */ }
-    // Large frozen body after harvest: accept as complete if substantive
-    if best.count >= 1000 && !isIncompleteZipReply(best) {
-      pb.clearContents()
-      if let oldString { pb.setString(oldString, forType: .string) }
-      let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-      try? best.write(toFile: respPath, atomically: true, encoding: .utf8)
-      _ = stageResultForDs([
-        "ok": true,
-        "status": "complete",
-        "finalDeliveryText": best,
-        "attached": true,
-        "zipPath": zipPath as Any,
-      ], responseText: best)
-      emit([
-        "ok": true,
-        "status": "complete",
-        "mode": "chat",
-        "workOn": false,
-        "attached": true,
-        "attachLabels": Array(labels.prefix(5)),
-        "zipPath": zipPath as Any,
-        "responsePath": respPath,
-        "finalDeliveryText": best,
-        "mustReturnFinalDelivery": true,
-        "mustReturnVerbatim": true,
-        "method": "clipboard-file-paste",
-        "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
-        "wakeHoldPid": wakePid as Any,
-        "responseChars": best.count,
-        "finishNote": "stagnant-large-body",
-      ])
-    }
-    emitStablePartial(
-      best,
-      code: "AX_CAPTURE_STALL",
-      message: "No significant body growth for \(Int(stagnant))s. Returning best capture (chars=\(best.count)).",
-      elapsed: elapsed
-    )
-  }
+
   if tick >= 40 && best.count < 40 && !sawGrowth {
-    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count) stop=\(stopPresent)")
+    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count) stop=\(stopPresent) gen=\(generating)")
   }
 }
-// Hard deadline
+
+// Only reached when user set --timeout N and wall clock expired.
 let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
-log("deadline reached elapsed=\(elapsedFinal)s best=\(best.count) — final harvest")
-if findStopButton() == nil {
+log("user timeout reached elapsed=\(elapsedFinal)s best=\(best.count) timeoutSec=\(timeoutSec) — final harvest")
+if !isGenerationActive(
+  stopPresent: findStopButton() != nil,
+  sendPresent: findSendButton() != nil,
+  body: best
+) {
   let h = deepHarvestReply(includeCopy: true)
   if h.count > best.count { best = h }
   if finishIfReady(best) { /* Never */ }
+  if finishIfReady(best, allowStickyStop: true, finishNote: "timeout-sticky") { /* Never */ }
 }
 if best.count >= 40 {
   emitStablePartial(
     best,
     code: "TIMEOUT",
-    message: "Wait deadline reached (effectiveTimeoutSec=\(Int(effectiveTimeoutSec))). Returning best capture (chars=\(best.count)).",
+    message: "User --timeout \(Int(timeoutSec))s reached while waiting. Returning best capture (chars=\(best.count)). Use --timeout 0 to wait until ChatGPT finishes (hours OK).",
     elapsed: elapsedFinal
   )
 }
@@ -1325,6 +1308,7 @@ if let oldString { pb.setString(oldString, forType: .string) }
 emit([
   "ok": false,
   "code": "TIMEOUT",
+  "message": "User --timeout \(Int(timeoutSec))s reached with empty/minimal capture. Use --timeout 0 for unlimited wait.",
   "attached": attached,
   "partial": best,
   "partialChars": best.count,

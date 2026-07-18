@@ -13,9 +13,13 @@ if [[ ! -f "$HELPER" ]]; then
   echo '{"ok":false,"code":"HELPER_MISSING"}' >&2
   exit 2
 fi
-# Refuse stale extracts missing send-verify / incomplete-body guards
-if ! grep -q 'double-check' "$HELPER" || ! grep -q 'not treating as sent' "$HELPER" || ! grep -q 'avg < 48' "$HELPER"; then
-  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/finish-rule markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
+# Refuse stale extracts missing send-verify / incomplete-body / unlimited-wait guards
+if ! grep -q 'double-check' "$HELPER" \
+  || ! grep -q 'not treating as sent' "$HELPER" \
+  || ! grep -q 'avg < 48' "$HELPER" \
+  || ! grep -q 'wait-until-generation-done' "$HELPER" \
+  || ! grep -q 'isGenerationActive' "$HELPER"; then
+  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/finish/unlimited-wait markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
   exit 2
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then
