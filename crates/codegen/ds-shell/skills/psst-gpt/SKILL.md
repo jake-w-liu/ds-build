@@ -20,9 +20,12 @@ ad-hoc shell recipes.
 
 | Constraint | Reality |
 |------------|---------|
-| **Screen locked** | **Does not work.** Helpers exit `PSST_GPT_SCREEN_LOCKED`. |
+| **Screen locked** | AX cannot drive UI while locked. Helpers **park** (`waiting-screen-unlock` / `PSST_GPT_SCREEN_LOCKED_PARKED`), keep caffeinate, and **resume after unlock** when `--timeout 0`. They only hard-fail `PSST_GPT_SCREEN_LOCKED` if a positive `--timeout` deadline expires still locked. Manual unlock is still required (caffeinate cannot unlock). |
 | **Work / Codex usage** | **Never.** Chat only (`Message ChatGPT`). |
-| **Wake hold** | On macOS, helpers use a **multi-layer** hold for long audits (host `displaysleep` can be ~2m): (1) primary `caffeinate -dims -w <self>`, (2) periodic `caffeinate -u -t 120` user-active pulses, (3) `ensureAlive()` restarts a dead primary from the wait loop. Released on every exit. Only while the **Swift helper** runs — **do not** wrap in an extra long-lived `caffeinate` unless the user asks. Already-locked screens still need a manual unlock (AX cannot run locked). |
+| **Wake hold** | On macOS, helpers use a **multi-layer** hold for long audits (host `displaysleep` can be ~2m): (1) primary `caffeinate -dims -w <self>`, (2) periodic `caffeinate -u -t 120` user-active pulses, (3) `ensureAlive()` restarts a dead primary from the wait loop. Released on every exit. Only while the **Swift helper** runs — **do not** wrap in an extra long-lived `caffeinate` unless the user asks. |
+| **Host / DS bash timeout** | Production `ds` allows up to **10h** FG (`max_timeout_secs=36000`) and auto-backgrounds long commands. When invoking the helper via bash, set **`timeout: 36000000`** (ms) **or** `timeout: 0` with `background: true` then wait on the task until exit. **Never** use 30s/120s for zip/Pro audits. |
+| **Short `--timeout N`** | N>0 and N&lt;3600 **auto-upgrades to unlimited (0)** unless `--timeout-strict` (prevents accidental cutoffs). Prefer `--timeout 0`. |
+| **AX flake (long runs)** | Wait loop re-activates ChatGPT + refreshes AX root periodically; Copy-message harvest retries with a slow second pass. Still depends on Accessibility remaining granted. |
 | **Vision** | None — shell + AX only. |
 
 ## Scripts
@@ -45,7 +48,8 @@ scripts/run_full_codebase_audit.sh      # one-shot full-tree entry
 | Same chat follow-up | add `--no-new-chat` |
 
 `--timeout 0` = **wait until generation ends** (no wall-clock cap — Pro thinking
-can take **hours**). Finish detection is a **signal-driven state machine**, not
+can take **hours**). Short positive caps (e.g. 30/120/300) auto-upgrade to `0`
+unless `--timeout-strict`. Finish detection is a **signal-driven state machine**, not
 timers:
 
 | Phase | Meaning | Exit? |
@@ -64,7 +68,7 @@ Selfcheck: `bash …/selfcheck_generation_policy.sh` (pure phase cases, no ChatG
 
 ### Full-codebase audit (default for “zip this full codebase…”)
 
-**One shot. Foreground. `--timeout 0` only.** Do **not** use 30s timeouts, do **not** background the helper, do **not** fall back to text-only when the user asked for a zip attach.
+**One shot. Foreground helper. `--timeout 0` only.** Do **not** use 30s helper timeouts, do **not** fall back to text-only when the user asked for a zip attach.
 
 ```bash
 # Resolve scripts next to this skill (project first, then user install):
@@ -72,6 +76,7 @@ SKILL_SCRIPTS=".ds/skills/psst-gpt/scripts"
 [[ -x "$SKILL_SCRIPTS/run_full_codebase_audit.sh" ]] || SKILL_SCRIPTS="$HOME/.ds/skills/psst-gpt/scripts"
 
 # Preferred entry (blocks until ChatGPT stabilizes; stages .ds/psst-gpt/*):
+# DS bash tool: set timeout: 36000000  (10 hours, ms) — REQUIRED for long Pro thinking.
 bash "$SKILL_SCRIPTS/run_full_codebase_audit.sh" "$PWD"
 
 # Equivalent (GPT-facing prompt only — no operator meta like "Chat only / never Work"):
@@ -84,7 +89,7 @@ swift "$SKILL_SCRIPTS/psst_zip_upload.swift" \
 - **For DS / this skill:** stay in Chat, never Work, audit-only (no code edits), wait for full capture.
 - **For ChatGPT (the string after `--`):** only the audit ask about the zip — do **not** paste operator meta (“Chat only — never Work”, “AUDIT ONLY for the assistant”, etc.).
 
-Host tool timeout for this command must be **unlimited / multi-hour** (zip + Pro thinking + long audit).
+**Host tool timeout (critical):** when DS runs the command above via bash, pass **`timeout: 36000000`** (milliseconds = 10 hours). Production `ds` FG ceiling is 10h and may auto-background long commands — still set the long timeout so the wrapper does not kill the helper early. Never 30s/120s.
 
 If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open zip in Chat** body with `ok: true` and non-empty `finalDeliveryText`, that **is** a complete result — **stop**, report it, do not invent more retries or text-only substitutes.
 
@@ -109,10 +114,11 @@ If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open
 
 | Code | Action |
 |------|--------|
-| `PSST_GPT_SCREEN_LOCKED` | Unlock Mac; retry. |
+| `PSST_GPT_SCREEN_LOCKED_PARKED` / `waiting-screen-unlock` | Not a failure — unlock Mac; helper resumes. |
+| `PSST_GPT_SCREEN_LOCKED` | Stayed locked until deadline; unlock and re-run with `--timeout 0`. |
 | `WORK_MODE` | Switch to Chat. |
 | `ATTACHMENT_MISSING` | Retry zip attach. |
-| `TIMEOUT` | Use `--timeout 0`; ensure ChatGPT still answering. |
+| `TIMEOUT` | Use `--timeout 0` (and host bash `timeout: 36000000`); ensure ChatGPT still answering. |
 
 ## Setup
 

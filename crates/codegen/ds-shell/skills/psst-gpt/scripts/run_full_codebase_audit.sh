@@ -13,7 +13,7 @@ if [[ ! -f "$HELPER" ]]; then
   echo '{"ok":false,"code":"HELPER_MISSING"}' >&2
   exit 2
 fi
-# Refuse stale extracts missing send-verify / generation state machine
+# Refuse stale extracts missing send-verify / generation state machine / long-run park
 if ! grep -q 'double-check' "$HELPER" \
   || ! grep -q 'not treating as sent' "$HELPER" \
   || ! grep -q 'avg < 48' "$HELPER" \
@@ -21,8 +21,12 @@ if ! grep -q 'double-check' "$HELPER" \
   || ! grep -q 'classifyGenerationPhase' "$HELPER" \
   || ! grep -q 'ComposerControls' "$HELPER" \
   || ! grep -q 'mergeReplyBody' "$HELPER" \
-  || ! grep -q 'merge=non-dup' "$HELPER"; then
-  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine/non-dup-merge markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
+  || ! grep -q 'merge=non-dup' "$HELPER" \
+  || ! grep -q 'PSST_GPT_SCREEN_LOCKED_PARKED' "$HELPER" \
+  || ! grep -q 'resolveHelperTimeoutSec' "$HELPER" \
+  || ! grep -q 'refreshAxRoot' "$HELPER" \
+  || ! grep -q 'waitWhileScreenLocked' "$HELPER"; then
+  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine/long-run-park markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
   exit 2
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -31,6 +35,8 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 cd "$ROOT"
+# Host note: when DS runs this via bash, set tool timeout to 36000000ms (10h) or
+# timeout:0 + background:true and wait for task_id. Helper itself uses --timeout 0.
 set +e
 /usr/bin/swift "$HELPER" --root "$ROOT" --timeout 0 -- "$PROMPT"
 EC=$?

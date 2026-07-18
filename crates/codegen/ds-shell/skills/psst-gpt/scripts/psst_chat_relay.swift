@@ -179,11 +179,50 @@ func isScreenLocked() -> Bool {
   return false
 }
 
-func assertInteractiveSession() {
-  if isScreenLocked() {
+/// Same policy as zip helper: short caps auto-upgrade to unlimited unless strict.
+func resolveHelperTimeoutSec(
+  requested: Double,
+  strict: Bool,
+  minUnlimitedBelow: Double = 3600
+) -> (timeoutSec: Double, upgraded: Bool, note: String) {
+  if requested <= 0 { return (0, false, "unlimited") }
+  if strict { return (requested, false, "strict-keep") }
+  if requested < minUnlimitedBelow {
+    return (
+      0,
+      true,
+      "auto-upgraded-short-timeout-to-unlimited (requested=\(Int(requested))s < \(Int(minUnlimitedBelow))s; pass --timeout-strict to keep short caps)"
+    )
+  }
+  return (requested, false, "keep-long-cap")
+}
+
+/// Park until unlock (keep caffeinate). Returns false if deadline expires still locked.
+@discardableResult
+func waitWhileScreenLocked(deadline: Date?, context: String) -> Bool {
+  if !isScreenLocked() { return true }
+  var announced = false
+  while isScreenLocked() {
+    if let deadline, Date() >= deadline {
+      log("screen-locked: deadline expired while still locked (\(context))")
+      return false
+    }
+    if !announced {
+      log("screen-locked: parking (\(context)) — unlock Mac to resume; caffeinate held")
+      announced = true
+    }
+    _ = WakeHold.shared.ensureAlive()
+    Thread.sleep(forTimeInterval: 2.5)
+  }
+  if announced { log("screen-locked: unlocked — resuming (\(context))") }
+  return true
+}
+
+func assertInteractiveSession(deadline: Date? = nil) {
+  if !waitWhileScreenLocked(deadline: deadline, context: "preflight") {
     fail(
       "PSST_GPT_SCREEN_LOCKED",
-      "macOS screen is locked. PsstGPT needs an unlocked console session (Accessibility + key events do not work while locked). Unlock the Mac, leave ChatGPT open on Chat, then retry."
+      "macOS screen stayed locked until --timeout deadline. Unlock and re-run with --timeout 0 to park until unlock."
     )
   }
 }
@@ -582,12 +621,15 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
   var stable = 0
   var lastSig = ""
   var lastAssistant = ""
-  // timeoutSec <= 0 → wait indefinitely (heavy audit)
+  // timeoutSec <= 0 → wait indefinitely (heavy audit); lock parks until unlock
   let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
   while deadline == nil || Date() < deadline! {
     Thread.sleep(forTimeInterval: 2)
-    if isScreenLocked() {
-      fail("PSST_GPT_SCREEN_LOCKED", "Screen locked during wait — unlock and re-run /psst-gpt (or poll the same ChatGPT chat).")
+    if !waitWhileScreenLocked(deadline: deadline, context: "relay-wait") {
+      fail(
+        "PSST_GPT_SCREEN_LOCKED",
+        "Screen stayed locked until --timeout deadline during wait — unlock and re-run with --timeout 0."
+      )
     }
     if chatWork(root).workOn {
       fail("PSST_GPT_WORK_MODE", "Work flipped ON during wait — abort.")
@@ -675,6 +717,7 @@ func pgrepRunning(_ pid: Int32) -> Bool {
 var args = Array(CommandLine.arguments.dropFirst())
 // timeoutSec: 0 means wait indefinitely (heavy audits)
 var timeoutSec: Double = 0
+var timeoutStrict = false
 var newChatFlag = true
 var preferFlash = true
 var useStdin = false
@@ -690,6 +733,7 @@ while i < args.count {
   if a == "--stdin" { useStdin = true; i += 1; continue }
   if a == "--no-new-chat" { newChatFlag = false; i += 1; continue }
   if a == "--no-flash" { preferFlash = false; i += 1; continue }
+  if a == "--timeout-strict" { timeoutStrict = true; i += 1; continue }
   if a == "--timeout", i + 1 < args.count {
     // 0 = no overall cap (poll until complete or process killed)
     timeoutSec = Double(args[i + 1]) ?? 0
@@ -706,6 +750,14 @@ while i < args.count {
   }
   promptParts.append(a)
   i += 1
+}
+// Auto-upgrade short wall-clock caps unless --timeout-strict.
+do {
+  let resolved = resolveHelperTimeoutSec(requested: timeoutSec, strict: timeoutStrict)
+  if resolved.upgraded {
+    FileHandle.standardError.write(("timeout-policy: \(resolved.note)\n").data(using: .utf8)!)
+  }
+  timeoutSec = resolved.timeoutSec
 }
 
 if selfcheckWake {

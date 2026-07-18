@@ -180,6 +180,90 @@ func isScreenLocked() -> Bool {
   return false
 }
 
+/// Resolve helper wall-clock timeout for long ChatGPT runs.
+///
+/// Pure: same inputs → same output. Used by CLI + `--selfcheck-longrun-policy`.
+/// - `requested <= 0` → unlimited (0)
+/// - `strict == true` → keep exact positive requested (smoke / intentional short caps)
+/// - otherwise, short positive caps below `minUnlimitedBelow` auto-upgrade to **0**
+///   so accidental 30s/120s/5m host or model timeouts cannot kill multi-hour Pro thinking.
+func resolveHelperTimeoutSec(
+  requested: Double,
+  strict: Bool,
+  minUnlimitedBelow: Double = 3600
+) -> (timeoutSec: Double, upgraded: Bool, note: String) {
+  if requested <= 0 {
+    return (0, false, "unlimited")
+  }
+  if strict {
+    return (requested, false, "strict-keep")
+  }
+  if requested < minUnlimitedBelow {
+    return (
+      0,
+      true,
+      "auto-upgraded-short-timeout-to-unlimited (requested=\(Int(requested))s < \(Int(minUnlimitedBelow))s; pass --timeout-strict to keep short caps)"
+    )
+  }
+  return (requested, false, "keep-long-cap")
+}
+
+/// Park while the console is locked (AX cannot run). Keeps caffeinate alive and stages
+/// a non-fatal waiting status for DS. Returns false only if a positive wall-clock
+/// deadline expires while still locked.
+@discardableResult
+func waitWhileScreenLocked(
+  deadline: Date?,
+  best: String,
+  attached: Bool,
+  phase: String,
+  wakePid: Int32?,
+  context: String
+) -> Bool {
+  if !isScreenLocked() { return true }
+  var announced = false
+  var lastStage = Date.distantPast
+  while isScreenLocked() {
+    if let deadline, Date() >= deadline {
+      log("screen-locked: deadline expired while still locked (\(context))")
+      return false
+    }
+    if !announced {
+      log("screen-locked: parking (\(context)) — unlock Mac to resume; caffeinate held; generation may continue in ChatGPT")
+      announced = true
+    }
+    _ = WakeHold.shared.ensureAlive()
+    if Date().timeIntervalSince(lastStage) >= 20 {
+      lastStage = Date()
+      _ = stageResultForDs([
+        "ok": false,
+        "status": "waiting-screen-unlock",
+        "code": "PSST_GPT_SCREEN_LOCKED_PARKED",
+        "message": "Screen locked — parked until unlock (not a generation failure). Unlock the console; helper will resume.",
+        "partial": best,
+        "partialChars": best.count,
+        "attached": attached,
+        "phase": phase,
+        "wakeHoldPid": wakePid as Any,
+        "context": context,
+      ], responseText: best.isEmpty ? nil : best)
+    }
+    Thread.sleep(forTimeInterval: 2.5)
+  }
+  if announced {
+    log("screen-locked: unlocked — resuming (\(context))")
+  }
+  return true
+}
+
+func findChatGPTApp() -> NSRunningApplication? {
+  NSWorkspace.shared.runningApplications.first(where: {
+    $0.bundleIdentifier == "com.openai.codex"
+      || $0.bundleIdentifier == "com.openai.chat"
+      || $0.localizedName == "ChatGPT"
+  })
+}
+
 @discardableResult
 func stageResultForDs(_ obj: [String: Any], responseText: String?) -> [String: String] {
   let cwd = FileManager.default.currentDirectoryPath
@@ -645,6 +729,7 @@ var zipPath: String?
 var rootPath: String?
 // 0 = wait indefinitely (heavy audits). Default 0 for long zip audits.
 var timeoutSec: Double = 0
+var timeoutStrict = false
 var newChat = true
 var packOnly = false
 var promptParts: [String] = []
@@ -660,14 +745,26 @@ while i < args.count {
     i += 2
     continue
   }
+  if a == "--timeout-strict" { timeoutStrict = true; i += 1; continue }
   if a == "--no-new-chat" { newChat = false; i += 1; continue }
   if a == "--pack-only" { packOnly = true; i += 1; continue }
   if a == "--selfcheck-finish-rules" { runSelfcheckFinishRules() }
   if a == "--selfcheck-generation-policy" { runSelfcheckGenerationPolicy() }
   if a == "--selfcheck-absorb" { runSelfcheckAbsorb() }
+  if a == "--selfcheck-longrun-policy" { runSelfcheckLongrunPolicy() }
   if a == "--" { promptParts.append(contentsOf: args[(i + 1)...]); break }
   if a.hasPrefix("-") { emit(["ok": false, "code": "BAD_ARGS", "message": "Unknown \(a)"], exitCode: 2) }
   promptParts.append(a); i += 1
+}
+// Auto-upgrade short wall-clock caps unless --timeout-strict (long-run robustness).
+do {
+  let resolved = resolveHelperTimeoutSec(requested: timeoutSec, strict: timeoutStrict)
+  if resolved.upgraded {
+    FileHandle.standardError.write(
+      ("timeout-policy: \(resolved.note)\n").data(using: .utf8)!
+    )
+  }
+  timeoutSec = resolved.timeoutSec
 }
 let prompt = promptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
 // --pack-only only needs a root (no ChatGPT / no prompt)
@@ -699,13 +796,25 @@ guard !prompt.isEmpty else {
 }
 // Start wake-hold before long zip+AX work (released in emit on every exit).
 let wakePid = WakeHold.shared.start()
-if isScreenLocked() {
-  emit([
-    "ok": false,
-    "code": "PSST_GPT_SCREEN_LOCKED",
-    "message": "macOS screen is locked. Unlock the console and leave ChatGPT Chat open — AX automation cannot run while locked.",
-    "wakeHoldPid": wakePid as Any,
-  ], exitCode: 30)
+// Park until unlock (do not hard-fail immediately). Unlimited timeout waits forever;
+// positive deadline may expire while still locked → then fail.
+do {
+  let startDeadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
+  if !waitWhileScreenLocked(
+    deadline: startDeadline,
+    best: "",
+    attached: false,
+    phase: "preflight",
+    wakePid: wakePid,
+    context: "preflight"
+  ) {
+    emit([
+      "ok": false,
+      "code": "PSST_GPT_SCREEN_LOCKED",
+      "message": "macOS screen stayed locked until --timeout deadline. Unlock the console and re-run (or use --timeout 0 to park until unlock).",
+      "wakeHoldPid": wakePid as Any,
+    ], exitCode: 30)
+  }
 }
 
 do {
@@ -721,14 +830,28 @@ guard let zipPath, FileManager.default.fileExists(atPath: zipPath) else {
 }
 let zipURL = URL(fileURLWithPath: zipPath)
 
-guard let app = NSWorkspace.shared.runningApplications.first(where: {
-  $0.bundleIdentifier == "com.openai.codex" || $0.bundleIdentifier == "com.openai.chat" || $0.localizedName == "ChatGPT"
-}) else {
+guard let app0 = findChatGPTApp() else {
   emit(["ok": false, "code": "NO_APP", "message": "ChatGPT not running"], exitCode: 4)
 }
-_ = app.activate(options: [.activateAllWindows])
+_ = app0.activate(options: [.activateAllWindows])
 Thread.sleep(forTimeInterval: 0.5)
-let root = AXUIElementCreateApplication(app.processIdentifier)
+// Mutable: long runs re-acquire AX root after lock/sleep/UI rebuilds.
+var root = AXUIElementCreateApplication(app0.processIdentifier)
+var appPid = app0.processIdentifier
+
+@discardableResult
+func refreshAxRoot(reason: String) -> Bool {
+  guard let app = findChatGPTApp() else {
+    log("ax-refresh: ChatGPT app missing (\(reason))")
+    return false
+  }
+  _ = app.activate(options: [.activateAllWindows])
+  Thread.sleep(forTimeInterval: 0.35)
+  root = AXUIElementCreateApplication(app.processIdentifier)
+  appPid = app.processIdentifier
+  log("ax-refresh: ok pid=\(appPid) reason=\(reason)")
+  return true
+}
 
 // Chat only — never leave Work on
 for attempt in 1...6 {
@@ -877,33 +1000,39 @@ func harvestViaCopyMessageButtons() -> String {
   }
   log("copy-harvest: found \(buttons.count) copy-related button(s)")
   var bestClip = ""
-  // Last assistant messages are usually the last copy buttons in the tree order.
-  for btn in buttons.suffix(8).reversed() {
-    // Hover so hover-only toolbars expose the control, then press.
-    var posRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &posRef) == .success,
-       let axPos = posRef {
-      var point = CGPoint.zero
-      if AXValueGetValue(axPos as! AXValue, .cgPoint, &point) {
-        let src = CGEventSource(stateID: .hidSystemState)
-        CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
-          .post(tap: .cghidEventTap)
-        Thread.sleep(forTimeInterval: 0.12)
+  // Two passes: normal delay, then slower pass for flaky AX/clipboard after long runs.
+  let passes: [(hover: TimeInterval, afterPress: TimeInterval)] = [(0.12, 0.55), (0.25, 1.1)]
+  for (passIdx, delays) in passes.enumerated() {
+    // Last assistant messages are usually the last copy buttons in the tree order.
+    for btn in buttons.suffix(8).reversed() {
+      var posRef: CFTypeRef?
+      if AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &posRef) == .success,
+         let axPos = posRef {
+        var point = CGPoint.zero
+        if AXValueGetValue(axPos as! AXValue, .cgPoint, &point) {
+          let src = CGEventSource(stateID: .hidSystemState)
+          CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
+            .post(tap: .cghidEventTap)
+          Thread.sleep(forTimeInterval: delays.hover)
+        }
+      }
+      pb.clearContents()
+      _ = press(btn)
+      Thread.sleep(forTimeInterval: delays.afterPress)
+      let clip = (pb.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      if clip.count < 40 { continue }
+      if isChromeText(clip) { continue }
+      if looksLikeMidFragment(clip) && clip.count < 400 { continue }
+      if promptLooksSet(clip, prompt) && clip.count < prompt.count + 80 { continue }
+      if clip.count > bestClip.count {
+        bestClip = clip
+        log(
+          "copy-harvest: clipboard chars=\(clip.count) fragment=\(looksLikeMidFragment(clip)) pass=\(passIdx + 1)"
+        )
       }
     }
-    pb.clearContents()
-    _ = press(btn)
-    Thread.sleep(forTimeInterval: 0.55)
-    let clip = (pb.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    if clip.count < 40 { continue }
-    if isChromeText(clip) { continue }
-    if looksLikeMidFragment(clip) && clip.count < 400 { continue }
-    // Reject pure prompt echo
-    if promptLooksSet(clip, prompt) && clip.count < prompt.count + 80 { continue }
-    if clip.count > bestClip.count {
-      bestClip = clip
-      log("copy-harvest: clipboard chars=\(clip.count) fragment=\(looksLikeMidFragment(clip))")
-    }
+    // Good full body already — skip second pass.
+    if bestClip.count >= 400 && !looksLikeMidFragment(bestClip) { break }
   }
   return bestClip
 }
@@ -1653,6 +1782,91 @@ func runSelfcheckGenerationPolicy() -> Never {
   exit(ok ? 0 : 1)
 }
 
+/// Pure long-run policy selfcheck (timeout auto-upgrade + lock-park markers).
+func runSelfcheckLongrunPolicy() -> Never {
+  struct Case {
+    let name: String
+    let requested: Double
+    let strict: Bool
+    let expectTimeout: Double
+    let expectUpgraded: Bool
+  }
+  let cases: [Case] = [
+    Case(name: "zero_unlimited", requested: 0, strict: false, expectTimeout: 0, expectUpgraded: false),
+    Case(name: "neg_unlimited", requested: -1, strict: false, expectTimeout: 0, expectUpgraded: false),
+    Case(name: "short_30_upgrades", requested: 30, strict: false, expectTimeout: 0, expectUpgraded: true),
+    Case(name: "short_120_upgrades", requested: 120, strict: false, expectTimeout: 0, expectUpgraded: true),
+    Case(name: "short_300_upgrades", requested: 300, strict: false, expectTimeout: 0, expectUpgraded: true),
+    Case(name: "short_strict_keeps", requested: 120, strict: true, expectTimeout: 120, expectUpgraded: false),
+    Case(name: "hour_keeps", requested: 3600, strict: false, expectTimeout: 3600, expectUpgraded: false),
+    Case(name: "two_hour_keeps", requested: 7200, strict: false, expectTimeout: 7200, expectUpgraded: false),
+  ]
+  var results: [[String: Any]] = []
+  var failed = 0
+  for c in cases {
+    let got = resolveHelperTimeoutSec(requested: c.requested, strict: c.strict)
+    let pass = got.timeoutSec == c.expectTimeout && got.upgraded == c.expectUpgraded
+    if !pass { failed += 1 }
+    results.append([
+      "name": c.name,
+      "pass": pass,
+      "requested": c.requested,
+      "strict": c.strict,
+      "gotTimeout": got.timeoutSec,
+      "expectTimeout": c.expectTimeout,
+      "gotUpgraded": got.upgraded,
+      "expectUpgraded": c.expectUpgraded,
+      "note": got.note,
+    ])
+  }
+  // Structural markers for lock-park + ax-refresh long-run robustness (shipped source).
+  let src = try? String(contentsOfFile: CommandLine.arguments[0], encoding: .utf8)
+  // When invoked as `swift path/to/psst_zip_upload.swift`, argv[0] is swift; read self via Process.
+  // Prefer scanning the script path from argv when present.
+  var scriptBody = src ?? ""
+  if let scriptArg = CommandLine.arguments.dropFirst().first(where: { $0.hasSuffix(".swift") }),
+     let t = try? String(contentsOfFile: scriptArg, encoding: .utf8) {
+    scriptBody = t
+  }
+  // Fallback: read from known relative locations is unnecessary — markers tested via helper path below.
+  let markerNeedles = [
+    "PSST_GPT_SCREEN_LOCKED_PARKED",
+    "waiting-screen-unlock",
+    "func resolveHelperTimeoutSec",
+    "func waitWhileScreenLocked",
+    "func refreshAxRoot",
+    "ax-refresh:",
+    "auto-upgraded-short-timeout-to-unlimited",
+    "--timeout-strict",
+  ]
+  // Always read the file we are executing if possible
+  let helperPathCandidates = CommandLine.arguments.filter { $0.contains("psst_zip_upload") }
+  if let hp = helperPathCandidates.first, let body = try? String(contentsOfFile: hp, encoding: .utf8) {
+    scriptBody = body
+  }
+  var markerResults: [[String: Any]] = []
+  var markerFailed = 0
+  for n in markerNeedles {
+    let pass = scriptBody.contains(n)
+    if !pass { markerFailed += 1 }
+    markerResults.append(["marker": n, "pass": pass])
+  }
+  let ok = failed == 0 && markerFailed == 0
+  let out: [String: Any] = [
+    "ok": ok,
+    "status": "selfcheck-longrun-policy",
+    "failed": failed + markerFailed,
+    "timeoutCases": results,
+    "markers": markerResults,
+    "policy": "park-on-lock + auto-upgrade-short-timeout + ax-refresh",
+  ]
+  if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]),
+     let str = String(data: d, encoding: .utf8) {
+    print(str)
+  }
+  exit(ok ? 0 : 1)
+}
+
 // --- Wait-loop state ---
 var best = ""
 var sawGrowth = false
@@ -1669,14 +1883,15 @@ var consecutiveEndedObservations = 0
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
-// --timeout 0 = unlimited (wait until phase complete / captureFailed / kill / lock).
+// --timeout 0 = unlimited (wait until phase complete / captureFailed / kill).
+// Screen lock parks until unlock (does not abort). Short N auto-upgraded unless --timeout-strict.
 // --timeout N = optional user wall-clock only. No invented 60m hard cap.
 let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
 log(
   "wait-loop start timeoutSec=\(timeoutSec) " +
   "deadline=\(deadline.map { "\($0.timeIntervalSince(waitStarted))s" } ?? "none(unlimited)") " +
   "wakeHoldPid=\(wakePid.map(String.init) ?? "none") " +
-  "policy=generation-state-machine merge=non-dup"
+  "policy=generation-state-machine merge=non-dup lock=park-until-unlock ax-refresh=on"
 )
 
 func absorbBody(_ text: String, minDelta: Int = 20) {
@@ -1701,11 +1916,19 @@ while true {
   _ = WakeHold.shared.ensureAlive()
   let elapsed = Int(Date().timeIntervalSince(waitStarted))
 
-  if isScreenLocked() {
+  // Park on lock (do not abort long Pro runs). Resume after unlock + re-AX.
+  if !waitWhileScreenLocked(
+    deadline: deadline,
+    best: best,
+    attached: attached,
+    phase: phase.rawValue,
+    wakePid: wakePid,
+    context: "wait-loop"
+  ) {
     emit([
       "ok": false,
       "code": "PSST_GPT_SCREEN_LOCKED",
-      "message": "Screen locked during wait. Unlock and re-run; attachment may still be in ChatGPT.",
+      "message": "Screen stayed locked until --timeout deadline during wait. Unlock and re-run with --timeout 0 to park until unlock. Attachment may still be in ChatGPT.",
       "partial": best,
       "partialChars": best.count,
       "attached": attached,
@@ -1713,6 +1936,10 @@ while true {
       "phase": phase.rawValue,
       "wakeHoldPid": wakePid as Any,
     ], exitCode: 30)
+  }
+  // After unlock or periodically: re-activate ChatGPT + refresh AX root (UI rebuilds).
+  if tick == 1 || tick % 12 == 0 || (phase == .settling && tick % 4 == 0) {
+    _ = refreshAxRoot(reason: "tick=\(tick)-phase=\(phase.rawValue)")
   }
   if let work = bfsFirst(root, pred: { el, r in r.contains("Check") && s(el, kAXTitleAttribute as String) == "Work" }),
      s(work, kAXValueAttribute as String) == "1" {
