@@ -18,10 +18,12 @@ import CoreGraphics
 
 /// Holds the Mac awake while this process runs. Uses `caffeinate -w <self>` so
 /// the hold ends when this process exits for any reason (success, fail, crash).
+/// Includes `-u -t` so the *user-active* assertion lasts the hold (bare `-u` is only 5s).
 final class WakeHold {
   static let shared = WakeHold()
   private var process: Process?
   private(set) var caffeinatePid: Int32?
+  private static let userActiveHoldSec = 24 * 60 * 60
 
   /// Start only on macOS when `/usr/bin/caffeinate` exists. Idempotent.
   @discardableResult
@@ -33,17 +35,30 @@ final class WakeHold {
       log("wake-hold: caffeinate missing; continuing without hold")
       return nil
     }
+    let selfPid = ProcessInfo.processInfo.processIdentifier
     let p = Process()
     p.executableURL = URL(fileURLWithPath: path)
-    // -d display  -i idle  -m disk  -s system sleep; -w exit when we exit
-    p.arguments = ["-dims", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
+    // -d display  -i idle  -m disk  -s system(AC)  -u user-active (needs -t)
+    // -w release when this helper exits
+    p.arguments = [
+      "-dimsu",
+      "-t", "\(Self.userActiveHoldSec)",
+      "-w", "\(selfPid)",
+    ]
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     do {
       try p.run()
       process = p
       caffeinatePid = p.processIdentifier
-      log("wake-hold: started caffeinate pid=\(p.processIdentifier) for self=\(ProcessInfo.processInfo.processIdentifier)")
+      log("wake-hold: started caffeinate pid=\(p.processIdentifier) for self=\(selfPid) args=-dimsu -t \(Self.userActiveHoldSec) -w \(selfPid)")
+      Thread.sleep(forTimeInterval: 0.15)
+      if !p.isRunning {
+        log("wake-hold: WARNING caffeinate exited immediately — screen may lock")
+        process = nil
+        caffeinatePid = nil
+        return nil
+      }
       return caffeinatePid
     } catch {
       log("wake-hold: failed to start caffeinate: \(error)")

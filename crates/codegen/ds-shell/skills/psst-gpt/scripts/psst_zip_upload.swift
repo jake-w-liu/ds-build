@@ -13,11 +13,18 @@ import AppKit
 import Foundation
 import CoreGraphics
 
-/// Process-scoped wake hold: `caffeinate -dims -w <self>` ends when we exit.
+/// Process-scoped wake hold. Ends when we exit (`-w <self>`).
+///
+/// Flags (see `man caffeinate`):
+/// - `-d` display sleep  -i idle sleep  -m disk  -s system sleep (AC)
+/// - `-u -t <sec>` declare user active for the hold (resets idle/lock timer;
+///   bare `-u` only lasts 5s — that was not enough to stop screen lock)
 final class WakeHold {
   static let shared = WakeHold()
   private var process: Process?
   private(set) var caffeinatePid: Int32?
+  /// How long the user-active assertion may last (helper usually exits sooner).
+  private static let userActiveHoldSec = 24 * 60 * 60
 
   @discardableResult
   func start() -> Int32? {
@@ -28,16 +35,30 @@ final class WakeHold {
       log("wake-hold: caffeinate missing; continuing without hold")
       return nil
     }
+    let selfPid = ProcessInfo.processInfo.processIdentifier
     let p = Process()
     p.executableURL = URL(fileURLWithPath: path)
-    p.arguments = ["-dims", "-w", "\(ProcessInfo.processInfo.processIdentifier)"]
+    // -u without -t only asserts user-active for 5 seconds (man caffeinate).
+    p.arguments = [
+      "-dimsu",
+      "-t", "\(Self.userActiveHoldSec)",
+      "-w", "\(selfPid)",
+    ]
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     do {
       try p.run()
       process = p
       caffeinatePid = p.processIdentifier
-      log("wake-hold: started caffeinate pid=\(p.processIdentifier) for self=\(ProcessInfo.processInfo.processIdentifier)")
+      log("wake-hold: started caffeinate pid=\(p.processIdentifier) for self=\(selfPid) args=-dimsu -t \(Self.userActiveHoldSec) -w \(selfPid)")
+      // Verify the child is actually alive (catches silent launch failures).
+      Thread.sleep(forTimeInterval: 0.15)
+      if !p.isRunning {
+        log("wake-hold: WARNING caffeinate exited immediately — screen may lock")
+        process = nil
+        caffeinatePid = nil
+        return nil
+      }
       return caffeinatePid
     } catch {
       log("wake-hold: failed to start: \(error)")
