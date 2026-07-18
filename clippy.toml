@@ -1,7 +1,7 @@
-# Clippy config for crates/codegen/**.
+# Repository-root Clippy config (applies to all workspace crates).
 #
-# NOTE: clippy uses the NEAREST clippy.toml (no merging), so this file must
-# duplicate any settings from the repo-root //clippy.toml.
+# NOTE: clippy uses the NEAREST clippy.toml (no merging). Per-crate overrides
+# can be placed in subdirectory clippy.toml files.
 
 # TODO: remove after https://github.com/hyperium/tonic/issues/2253 fixed.
 large-error-threshold = 256

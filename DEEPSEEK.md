@@ -161,7 +161,7 @@ codesign --force --sign - ~/.local/bin/ds   # macOS: avoid Gatekeeper SIGKILL
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 
-ds --version   # expect: ds 0.1.0 (…)
+ds --version   # expect: ds <current semver> (<git commit>)
 ds auth status # after configuring a key
 ```
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env swift
+// PSST_TRANSPORT_REV=3
 // psst_chat_relay.swift — Chat-only Accessibility relay for ChatGPT macOS app.
 // NEVER uses Work / Codex agent usage. DeepSeek has no vision; pure AX only.
 //
@@ -14,6 +15,45 @@ import AppKit
 import Foundation
 import CoreGraphics
 
+/// Lossless best-effort snapshot of every eagerly readable pasteboard item/type.
+/// Restoring only `.string` destroys images, files, RTF, and custom clipboard data.
+struct PasteboardSnapshot {
+  private let items: [[NSPasteboard.PasteboardType: Data]]
+
+  init(_ pasteboard: NSPasteboard) {
+    items = (pasteboard.pasteboardItems ?? []).map { item in
+      var record: [NSPasteboard.PasteboardType: Data] = [:]
+      for type in item.types {
+        if let data = item.data(forType: type) { record[type] = data }
+      }
+      return record
+    }
+  }
+
+  func restore(to pasteboard: NSPasteboard) {
+    pasteboard.clearContents()
+    let restored: [NSPasteboardItem] = items.map { record in
+      let item = NSPasteboardItem()
+      for (type, data) in record { item.setData(data, forType: type) }
+      return item
+    }
+    if !restored.isEmpty { _ = pasteboard.writeObjects(restored) }
+  }
+}
+
+func restorePasteboardIfOwned(
+  _ snapshot: PasteboardSnapshot,
+  pasteboard: NSPasteboard,
+  expectedChangeCount: Int,
+  context: String
+) {
+  guard pasteboard.changeCount == expectedChangeCount else {
+    log("clipboard: skip stale restore after external change (\(context))")
+    return
+  }
+  snapshot.restore(to: pasteboard)
+}
+
 // MARK: - macOS wake-hold (multi-layer caffeinate for the helper lifetime)
 
 /// Multi-layer wake hold for long ChatGPT waits (host may use displaysleep≈2m).
@@ -27,8 +67,7 @@ import CoreGraphics
 final class WakeHold {
   static let shared = WakeHold()
   private var primary: Process?
-  private var pulse: Process?
-  private var pulsePids: [Int32] = []
+  private var pulseProcesses: [Process] = []
   private(set) var caffeinatePid: Int32?
   private var stopped = false
   private var lastPulseAt = Date.distantPast
@@ -46,7 +85,7 @@ final class WakeHold {
     stopped = false
     restartCount = 0
     pulseCount = 0
-    pulsePids.removeAll()
+    pulseProcesses.removeAll()
     let pid = ensurePrimary(reason: "start")
     fireUserActivePulse(force: true)
     return pid
@@ -119,9 +158,8 @@ final class WakeHold {
     p.standardError = FileHandle.nullDevice
     do {
       try p.run()
-      pulse = p
-      pulsePids.append(p.processIdentifier)
-      if pulsePids.count > 16 { pulsePids.removeFirst(pulsePids.count - 16) }
+      pulseProcesses.removeAll { !$0.isRunning }
+      pulseProcesses.append(p)
       lastPulseAt = now
       pulseCount += 1
       if pulseCount == 1 || pulseCount % 10 == 0 {
@@ -134,16 +172,8 @@ final class WakeHold {
 
   func stop() {
     stopped = true
-    for pid in pulsePids {
-      if kill(pid, 0) == 0 {
-        kill(pid, SIGTERM)
-        Thread.sleep(forTimeInterval: 0.05)
-        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
-      }
-    }
-    pulsePids.removeAll()
-    terminateTracked(pulse)
-    pulse = nil
+    for process in pulseProcesses { terminateTracked(process) }
+    pulseProcesses.removeAll()
     terminateTracked(primary)
     log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?") restarts=\(restartCount) pulses=\(pulseCount)")
     primary = nil
@@ -164,7 +194,7 @@ final class WakeHold {
 
   deinit {
     if let p = primary, p.isRunning { p.terminate() }
-    if let p = pulse, p.isRunning { p.terminate() }
+    for process in pulseProcesses where process.isRunning { process.terminate() }
   }
 }
 
@@ -232,16 +262,37 @@ func assertInteractiveSession(deadline: Date? = nil) {
 func stageResultForDs(_ obj: [String: Any], responseText: String?) -> [String: String] {
   let cwd = FileManager.default.currentDirectoryPath
   let dir = (cwd as NSString).appendingPathComponent(".ds/psst-gpt")
-  try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
   let jsonPath = (dir as NSString).appendingPathComponent("last-result.json")
   let mdPath = (dir as NSString).appendingPathComponent("last-response.md")
-  if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
-    try? data.write(to: URL(fileURLWithPath: jsonPath))
+  let stageId = UUID().uuidString
+  var staged = obj
+  var paths = ["resultPath": jsonPath, "stageId": stageId]
+  staged["resultPath"] = jsonPath
+  staged["stageId"] = stageId
+  do {
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    // Invalidate the prior manifest before touching its response body. A failed
+    // current transaction can then never leave old JSON paired with new/missing MD.
+    if FileManager.default.fileExists(atPath: jsonPath) {
+      try FileManager.default.removeItem(atPath: jsonPath)
+    }
+    if let responseText, !responseText.isEmpty {
+      try responseText.write(toFile: mdPath, atomically: true, encoding: .utf8)
+      staged["responsePath"] = mdPath
+      paths["responsePath"] = mdPath
+    } else if FileManager.default.fileExists(atPath: mdPath) {
+      // The JSON now describes a response-less result. Do not leave an older body
+      // at the canonical handoff path where DS could mistake it for this turn.
+      try FileManager.default.removeItem(atPath: mdPath)
+      staged.removeValue(forKey: "responsePath")
+    }
+    let data = try JSONSerialization.data(withJSONObject: staged, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+  } catch {
+    log("stage-result: \(error)")
+    return [:]
   }
-  if let responseText, !responseText.isEmpty {
-    try? responseText.write(toFile: mdPath, atomically: true, encoding: .utf8)
-  }
-  return ["resultPath": jsonPath, "responsePath": mdPath]
+  return paths
 }
 
 // MARK: - AX helpers
@@ -253,6 +304,13 @@ func copyAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
 
 func setAttr(_ el: AXUIElement, _ name: String, _ value: CFTypeRef) -> Bool {
   AXUIElementSetAttributeValue(el, name as CFString, value) == .success
+}
+
+func axEnabled(_ el: AXUIElement) -> Bool {
+  guard let value = copyAttr(el, kAXEnabledAttribute as String) else { return false }
+  if let enabled = value as? Bool { return enabled }
+  if let number = value as? NSNumber { return number.boolValue }
+  return false
 }
 
 func s(_ el: AXUIElement, _ n: String) -> String {
@@ -275,6 +333,46 @@ func kids(_ el: AXUIElement) -> [AXUIElement] {
 
 func press(_ el: AXUIElement) -> Bool {
   AXUIElementPerformAction(el, kAXPressAction as CFString) == .success
+}
+
+/// A real pointer click focuses Electron's web contents before dispatching the
+/// button action. ChatGPT's Copy handler rejects a successful AXPress when the
+/// native app is frontmost but the embedded web view does not have DOM focus.
+func clickCenter(_ el: AXUIElement) -> Bool {
+  guard let positionValue = copyAttr(el, kAXPositionAttribute as String),
+        let sizeValue = copyAttr(el, kAXSizeAttribute as String),
+        CFGetTypeID(positionValue) == AXValueGetTypeID(),
+        CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return false }
+  var position = CGPoint.zero
+  var size = CGSize.zero
+  guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+        size.width > 0,
+        size.height > 0 else { return false }
+  let center = CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+  let source = CGEventSource(stateID: .hidSystemState)
+  guard let move = CGEvent(
+    mouseEventSource: source,
+    mouseType: .mouseMoved,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ), let down = CGEvent(
+    mouseEventSource: source,
+    mouseType: .leftMouseDown,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ), let up = CGEvent(
+    mouseEventSource: source,
+    mouseType: .leftMouseUp,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ) else { return false }
+  move.post(tap: .cghidEventTap)
+  Thread.sleep(forTimeInterval: 0.08)
+  down.post(tap: .cghidEventTap)
+  up.post(tap: .cghidEventTap)
+  Thread.sleep(forTimeInterval: 0.18)
+  return true
 }
 
 func log(_ m: String) {
@@ -303,7 +401,7 @@ func emitJSON(_ obj: [String: Any]) {
 
 func fail(_ code: String, _ message: String, exitCode: Int32 = 1) -> Never {
   WakeHold.shared.stop()
-  emitJSON([
+  var payload: [String: Any] = [
     "ok": false,
     "status": "error",
     "code": code,
@@ -311,7 +409,12 @@ func fail(_ code: String, _ message: String, exitCode: Int32 = 1) -> Never {
     "surface": "psst-gpt-chat",
     "mode": "chat",
     "wakeHoldReleased": true,
-  ])
+  ]
+  let staged = stageResultForDs(payload, responseText: nil)
+  payload["handoffStaged"] = !staged.isEmpty
+  if let stageId = staged["stageId"] { payload["handoffStageId"] = stageId }
+  if let path = staged["resultPath"] { payload["resultPath"] = path }
+  emitJSON(payload)
   exit(exitCode)
 }
 
@@ -442,37 +545,260 @@ func trySelectFlash(_ root: AXUIElement) {
   }
 }
 
-func waitAssistant(root: AXUIElement, marker: String, timeoutSec: Double) -> String? {
-  var stable = 0
-  var last = ""
-  let deadline = Date().addingTimeInterval(timeoutSec)
-  while Date() < deadline {
-    Thread.sleep(forTimeInterval: 2)
-    _ = WakeHold.shared.ensureAlive()
-    if chatWork(root).workOn {
-      fail("PSST_GPT_WORK_MODE", "Work flipped ON during wait — aborting (no Work credits).")
+func key(_ code: CGKeyCode, flags: CGEventFlags = []) {
+  let src = CGEventSource(stateID: .hidSystemState)
+  CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: true).map {
+    $0.flags = flags; $0.post(tap: .cghidEventTap)
+  }
+  CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: false).map {
+    $0.flags = flags; $0.post(tap: .cghidEventTap)
+  }
+}
+
+func findSendButton(_ root: AXUIElement, requireEnabled: Bool = true) -> AXUIElement? {
+  bfsAll(root, pred: { el, r in
+    guard r == "AXButton", !requireEnabled || axEnabled(el) else { return false }
+    let blob = (s(el, kAXDescriptionAttribute as String) + " " + s(el, kAXTitleAttribute as String))
+    return blob.localizedCaseInsensitiveContains("Send message") ||
+      blob.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Send") == .orderedSame
+  }).first
+}
+
+func findStopButton(_ root: AXUIElement) -> AXUIElement? {
+  bfsAll(root, pred: { el, r in
+    guard r == "AXButton" else { return false }
+    let blob = s(el, kAXDescriptionAttribute as String) + " " + s(el, kAXTitleAttribute as String)
+    return blob.localizedCaseInsensitiveContains("Stop")
+  }).first
+}
+
+func isRelayChrome(_ text: String) -> Bool {
+  let l = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  if l.isEmpty { return true }
+  let exact: Set<String> = [
+    "new chat", "projects", "sites", "scheduled", "plugins", "recents",
+    "message chatgpt", "work with chatgpt", "chatgpt", "search", "send",
+    "add files and more", "select chatgpt model", "dictate", "share", "chat", "work",
+  ]
+  if exact.contains(l) { return true }
+  if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("jump to ") { return true }
+  let loading = [
+    "chatgpt is responding", "systems are thinking", "thinking a bit more",
+    "for a quicker response", "before responding", "may be less capable",
+  ]
+  if loading.contains(where: { l.contains($0) }) { return true }
+  return false
+}
+
+func relayCaptureTexts(_ root: AXUIElement) -> [String] {
+  bfsAll(root, pred: { _, r in
+    r == "AXStaticText" || r == "AXTextArea" || r == "AXTextField" || r == "AXGroup"
+  }).compactMap { el in
+    let role = s(el, kAXRoleAttribute as String)
+    if (role == "AXTextArea" || role == "AXTextField") &&
+       s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT") {
+      return nil
     }
-    let texts = bfsAll(root, pred: { _, r in r == "AXStaticText" })
-      .map { s($0, kAXValueAttribute as String) }.filter { !$0.isEmpty }
-    let hits = texts.filter { $0.contains(marker) }
-    let assistant = hits.filter {
-      let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
-      return t == marker || (t.contains(marker) && !t.lowercased().contains("reply with") && t.count <= marker.count + 80)
-    }
-    // Prefer full assistant-like hit; also accept any short marker-only line
-    let sig = "\(hits.count)|\(assistant.count)"
-    log("tick hits=\(hits.count) assistant=\(assistant.count) workOn=\(chatWork(root).workOn)")
-    if sig == last { stable += 1 } else { stable = 0; last = sig }
-    if let a = assistant.first, stable >= 2 {
-      return a.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    // Broader capture: after stability, take longest hit that is not the user prompt
-    if hits.count >= 2 && stable >= 3 {
-      let nonUser = hits.filter { !$0.lowercased().contains("reply with") }
-      return (nonUser.first ?? hits.last)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
+    let value = s(el, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines)
+    if value.isEmpty || isRelayChrome(value) { return nil }
+    if role == "AXGroup" && value.count < 40 { return nil }
+    return value
+  }
+}
+
+func relayCopyButtons(_ root: AXUIElement) -> [AXUIElement] {
+  bfsAll(root, pred: { el, r in
+    guard r == "AXButton" else { return false }
+    let blob = (
+      s(el, kAXDescriptionAttribute as String) + " " +
+      s(el, kAXTitleAttribute as String) + " " +
+      s(el, kAXHelpAttribute as String)
+    ).lowercased()
+    return blob.contains("copy message") ||
+      (blob.contains("copy") && blob.contains("message")) ||
+      blob.trimmingCharacters(in: .whitespacesAndNewlines) == "copy"
+  })
+}
+
+/// Activate both the native ChatGPT app and its AX window immediately before a
+/// Copy click. Activation alone is insufficient in Electron: the app can be
+/// frontmost while the embedded web view still reports `document.hasFocus()`
+/// as false.
+func focusedChatGPTRootForCopy() -> AXUIElement? {
+  guard let app = findChatGPTApp() else { return nil }
+  let activated = app.activate(options: [.activateAllWindows])
+  let focusedRoot = AXUIElementCreateApplication(app.processIdentifier)
+  _ = setAttr(focusedRoot, kAXFrontmostAttribute as String, kCFBooleanTrue)
+  if let window = bfsAll(focusedRoot, pred: { _, role in role == "AXWindow" }).first {
+    _ = setAttr(window, kAXMainAttribute as String, kCFBooleanTrue)
+    _ = setAttr(window, kAXFocusedAttribute as String, kCFBooleanTrue)
+  }
+  Thread.sleep(forTimeInterval: 0.3)
+  log("copy-focus activated=\(activated) pid=\(app.processIdentifier)")
+  return focusedRoot
+}
+
+func requestedExactReply(_ prompt: String) -> String? {
+  let patterns = [
+    #"\b(?:reply|respond|return|output|print|say)\s+(?:with\s+)?exactly(?:\s+with)?(?:\s+(?:the|this))?(?:\s+(?:token|string))?\s*[:=]?\s*[`\"“]([^`\"”\n]{1,256})[`\"”]"#,
+    #"\b(?:reply|respond|return|output|print|say)\s+(?:with\s+)?exactly(?:\s+with)?(?:\s+(?:the|this))?(?:\s+(?:token|string))?\s*[:=]?\s*([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\s+[0-9]+)?)(?=\s*(?:and\s+nothing\s+else)?[.!?\n]|$)"#,
+  ]
+  let fullRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+  for pattern in patterns {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+          let match = regex.firstMatch(in: prompt, range: fullRange),
+          match.numberOfRanges > 1,
+          let range = Range(match.range(at: 1), in: prompt) else { continue }
+    let value = prompt[range].trimmingCharacters(in: .whitespacesAndNewlines)
+    if !value.isEmpty { return value }
   }
   return nil
+}
+
+func mergeRelayBody(_ current: String, _ candidate: String) -> String {
+  let a = current.trimmingCharacters(in: .whitespacesAndNewlines)
+  let b = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+  if b.isEmpty { return a }
+  if a.isEmpty || b == a { return b }
+  if b.contains(a) && b.count > a.count { return b }
+  if a.contains(b) { return a }
+  return b.count > a.count ? b : a
+}
+
+func bestRelayAxBody(
+  texts: [String],
+  baseline: Set<String>,
+  prompt: String,
+  exactReply: String?
+) -> String {
+  if let exactReply,
+     let hit = texts.first(where: {
+       let t = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+       if baseline.contains($0) || t == prompt || prompt.contains(t) { return false }
+       return t == exactReply ||
+         (t.contains(exactReply) && t.count <= exactReply.count + 80 && !t.lowercased().contains("reply with"))
+     }) {
+    return hit.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  let filtered = texts.filter { t in
+    !baseline.contains(t) && t != prompt && !prompt.contains(t) && !isRelayChrome(t)
+  }
+  var unique: [String] = []
+  for text in filtered {
+    if unique.contains(where: { $0 == text || ($0.contains(text) && $0.count > text.count) }) { continue }
+    unique.removeAll { text.contains($0) && text.count > $0.count }
+    unique.append(text)
+  }
+  let longest = unique.max(by: { $0.count < $1.count }) ?? ""
+  let joined = unique.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  return joined.count > longest.count ? joined : longest
+}
+
+func harvestCurrentRelayCopy(
+  baselineCopyCount: Int,
+  prompt: String
+) -> String {
+  guard let focusedRoot = focusedChatGPTRootForCopy() else { return "" }
+  let buttons = relayCopyButtons(focusedRoot)
+  guard buttons.count > baselineCopyCount else { return "" }
+  let pb = NSPasteboard.general
+  var best = ""
+  for button in buttons.dropFirst(baselineCopyCount).suffix(4).reversed() {
+    let snapshot = PasteboardSnapshot(pb)
+    let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
+    pb.clearContents()
+    _ = pb.setString(sentinel, forType: .string)
+    let method: String
+    if clickCenter(button) {
+      method = "mouseClick"
+    } else {
+      method = "axPress-fallback"
+      _ = press(button)
+    }
+    let copiedChangeCount = pb.changeCount
+    let raw = pb.string(forType: .string) ?? ""
+    let text = raw == sentinel ? "" : raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    log("copy-attempt method=\(method) changed=\(raw != sentinel) chars=\(text.count)")
+    // The pressed button is itself bound to this turn by baselineCopyCount. Do
+    // not require AX-text overlap: Copy is the recovery path when AX body text is absent.
+    restorePasteboardIfOwned(
+      snapshot,
+      pasteboard: pb,
+      expectedChangeCount: copiedChangeCount,
+      context: "copy-message"
+    )
+    if text.isEmpty || text == prompt || isRelayChrome(text) { continue }
+    best = mergeRelayBody(best, text)
+  }
+  return best
+}
+
+func selectEndedRelayBody(axBody: String, copiedBody: String) -> String {
+  let copied = copiedBody.trimmingCharacters(in: .whitespacesAndNewlines)
+  return copied.isEmpty ? axBody : copied
+}
+
+func relayResultContract(
+  text: String,
+  status: String,
+  code: String?,
+  wakePid: pid_t?
+) -> [String: Any] {
+  var payload: [String: Any] = [
+    "ok": status == "complete",
+    "status": status,
+    "surface": "psst-gpt-chat",
+    "mode": "chat",
+    "workOn": false,
+    "wakeHoldPid": wakePid as Any,
+    "wakeHoldReleased": true,
+    "responseChars": text.count,
+  ]
+  if let code { payload["code"] = code }
+  if !text.isEmpty {
+    if status == "complete" {
+      payload["finalDeliveryText"] = text
+      payload["mustReturnFinalDelivery"] = true
+      payload["mustReturnVerbatim"] = true
+    } else {
+      payload["partial"] = text
+      payload["partialIsDiagnosticOnly"] = true
+      payload["mustNotReturnAsComplete"] = true
+    }
+  }
+  return payload
+}
+
+struct RelayControls {
+  let stop: Bool
+  let send: Bool
+  var active: Bool { stop && !send }
+  var ended: Bool { send }
+  var ambiguous: Bool { !stop && !send }
+}
+
+enum RelayPhase: String {
+  case awaitingStart, active, settling, complete, captureFailed
+}
+
+func classifyRelayPhase(
+  controls: RelayControls,
+  body: String,
+  sawThisTurn: Bool,
+  stableSnapshots: Int,
+  endedObservations: Int
+) -> RelayPhase {
+  if controls.active { return .active }
+  if !sawThisTurn { return .awaitingStart }
+  let acceptable = !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  let strongEnd = controls.ended
+  // Stop/Send both absent is AX ambiguity, not proof of completion. Require
+  // Send-ready so unchanged partial text can never finalize an active reply.
+  guard strongEnd else { return .active }
+  if strongEnd && endedObservations < 2 { return .settling }
+  if acceptable && stableSnapshots >= 3 { return .complete }
+  if strongEnd && !acceptable && endedObservations >= 40 { return .captureFailed }
+  return .settling
 }
 
 // MARK: - Commands
@@ -483,7 +809,22 @@ func doctor() {
   }
   let wakePid = WakeHold.shared.start()
   defer { WakeHold.shared.stop() }
-  assertInteractiveSession()
+  // Doctor must report lock status immediately — do not park forever.
+  if isScreenLocked() {
+    emitJSON([
+      "ok": false,
+      "status": "screen-locked",
+      "code": "PSST_GPT_SCREEN_LOCKED",
+      "screenLocked": true,
+      "mode": "unknown",
+      "workOn": false,
+      "message": "macOS screen is locked. Unlock the console, leave ChatGPT on Chat, then re-run --doctor.",
+      "wakeHoldPid": wakePid as Any,
+      "wakeHoldReleased": true,
+      "surface": "psst-gpt-chat",
+    ])
+    exit(30)
+  }
   let appInstalled =
     FileManager.default.fileExists(atPath: "/Applications/ChatGPT.app") ||
     FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Applications/ChatGPT.app")
@@ -513,7 +854,9 @@ func doctor() {
     "message": "Chat-only relay ready (Work refused). Screen must stay unlocked for the run.",
   ]
   let staged = stageResultForDs(payload, responseText: nil)
-  payload["resultPath"] = staged["resultPath"] as Any
+  payload["handoffStaged"] = !staged.isEmpty
+  if let stageId = staged["stageId"] { payload["handoffStageId"] = stageId }
+  if let path = staged["resultPath"] { payload["resultPath"] = path }
   WakeHold.shared.stop()
   payload["wakeHoldReleased"] = true
   emitJSON(payload)
@@ -521,8 +864,10 @@ func doctor() {
 }
 
 func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: Bool) {
+  let startedAt = Date()
+  let operationDeadline: Date? = timeoutSec > 0 ? startedAt.addingTimeInterval(timeoutSec) : nil
   let wakePid = WakeHold.shared.start()
-  assertInteractiveSession()
+  assertInteractiveSession(deadline: operationDeadline)
   guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
     fail("PSST_GPT_EMPTY_PROMPT", "Prompt is empty")
   }
@@ -530,10 +875,11 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
   guard let app = findChatGPTApp() else {
     fail("PSST_GPT_NOT_RUNNING", "ChatGPT is not running. Open ChatGPT and use Chat (not Work).")
   }
-  let root = AXUIElementCreateApplication(app.processIdentifier)
+  var root = AXUIElementCreateApplication(app.processIdentifier)
   ensureChatOnly(root)
   if newChatFlag {
     newChat(root)
+    root = AXUIElementCreateApplication(app.processIdentifier)
     ensureChatOnly(root)
   }
   if preferFlash {
@@ -547,144 +893,404 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
     fail("PSST_GPT_WORK_MODE", "Work is ON at send time — abort (no Work credits).")
   }
 
-  // Unique marker for capture (appended instruction for exact-echo tests is optional)
-  let marker = "PSST_CHAT_\(Int(Date().timeIntervalSince1970))"
-  // Send user prompt as-is; for verification callers can include a token.
-  _ = setAttr(composer, kAXValueAttribute as String, prompt as CFTypeRef)
-  _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-  Thread.sleep(forTimeInterval: 0.3)
-  let cv = s(composer, kAXValueAttribute as String)
-  if cv.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-    fail("PSST_GPT_SET_FAILED", "Could not set Chat composer text")
-  }
-  log("composer set (\(cv.count) chars)")
-
-  if let send = bfsAll(root, pred: { el, r in
-    r == "AXButton" && (s(el, kAXDescriptionAttribute as String) == "Send" || s(el, kAXTitleAttribute as String) == "Send")
-  }).first {
-    log("send=\(press(send))")
-  } else {
-    log("Send missing; Return")
-    let src = CGEventSource(stateID: .hidSystemState)
-    CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: true)?.post(tap: .cghidEventTap)
-    CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: false)?.post(tap: .cghidEventTap)
-  }
-
-  // Wait for response via static texts. Prefer exact short replies; filter chrome.
-  let chrome: Set<String> = [
-    "new chat", "projects", "sites", "scheduled", "plugins", "recents",
-    "message chatgpt", "work with chatgpt", "chatgpt", "search", "send",
-    "add files and more", "select chatgpt model", "dictate", "share",
-  ]
-  func isChrome(_ t: String) -> Bool {
-    let lower = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if lower.isEmpty { return true }
-    if chrome.contains(lower) { return true }
-    if lower.hasPrefix("pin chat") || lower.hasPrefix("archive chat") { return true }
-    if lower.hasPrefix("jump to ") { return true }
-    if lower == "chat" || lower == "work" { return true }
-    return false
-  }
-
-  // Optional: if prompt asks for an exact token, prefer that for verification.
-  let exactToken: String? = {
-    // e.g. "... only this token and nothing else: FOO" or "only: FOO"
-    if let r = prompt.range(of: #"\b(OK_[A-Z0-9_]+|PSST_[A-Z0-9_]+)\b"#, options: .regularExpression) {
-      return String(prompt[r])
+  func composerContent(_ value: String) -> String {
+    var content = value.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    if content == "Message ChatGPT" || content == "\nMessage ChatGPT" { return "" }
+    if content.hasSuffix("\nMessage ChatGPT") {
+      content.removeLast("\nMessage ChatGPT".count)
     }
-    return nil
-  }()
-
-  func completeWith(_ text: String, partial: Bool) -> Never {
-    var payload: [String: Any] = [
-      "ok": true,
-      "status": "complete",
-      "surface": "psst-gpt-chat",
-      "mode": "chat",
-      "workOn": false,
-      "mustReturnFinalDelivery": true,
-      "mustReturnVerbatim": true,
-      "finalDeliveryText": text,
-      "message": partial
-        ? "Chat-only relay complete (timeout with partial stability)"
-        : "Chat-only relay complete",
-    ]
-    let staged = stageResultForDs(payload, responseText: text)
-    payload["resultPath"] = staged["resultPath"] as Any
-    payload["responsePath"] = staged["responsePath"] as Any
-    WakeHold.shared.stop()
-    payload["wakeHoldReleased"] = true
-    emitJSON(payload)
-    exit(0)
+    return content
   }
 
-  var stable = 0
-  var lastSig = ""
-  var lastAssistant = ""
-  // timeoutSec <= 0 → wait indefinitely (heavy audit); lock parks until unlock
-  let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
+  func promptLooksSet(_ value: String) -> Bool {
+    let v = composerContent(value)
+    let e = prompt.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+    return !v.isEmpty && v == e
+  }
+
+  var baseline = Set(relayCaptureTexts(root))
+  _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+  var composerValue = ""
+  for attempt in 1...3 {
+    let ok = setAttr(composer, kAXValueAttribute as String, prompt as CFTypeRef)
+    Thread.sleep(forTimeInterval: 0.4)
+    composerValue = s(composer, kAXValueAttribute as String)
+    log("composer set attempt=\(attempt) ok=\(ok) chars=\(composerValue.count)")
+    if promptLooksSet(composerValue) { break }
+    _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+  }
+  if !promptLooksSet(composerValue) {
+    let pasteboard = NSPasteboard.general
+    let snapshot = PasteboardSnapshot(pasteboard)
+    _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    key(0, flags: .maskCommand) // Cmd+A within the composer
+    Thread.sleep(forTimeInterval: 0.1)
+    pasteboard.clearContents()
+    _ = pasteboard.setString(prompt, forType: .string)
+    let promptClipboardChangeCount = pasteboard.changeCount
+    key(9, flags: .maskCommand) // Cmd+V
+    Thread.sleep(forTimeInterval: 0.5)
+    composerValue = s(composer, kAXValueAttribute as String)
+    restorePasteboardIfOwned(
+      snapshot,
+      pasteboard: pasteboard,
+      expectedChangeCount: promptClipboardChangeCount,
+      context: "prompt-paste"
+    )
+    log("composer clipboard fallback chars=\(composerValue.count)")
+  }
+  guard promptLooksSet(composerValue) else {
+    fail("PSST_GPT_SET_FAILED", "Could not prove the requested prompt was set in the Chat composer.")
+  }
+  baseline.formUnion(relayCaptureTexts(root).filter { prompt.contains($0) || $0.contains(String(prompt.prefix(40))) })
+  let baselineCopyCount = relayCopyButtons(root).count
+  let preSendChars = composerValue.count
+
+  func messageLooksSent() -> Bool {
+    if findStopButton(root) != nil { return true }
+    guard let current = findChatComposer(root) else { return false }
+    let after = composerContent(s(current, kAXValueAttribute as String))
+    if promptLooksSet(after) { return false }
+    if after.isEmpty { return true }
+    return preSendChars > 40 && after.count + 80 < preSendChars
+  }
+
+  var sendVerified = false
+  var sendAttempt = 0
+  var lastSendRefresh = Date.distantPast
+  while !sendVerified {
+    if let operationDeadline, Date() >= operationDeadline {
+      fail("PSST_GPT_SEND_TIMEOUT", "The user-supplied --timeout expired before ChatGPT accepted the message.", exitCode: 2)
+    }
+    if !waitWhileScreenLocked(deadline: operationDeadline, context: "chat-send") {
+      fail("PSST_GPT_SEND_TIMEOUT", "The screen stayed locked until the user-supplied --timeout expired.", exitCode: 30)
+    }
+    if Date().timeIntervalSince(lastSendRefresh) >= 20 {
+      root = AXUIElementCreateApplication(app.processIdentifier)
+      lastSendRefresh = Date()
+      ensureChatOnly(root)
+    }
+    if sendAttempt > 0 && messageLooksSent() {
+      Thread.sleep(forTimeInterval: 0.6)
+      if messageLooksSent() {
+        sendVerified = true
+        log("send VERIFIED before retry attempt=\(sendAttempt + 1) (double-check ok)")
+        break
+      }
+    }
+    guard let send = findSendButton(root) else {
+      _ = WakeHold.shared.ensureAlive()
+      Thread.sleep(forTimeInterval: 0.75)
+      continue
+    }
+    sendAttempt += 1
+    if sendAttempt % 2 == 1 {
+      log("send attempt=\(sendAttempt) method=axPress ok=\(press(send))")
+    } else {
+      key(36, flags: .maskCommand)
+      log("send attempt=\(sendAttempt) method=cmd-return")
+    }
+    Thread.sleep(forTimeInterval: 1.0)
+    if messageLooksSent() {
+      Thread.sleep(forTimeInterval: 0.6)
+      if messageLooksSent() {
+        sendVerified = true
+        log("send VERIFIED on attempt=\(sendAttempt) (double-check ok)")
+        break
+      }
+    }
+  }
+  let exactReply = requestedExactReply(prompt)
+  let deadline = operationDeadline
+  var phase = RelayPhase.awaitingStart
+  var phaseEnteredAt = Date()
+  var best = ""
+  var sawThisTurn = false
+  var sawAuthoritativeCopy = false
+  var fingerprint = ""
+  var stableSnapshots = 0
+  var endedObservations = 0
+  var tick = 0
+
+  func finish(_ text: String, status: String, code: String? = nil, exitCode: Int32) -> Never {
+    WakeHold.shared.stop()
+    var payload = relayResultContract(text: text, status: status, code: code, wakePid: wakePid)
+    let staged = stageResultForDs(payload, responseText: text.isEmpty ? nil : text)
+    payload["handoffStaged"] = !staged.isEmpty
+    if let stageId = staged["stageId"] { payload["handoffStageId"] = stageId }
+    if let path = staged["resultPath"] { payload["resultPath"] = path }
+    if let path = staged["responsePath"] { payload["responsePath"] = path }
+    emitJSON(payload)
+    exit(exitCode)
+  }
+
   while deadline == nil || Date() < deadline! {
-    Thread.sleep(forTimeInterval: 2)
+    let inPhase = Date().timeIntervalSince(phaseEnteredAt)
+    let interval: TimeInterval
+    if phase == .active {
+      interval = inPhase < 60 ? 2.5 : (inPhase < 300 ? 5 : (inPhase < 1800 ? 8 : 12))
+    } else {
+      interval = 2
+    }
+    Thread.sleep(forTimeInterval: interval)
+    tick += 1
+    _ = WakeHold.shared.ensureAlive()
     if !waitWhileScreenLocked(deadline: deadline, context: "relay-wait") {
-      fail(
-        "PSST_GPT_SCREEN_LOCKED",
-        "Screen stayed locked until --timeout deadline during wait — unlock and re-run with --timeout 0."
-      )
+      finish(best, status: "partial", code: "PSST_GPT_SCREEN_LOCKED", exitCode: 30)
+    }
+    if tick == 1 || tick % 12 == 0 {
+      root = AXUIElementCreateApplication(app.processIdentifier)
+      log("ax-refresh tick=\(tick)")
     }
     if chatWork(root).workOn {
-      fail("PSST_GPT_WORK_MODE", "Work flipped ON during wait — abort.")
-    }
-    let texts = bfsAll(root, pred: { _, r in r == "AXStaticText" })
-      .map { s($0, kAXValueAttribute as String) }
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .filter { !$0.isEmpty && !isChrome($0) }
-
-    // Exact-token success (smoke / instructed replies)
-    if let token = exactToken {
-      let hits = texts.filter { $0 == token || ($0.contains(token) && $0.count <= token.count + 40 && !$0.lowercased().contains("reply with")) }
-      log("tick tokenHits=\(hits.count) workOn=false")
-      if let a = hits.first(where: { $0 == token }) ?? hits.first {
-        if a == lastAssistant { stable += 1 } else { stable = 0; lastAssistant = a }
-        if stable >= 2 {
-          completeWith(lastAssistant, partial: false)
-        }
-        continue
-      }
+      finish(best, status: "partial", code: "PSST_GPT_WORK_MODE", exitCode: 20)
     }
 
-    // General: texts that appear after the user prompt blob
-    let fingerprint = String(prompt.prefix(min(64, prompt.count)))
-    var after = false
-    var collected: [String] = []
-    for t in texts {
-      if t.contains(fingerprint) || t == prompt {
-        after = true
-        collected = []
-        continue
-      }
-      if after && t != prompt && !t.contains(fingerprint) {
-        collected.append(t)
+    var controls = RelayControls(
+      stop: findStopButton(root) != nil,
+      send: findSendButton(root, requireEnabled: false) != nil
+    )
+    if controls.active { sawThisTurn = true }
+    let texts = relayCaptureTexts(root)
+    let axBody = bestRelayAxBody(texts: texts, baseline: baseline, prompt: prompt, exactReply: exactReply)
+    best = mergeRelayBody(best, axBody)
+    if !axBody.isEmpty { sawThisTurn = true }
+
+    if controls.ended || phase == .settling {
+      let copied = harvestCurrentRelayCopy(
+        baselineCopyCount: baselineCopyCount,
+        prompt: prompt
+      )
+      if !copied.isEmpty {
+        log("relay current-turn Copy-message authoritative chars=\(copied.count) axChars=\(best.count)")
+        best = selectEndedRelayBody(axBody: best, copiedBody: copied)
+        sawThisTurn = true
+        sawAuthoritativeCopy = true
       }
     }
-    let assistantText = collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-    let sig = "\(assistantText.count)|\(assistantText.prefix(80))"
-    log("tick assistantChars=\(assistantText.count) workOn=false")
-    if sig == lastSig && !assistantText.isEmpty {
-      stable += 1
+
+    controls = RelayControls(
+      stop: findStopButton(root) != nil,
+      send: findSendButton(root, requireEnabled: false) != nil
+    )
+    let newFingerprint = "\(best.count)|\(best.prefix(64))|\(best.suffix(64))"
+    if !best.isEmpty && newFingerprint == fingerprint {
+      stableSnapshots += 1
     } else {
-      stable = 0
-      lastSig = sig
-      if !assistantText.isEmpty { lastAssistant = assistantText }
+      fingerprint = newFingerprint
+      stableSnapshots = best.isEmpty ? 0 : 1
     }
-    if stable >= 3 && !lastAssistant.isEmpty && lastAssistant.lowercased() != "message chatgpt" {
-      completeWith(lastAssistant, partial: false)
+    if controls.ended { endedObservations += 1 } else { endedObservations = 0 }
+
+    let newPhase = classifyRelayPhase(
+      controls: controls,
+      body: best,
+      sawThisTurn: sawThisTurn,
+      stableSnapshots: stableSnapshots,
+      endedObservations: endedObservations
+    )
+    if newPhase != phase {
+      log("relay phase \(phase.rawValue) -> \(newPhase.rawValue) tick=\(tick) chars=\(best.count)")
+      phase = newPhase
+      phaseEnteredAt = Date()
+    }
+    log(
+      "relay tick=\(tick) phase=\(phase.rawValue) chars=\(best.count) stable=\(stableSnapshots) " +
+      "ended=\(endedObservations) stop=\(controls.stop) send=\(controls.send)"
+    )
+
+    if tick % 3 == 0 {
+      _ = stageResultForDs([
+        "ok": false,
+        "status": "waiting",
+        "phase": phase.rawValue,
+        "partialChars": best.count,
+        "wakeHoldPid": wakePid as Any,
+      ], responseText: best.isEmpty ? nil : best)
+    }
+
+    switch phase {
+    case .complete:
+      if exactReply == nil && !sawAuthoritativeCopy {
+        if endedObservations >= 40 {
+          finish(best, status: "partial", code: "PSST_GPT_COPY_CAPTURE_UNAVAILABLE", exitCode: 3)
+        }
+        phase = .settling
+        phaseEnteredAt = Date()
+        stableSnapshots = 0
+        continue
+      }
+      finish(best, status: "complete", exitCode: 0)
+    case .captureFailed:
+      finish(best, status: "partial", code: "PSST_GPT_CAPTURE_FAILED", exitCode: 3)
+    case .awaitingStart, .active, .settling:
+      continue
     }
   }
 
-  if !lastAssistant.isEmpty && lastAssistant.lowercased() != "message chatgpt" {
-    completeWith(lastAssistant, partial: true)
+  // A positive --timeout is an explicit user cap. Never relabel a still-active
+  // or unstably captured response as complete.
+  finish(best, status: "partial", code: "PSST_GPT_TIMEOUT", exitCode: 2)
+}
+
+func runSelfcheckRelayPolicy() -> Never {
+  struct PhaseCase {
+    let name: String
+    let controls: RelayControls
+    let body: String
+    let saw: Bool
+    let stable: Int
+    let ended: Int
+    let expected: RelayPhase
   }
-  fail("PSST_GPT_TIMEOUT", "Timed out waiting for ChatGPT Chat response", exitCode: 2)
+  let cases = [
+    PhaseCase(
+      name: "active-never-finishes-on-stability",
+      controls: RelayControls(stop: true, send: false), body: "streaming body",
+      saw: true, stable: 999, ended: 0, expected: .active
+    ),
+    PhaseCase(
+      name: "prior-body-does-not-start-turn",
+      controls: RelayControls(stop: false, send: true), body: "old response",
+      saw: false, stable: 99, ended: 99, expected: .awaitingStart
+    ),
+    PhaseCase(
+      name: "ended-stable-body-completes",
+      controls: RelayControls(stop: false, send: true), body: "full response",
+      saw: true, stable: 3, ended: 3, expected: .complete
+    ),
+    PhaseCase(
+      name: "ambiguous-stable-body-never-completes",
+      controls: RelayControls(stop: false, send: false), body: "partial response",
+      saw: true, stable: 100, ended: 0, expected: .active
+    ),
+    PhaseCase(
+      name: "ended-empty-eventually-capture-fails",
+      controls: RelayControls(stop: false, send: true), body: "",
+      saw: true, stable: 0, ended: 40, expected: .captureFailed
+    ),
+  ]
+  var results: [[String: Any]] = []
+  var failed = 0
+  for c in cases {
+    let got = classifyRelayPhase(
+      controls: c.controls,
+      body: c.body,
+      sawThisTurn: c.saw,
+      stableSnapshots: c.stable,
+      endedObservations: c.ended
+    )
+    let pass = got == c.expected
+    if !pass { failed += 1 }
+    results.append([
+      "name": c.name,
+      "expected": c.expected.rawValue,
+      "got": got.rawValue,
+      "pass": pass,
+    ])
+  }
+  let parserCases: [(String, String?)] = [
+    ("Chat only. Reply with exactly the token V4FLASH_HANDOFF_OK and nothing else.", "V4FLASH_HANDOFF_OK"),
+    ("Reply exactly: READY", "READY"),
+    ("Respond exactly with `ACK 1`", "ACK 1"),
+    ("Discuss CONSTANT_NAME in prose.", nil),
+  ]
+  for (input, expected) in parserCases {
+    let got = requestedExactReply(input)
+    let pass = got == expected
+    if !pass { failed += 1 }
+    results.append([
+      "name": "exact-reply-parser",
+      "input": input,
+      "expected": expected as Any,
+      "got": got as Any,
+      "pass": pass,
+    ])
+  }
+  let shortAx = String(repeating: "A", count: 120)
+  let fullCopy = shortAx + String(repeating: "B", count: 10_000)
+  let merged = mergeRelayBody(shortAx, fullCopy)
+  let mergePass = merged == fullCopy
+  if !mergePass { failed += 1 }
+  results.append([
+    "name": "full-copy-beats-truncated-ax",
+    "expectedChars": fullCopy.count,
+    "gotChars": merged.count,
+    "pass": mergePass,
+  ])
+  let noisyAx = String(repeating: "Old sidebar and transcript line\n", count: 500)
+  let cleanCopy = "Complete first paragraph.\n\nComplete final paragraph with PLAIN_COPY_END."
+  let selected = selectEndedRelayBody(axBody: noisyAx, copiedBody: cleanCopy)
+  let authoritativePass = selected == cleanCopy && selected.count < noisyAx.count
+  if !authoritativePass { failed += 1 }
+  results.append([
+    "name": "shorter-current-turn-copy-is-authoritative",
+    "axChars": noisyAx.count,
+    "copyChars": cleanCopy.count,
+    "pass": authoritativePass,
+  ])
+  let testPasteboard = NSPasteboard(name: NSPasteboard.Name("psst-gpt-selfcheck-\(UUID().uuidString)"))
+  let customType = NSPasteboard.PasteboardType("dev.psst.selfcheck")
+  let originalString = Data("clipboard text".utf8)
+  let originalCustom = Data([0, 1, 2, 3, 255])
+  let originalItem = NSPasteboardItem()
+  originalItem.setData(originalString, forType: .string)
+  originalItem.setData(originalCustom, forType: customType)
+  testPasteboard.clearContents()
+  _ = testPasteboard.writeObjects([originalItem])
+  let snapshot = PasteboardSnapshot(testPasteboard)
+  testPasteboard.clearContents()
+  _ = testPasteboard.setString("temporary", forType: .string)
+  snapshot.restore(to: testPasteboard)
+  let clipboardPass = testPasteboard.data(forType: .string) == originalString &&
+    testPasteboard.data(forType: customType) == originalCustom
+  if !clipboardPass { failed += 1 }
+  results.append([
+    "name": "clipboard-restores-all-types",
+    "pass": clipboardPass,
+  ])
+  let completeContract = relayResultContract(
+    text: "complete response",
+    status: "complete",
+    code: nil,
+    wakePid: nil
+  )
+  let completeContractPass = completeContract["ok"] as? Bool == true &&
+    completeContract["finalDeliveryText"] as? String == "complete response" &&
+    completeContract["mustReturnFinalDelivery"] as? Bool == true &&
+    completeContract["mustReturnVerbatim"] as? Bool == true &&
+    completeContract["partial"] == nil
+  if !completeContractPass { failed += 1 }
+  results.append([
+    "name": "complete-contract-delivers-verbatim",
+    "pass": completeContractPass,
+  ])
+  let partialContract = relayResultContract(
+    text: "diagnostic partial",
+    status: "partial",
+    code: "COPY_CAPTURE_UNAVAILABLE",
+    wakePid: nil
+  )
+  let partialContractPass = partialContract["ok"] as? Bool == false &&
+    partialContract["partial"] as? String == "diagnostic partial" &&
+    partialContract["partialIsDiagnosticOnly"] as? Bool == true &&
+    partialContract["mustNotReturnAsComplete"] as? Bool == true &&
+    partialContract["finalDeliveryText"] == nil &&
+    partialContract["mustReturnFinalDelivery"] == nil &&
+    partialContract["mustReturnVerbatim"] == nil
+  if !partialContractPass { failed += 1 }
+  results.append([
+    "name": "partial-contract-cannot-masquerade-as-complete",
+    "pass": partialContractPass,
+  ])
+  let output: [String: Any] = [
+    "ok": failed == 0,
+    "status": "selfcheck-relay-policy",
+    "failed": failed,
+    "cases": results,
+  ]
+  emitJSON(output)
+  exit(failed == 0 ? 0 : 1)
 }
 
 // platform check without ProcessInfo dance
@@ -723,6 +1329,7 @@ var preferFlash = true
 var useStdin = false
 var doctorMode = false
 var selfcheckWake = false
+var selfcheckRelayPolicy = false
 var promptParts: [String] = []
 
 var i = 0
@@ -730,6 +1337,7 @@ while i < args.count {
   let a = args[i]
   if a == "--doctor" { doctorMode = true; i += 1; continue }
   if a == "--selfcheck-wake" { selfcheckWake = true; i += 1; continue }
+  if a == "--selfcheck-relay-policy" { selfcheckRelayPolicy = true; i += 1; continue }
   if a == "--stdin" { useStdin = true; i += 1; continue }
   if a == "--no-new-chat" { newChatFlag = false; i += 1; continue }
   if a == "--no-flash" { preferFlash = false; i += 1; continue }
@@ -760,6 +1368,10 @@ do {
   timeoutSec = resolved.timeoutSec
 }
 
+if selfcheckRelayPolicy {
+  runSelfcheckRelayPolicy()
+}
+
 if selfcheckWake {
   // Deterministic lifecycle + restart test for multi-layer wake hold.
   #if os(macOS)
@@ -771,7 +1383,7 @@ if selfcheckWake {
   if let p = pid, during {
     kill(p, SIGTERM)
     Thread.sleep(forTimeInterval: 0.35)
-    let dead = !(pgrepRunning(p) ?? false)
+    let dead = !pgrepRunning(p)
     pidAfterRestart = WakeHold.shared.ensureAlive()
     let aliveAgain = pidAfterRestart.flatMap { pgrepRunning($0) } ?? false
     restartOk = dead && aliveAgain && (pidAfterRestart != p)

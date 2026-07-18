@@ -27,11 +27,13 @@ const DEFAULT_RESPONSE_START_TIMEOUT_MS = 90 * 1000;
 // bridge before the app-level wait loop decides whether to continue.
 const JXA_TIMEOUT_MS = 0;
 const DEFAULT_BACKGROUND = true;
-const DEFAULT_UPLOAD_OPERATION_TIMEOUT_MS = 2 * 60 * 1000;
+// Attachment/upload readiness is signal-driven by default. Zero means unlimited;
+// callers may still provide an explicit positive cap.
+const DEFAULT_UPLOAD_OPERATION_TIMEOUT_MS = 0;
 const DEFAULT_UPLOAD_TIMEOUT_MS = DEFAULT_UPLOAD_OPERATION_TIMEOUT_MS;
 const DEFAULT_UPLOAD_RESPONSE_START_TIMEOUT_MS = 0;
 const DIRECT_AX_PROBE_TIMEOUT_MS = 30 * 1000;
-const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = DEFAULT_UPLOAD_OPERATION_TIMEOUT_MS;
+const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = 2 * 60 * 1000;
 const DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS = 15 * 1000;
 const DIRECT_AX_UPLOAD_PROCESS_OVERHEAD_MS = 120 * 1000;
 // Rate-limit setup dialogs so missing permissions do not interrupt every run.
@@ -1150,6 +1152,7 @@ async function relayPromptWithFileUploads({
     allowForegroundRecovery: true,
     responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
     isFinalResponseAcceptable,
+    initialState,
     onPending: async (pendingResult) => {
       await upsertAppSessionRecord({
         statePath,
@@ -1274,6 +1277,7 @@ async function continuePsstGPTAfterUpload({
     allowForegroundRecovery: true,
     responseStartTimeoutMs: 0,
     isFinalResponseAcceptable,
+    initialState,
     onPending: async (pendingResult) => {
       await upsertAppSessionRecord({
         statePath,
@@ -1404,6 +1408,27 @@ async function readDirectAxPsstGPTState({
     }
   }
   throw lastFailure;
+}
+
+async function copyDirectAxCurrentAssistant({
+  baselineCopyMessageCount = 0,
+  prompt = "",
+  restoreFrontmostOnExit = true,
+} = {}) {
+  const result = await runDirectAxHelper({
+    action: "copyLatestAssistant",
+    prompt,
+    filePaths: [],
+    baselineCopyMessageCount,
+    restoreFrontmostOnExit,
+  }, {
+    timeoutMs: DIRECT_AX_PROBE_TIMEOUT_MS + DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS,
+    genericFailureCode: "PSST_GPT_DIRECT_AX_COPY_FAILED",
+    genericFailureMessage: "Could not copy the current ChatGPT assistant message.",
+    invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
+    invalidResponseMessage: "The direct Accessibility copy backend returned invalid JSON.",
+  });
+  return typeof result?.assistantText === "string" ? result.assistantText.trim() : "";
 }
 
 async function runDirectAxHelper(payload, {
@@ -2630,6 +2655,7 @@ async function relayPromptToChatGPTApp(options = {}) {
     waitChunkMs,
     allowPending: returnPending,
     background,
+    initialState,
     onPending: async (pendingResult) => {
       await upsertAppSessionRecord({
         statePath,
@@ -2815,6 +2841,7 @@ async function waitForAppAssistantResponseInChunks({
   allowForegroundRecovery,
   responseStartTimeoutMs,
   isFinalResponseAcceptable,
+  initialState,
   onPending,
 }) {
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
@@ -2828,6 +2855,9 @@ async function waitForAppAssistantResponseInChunks({
   );
   const started = Date.now();
   let progress = createAssistantWaitProgress(started);
+  if (initialState && typeof initialState === "object") {
+    progress = advanceAssistantWaitProgress(progress, initialState, prompt, started);
+  }
   let effectiveBackground = background !== false;
   let lastPending = null;
 
@@ -2921,6 +2951,7 @@ async function waitForAppAssistantResponse({
     currentProgress = advanceAssistantWaitProgress(currentProgress, state, prompt, Date.now());
     const captureState = currentProgress.captureState;
     const stableForMs = assistantWaitProgressStableForMs(currentProgress, Date.now());
+    const controls = appResponseControls(state);
     if (shouldFailResponseStart({
       responseStartedEver: currentProgress.responseStartedEver,
       state,
@@ -2941,7 +2972,8 @@ async function waitForAppAssistantResponse({
 
     if (
       captureState.incomplete &&
-      !state.isAnswering &&
+      controls.ended &&
+      currentProgress.consecutiveEndedObservations >= 2 &&
       stableForMs >= RESPONSE_STABLE_MS
     ) {
       throw codedError(
@@ -2958,16 +2990,27 @@ async function waitForAppAssistantResponse({
     if (isAppResponseCompleteSnapshot({
       assistantText: captureState.assistantText,
       textStableForMs: stableForMs,
-      isAnswering: state.isAnswering,
+      isAnswering: controls.active,
+      sendReady: controls.ended,
+      endedObservations: currentProgress.consecutiveEndedObservations,
       captureState,
     })) {
+      let finalAssistantText = captureState.assistantText;
+      if (allowForegroundRecovery === true) {
+        const copied = await copyDirectAxCurrentAssistant({
+          baselineCopyMessageCount: currentProgress.baselineCopyMessageCount ?? 0,
+          prompt,
+          restoreFrontmostOnExit: true,
+        });
+        if (copied) finalAssistantText = copied;
+      }
       if (
         typeof isFinalResponseAcceptable === "function" &&
-        !isFinalResponseAcceptable(captureState.assistantText)
+        !isFinalResponseAcceptable(finalAssistantText)
       ) {
         return {
           status: "pending",
-          assistantText: captureState.assistantText,
+          assistantText: finalAssistantText,
           state,
           background: effectiveBackground,
           progress: currentProgress,
@@ -2976,7 +3019,7 @@ async function waitForAppAssistantResponse({
       }
       return {
         status: "complete",
-        assistantText: captureState.assistantText,
+        assistantText: finalAssistantText,
         state,
         background: effectiveBackground,
         progress: currentProgress,
@@ -3015,14 +3058,37 @@ async function readStateForAssistantWait({
   });
 }
 
-function isAppResponseCompleteSnapshot({ assistantText, textStableForMs, isAnswering, captureState }) {
+function isAppResponseCompleteSnapshot({
+  assistantText,
+  textStableForMs,
+  isAnswering,
+  sendReady,
+  endedObservations,
+  captureState,
+}) {
   return Boolean(
     assistantText?.trim() &&
     !isAppTransientText(assistantText) &&
     textStableForMs >= RESPONSE_STABLE_MS &&
     !isAnswering &&
+    sendReady === true &&
+    endedObservations >= 2 &&
     assistantCaptureCanComplete(captureState)
   );
+}
+
+function appResponseControls(state = {}) {
+  const labels = Array.isArray(state.buttonLabels)
+    ? state.buttonLabels.map((label) => String(label ?? ""))
+    : [];
+  const stopPresent = state.stopPresent === true || state.isAnswering === true ||
+    labels.some((label) => /\b(stop|cancel)\b/i.test(label));
+  const sendPresent = state.sendReady === true || state.sendPresent === true ||
+    labels.some((label) => /\b(send|submit)\b/i.test(label));
+  return {
+    active: stopPresent,
+    ended: sendPresent && !stopPresent,
+  };
 }
 
 function responseAcceptedFromAppState(state = {}, prompt = "", captureState = createAssistantCaptureState()) {
@@ -3129,6 +3195,8 @@ function createAssistantWaitProgress(now = Date.now()) {
     captureState: createAssistantCaptureState(),
     lastChangedAt: Number.isFinite(Number(now)) ? Math.floor(Number(now)) : Date.now(),
     responseStartedEver: false,
+    consecutiveEndedObservations: 0,
+    baselineCopyMessageCount: null,
   };
 }
 
@@ -3145,11 +3213,18 @@ function normalizeAssistantWaitProgress(progress = {}, now = Date.now()) {
     captureState,
     lastChangedAt,
     responseStartedEver: progress.responseStartedEver === true || Boolean(captureState.assistantText),
+    consecutiveEndedObservations: Number.isInteger(progress.consecutiveEndedObservations)
+      ? Math.max(0, progress.consecutiveEndedObservations)
+      : 0,
+    baselineCopyMessageCount: Number.isInteger(progress.baselineCopyMessageCount)
+      ? Math.max(0, progress.baselineCopyMessageCount)
+      : null,
   };
 }
 
 function advanceAssistantWaitProgress(progress = {}, state = {}, prompt = "", now = Date.now()) {
   const current = normalizeAssistantWaitProgress(progress, now);
+  const controls = appResponseControls(state);
   const nextCaptureState = advanceAssistantCaptureState(
     current.captureState,
     extractAssistantCaptureSnapshot(state, prompt)
@@ -3161,8 +3236,13 @@ function advanceAssistantWaitProgress(progress = {}, state = {}, prompt = "", no
       : current.lastChangedAt,
     responseStartedEver:
       current.responseStartedEver ||
-      state.isAnswering === true ||
+      controls.active ||
       Boolean(nextCaptureState.assistantText),
+    consecutiveEndedObservations: controls.ended
+      ? current.consecutiveEndedObservations + 1
+      : 0,
+    baselineCopyMessageCount: current.baselineCopyMessageCount ??
+      (Number.isInteger(state.copyMessageCount) ? Math.max(0, state.copyMessageCount) : null),
   };
 }
 
@@ -3943,7 +4023,10 @@ function readState(context) {
   var visibleText = transcriptTexts.join("\n");
   var visibleModelLabel = findVisibleModelLabel(buttons);
   var isAnswering = buttonLabels.some(function(label) {
-    return /\b(stop|cancel)\b/i.test(label) && /\b(generating|answer|response|stream|thinking)\b/i.test(label);
+    return /\b(stop|cancel)\b/i.test(label);
+  });
+  var sendReady = !isAnswering && buttonLabels.some(function(label) {
+    return /\b(send|submit)\b/i.test(label);
   });
 
   return {
@@ -3959,7 +4042,9 @@ function readState(context) {
     transcriptTexts: transcriptTexts,
     visibleText: visibleText,
     buttonLabels: buttonLabels,
-    isAnswering: isAnswering
+    isAnswering: isAnswering,
+    stopPresent: isAnswering,
+    sendReady: sendReady
   };
 }
 
@@ -3970,6 +4055,12 @@ function readMinimalState(context, composer) {
   var buttonLabels = buttons.map(function(button) {
     return buttonLabel(button);
   }).filter(Boolean);
+  var isAnswering = buttonLabels.some(function(label) {
+    return /\b(stop|cancel)\b/i.test(label);
+  });
+  var sendReady = !isAnswering && buttonLabels.some(function(label) {
+    return /\b(send|submit)\b/i.test(label);
+  });
 
   return {
     title: safeString(function() { return context.window.name(); }) || "ChatGPT",
@@ -3984,7 +4075,9 @@ function readMinimalState(context, composer) {
     transcriptTexts: [],
     visibleText: "",
     buttonLabels: buttonLabels,
-    isAnswering: false,
+    isAnswering: isAnswering,
+    stopPresent: isAnswering,
+    sendReady: sendReady,
     minimal: true
   };
 }
@@ -5029,6 +5122,7 @@ export const __testing = {
   mergeAssistantTails,
   transcriptContainsPrompt,
   isAppResponseCompleteSnapshot,
+  appResponseControls,
   isAppTransientText,
   isAppUiText,
   formatAppFinalDeliveryText,

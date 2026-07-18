@@ -59,7 +59,7 @@ rebuild dual install). Never blind-merge `xai-org/grok-build`.
 |--|--|
 | Command | `ds` |
 | Config / sessions | `~/.ds/` (`DS_HOME`) |
-| Version | `0.1.0` |
+| Version | lockstepped from `crates/codegen/ds-version/Cargo.toml` |
 | Default model | `deepseek-v4-pro` |
 | Fast model | `deepseek-v4-flash` |
 | API | `https://api.deepseek.com/v1` (OpenAI-compatible `chat_completions`) |
@@ -116,7 +116,7 @@ and [`DEEPSEEK.md`](DEEPSEEK.md). Use singular `[model....]`, not `[models....]`
 
 ```sh
 ds --version
-# expect: ds 0.1.0 (…)
+# expect: ds <current semver> (<git commit>)
 
 ds auth status
 

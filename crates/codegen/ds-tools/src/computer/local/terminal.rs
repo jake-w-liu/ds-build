@@ -44,10 +44,6 @@ const COMMAND_CHANNEL_SIZE: usize = 32;
 const COMPLETED_TASK_TTL: Duration = Duration::from_secs(300); // 5 minutes
 /// SIGTERM → SIGKILL grace period. Uses a 1-second grace.
 const SIGTERM_GRACE: Duration = Duration::from_secs(1);
-/// Maximum lifetime for a background task. After this, the actor
-/// will gracefully kill it. Set to 10 hours to support long
-/// background monitor and bash runs.
-const BACKGROUND_MAX_RUNTIME: Duration = Duration::from_secs(36_000);
 /// Max time an *auto-backgroundable* foreground command blocks the turn before
 /// it's moved to the background (kept running, never killed), independent of its
 /// requested `timeout`. A short second timer for the auto-background budget.
@@ -63,7 +59,7 @@ fn foreground_block_budget_from_env() -> Duration {
 }
 
 /// Max bytes a command's output file may reach before the actor kills it — the
-/// size analogue of [`BACKGROUND_MAX_RUNTIME`], stopping an unbounded writer
+/// Size guard for unbounded background tasks, stopping a runaway writer
 /// (`yes`, a runaway log) from filling the disk. Env override:
 /// `DS_MAX_OUTPUT_FILE_BYTES`.
 const MAX_OUTPUT_FILE_BYTES: u64 = 5 * 1024 * 1024 * 1024; // 5 GiB
@@ -380,13 +376,20 @@ impl ProcessState {
     }
 
     /// Flush and truncate the output file to [`MAX_RETAINED_OUTPUT_FILE_BYTES`].
+    ///
+    /// File I/O errors are non-fatal here (the command has already exited), but
+    /// they are logged so silent data loss or disk-full conditions are visible.
     async fn flush_and_truncate_output_file(&mut self) {
-        if let Some(ref mut file) = self.file_handle {
-            let _ = file.flush().await;
-            if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
-                let _ = file.set_len(MAX_RETAINED_OUTPUT_FILE_BYTES).await;
+        let Some(ref mut file) = self.file_handle else { return };
+        if let Err(e) = file.flush().await {
+            tracing::warn!("failed to flush output file: {e}");
+        }
+        if self.total_bytes as u64 > MAX_RETAINED_OUTPUT_FILE_BYTES {
+            if let Err(e) = file.set_len(MAX_RETAINED_OUTPUT_FILE_BYTES).await {
+                tracing::warn!("failed to truncate output file: {e}");
+            } else if let Err(e) = file.seek(std::io::SeekFrom::End(0)).await {
                 // Seek to new end so post-exit drain appends correctly.
-                let _ = file.seek(std::io::SeekFrom::End(0)).await;
+                tracing::warn!("failed to seek output file after truncation: {e}");
             }
         }
     }
@@ -1206,34 +1209,7 @@ impl LocalTerminalActor {
             }
         }
 
-        // 0b. Kill backgrounded tasks that exceeded BACKGROUND_MAX_RUNTIME
-        let bg_expired: Vec<String> = self
-            .processes
-            .iter()
-            .filter(|(_, p)| {
-                p.bg_status.is_backgrounded()
-                    && p.exit_status.is_none()
-                    && p.start_time.elapsed() > BACKGROUND_MAX_RUNTIME
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        for task_id in &bg_expired {
-            if let Some(process) = self.processes.get_mut(task_id) {
-                tracing::warn!(task_id, "Background task exceeded max runtime, killing");
-                // Fire-and-forget SIGTERM — poll loop escalates to SIGKILL
-                // on the next tick if the process doesn't exit.
-                send_sigterm_to_group(process);
-                process.exit_status = Some(ExitStatus {
-                    exit_code: None,
-                    signal: Some("max_runtime".to_owned()),
-                });
-                process.end_wall_time = Some(std::time::SystemTime::now());
-                process.flush_and_truncate_output_file().await;
-            }
-        }
-
-        // 0b (size). Kill any running task whose output file passed the cap
+        // 0b. Kill any running task whose output file passed the cap
         // (a detached writer has no timeout watching its disk use).
         let output_cap = self.output_file_cap;
         let size_exceeded: Vec<String> = self
@@ -1718,7 +1694,9 @@ impl LocalTerminalActor {
             return false;
         };
         process.bg_status = BackgroundStatus::Backgrounded { reason };
-        process.timeout = BACKGROUND_MAX_RUNTIME;
+        // Background mode owns no wall-clock deadline. The task exits naturally,
+        // through explicit cancellation, or through resource guardrails.
+        process.timeout = Duration::MAX;
         let result = Ok(process.to_result());
         process.notify_waiters(result);
         let tool_call_id = process.tool_call_id.clone();
@@ -3938,12 +3916,6 @@ mod tests {
     async fn test_sigterm_grace_is_one_second() {
         // Static assertion: guard against someone changing the constant
         assert_eq!(SIGTERM_GRACE, Duration::from_secs(1));
-    }
-
-    #[tokio::test]
-    async fn test_background_max_runtime_constant() {
-        // Static assertion: guard against accidental changes
-        assert_eq!(BACKGROUND_MAX_RUNTIME, Duration::from_secs(36_000));
     }
 
     // -----------------------------------------------------------------------

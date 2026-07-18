@@ -14,6 +14,7 @@ struct Input: Decodable {
     let responseStartTimeoutMs: Double?
     let returnAfterSend: Bool?
     let restoreFrontmostOnExit: Bool?
+    let baselineCopyMessageCount: Int?
 }
 
 struct NodeRecord {
@@ -254,6 +255,16 @@ struct PasteboardSnapshot {
     }
 }
 
+func restorePasteboardIfOwned(
+    _ snapshot: PasteboardSnapshot,
+    pasteboard: NSPasteboard,
+    expectedChangeCount: Int
+) {
+    if pasteboard.changeCount == expectedChangeCount {
+        snapshot.restore(pasteboard)
+    }
+}
+
 func waitFor<T>(_ timeoutMs: Double, intervalMs: Double = 250, _ block: () throws -> T?) throws -> T {
     let normalizedTimeoutMs = timeoutMs.isFinite ? timeoutMs : 0
     let deadline = normalizedTimeoutMs > 0
@@ -276,10 +287,27 @@ func chatGPTRunningApp() -> NSRunningApplication? {
     if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").first {
         return app
     }
-    if let app = chatGPTRunningApp() {
+    if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.chat").first {
         return app
     }
     return NSWorkspace.shared.runningApplications.first(where: { $0.localizedName == "ChatGPT" })
+}
+
+func composerValue(_ composerRecord: NodeRecord) -> String {
+    var content = stringAttr(composerRecord.element, kAXValueAttribute)
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+    if content == "Message ChatGPT" || content == "\nMessage ChatGPT" { return "" }
+    if content.hasSuffix("\nMessage ChatGPT") {
+        content.removeLast("\nMessage ChatGPT".count)
+    }
+    return content
+}
+
+func canonicalPrompt(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
 }
 
 func chatGPTAppElement() throws -> AXUIElement {
@@ -357,7 +385,7 @@ func composer(_ window: AXUIElement) -> NodeRecord? {
 func pasteFileViaClipboard(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Double) throws {
     let fileURL = URL(fileURLWithPath: filePath)
     let fileName = fileURL.lastPathComponent
-    let (window, composerRecord) = try waitForComposer(appElement, timeoutMs: uploadTimeoutMs > 0 ? uploadTimeoutMs : 30_000)
+    let (window, composerRecord) = try waitForComposer(appElement, timeoutMs: uploadTimeoutMs)
     // Refuse Work composer
     if composerRecord.label.range(of: "Work with", options: .caseInsensitive) != nil {
         throw AxUploadError.coded(
@@ -368,31 +396,49 @@ func pasteFileViaClipboard(_ filePath: String, appElement: AXUIElement, uploadTi
 
     let pasteboard = NSPasteboard.general
     let previousItems = PasteboardSnapshot(pasteboard)
-    defer { previousItems.restore(pasteboard) }
+
+    let lowerName = fileName.lowercased()
+    let baselineMatches = descendants(window, limit: windowDescendantLimit)
+        .map { record($0).label }
+        .filter { labelMatchesUploadedFile($0, fileName: lowerName) }
+        .count
 
     pasteboard.clearContents()
     guard pasteboard.writeObjects([fileURL as NSURL]) else {
         throw AxUploadError.message("Could not place \(fileName) on the pasteboard for Chat upload.")
     }
+    let attachmentClipboardChangeCount = pasteboard.changeCount
 
     // Focus composer and Cmd+V
     _ = AXUIElementSetAttributeValue(composerRecord.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     sleepMs(200)
     key(9, flags: [.maskCommand]) // V
-    sleepMs(1_200)
+    sleepMs(350)
+    restorePasteboardIfOwned(
+        previousItems,
+        pasteboard: pasteboard,
+        expectedChangeCount: attachmentClipboardChangeCount
+    )
 
-    // Confirm attachment appeared in AX tree
-    let lowerName = fileName.lowercased()
-    let deadline = Date().addingTimeInterval(max(8, min(30, (uploadTimeoutMs > 0 ? uploadTimeoutMs : 15_000) / 1000)))
-    while Date() < deadline {
-        let labels = descendants(window, limit: windowDescendantLimit).map { record($0).label.lowercased() }
-        if labels.contains(where: { $0.contains(lowerName) || $0.contains(".zip") }) {
+    // Confirm a new exact current-file attachment. Zero timeout is unbounded.
+    let deadline = uploadTimeoutMs > 0
+        ? Date().addingTimeInterval(uploadTimeoutMs / 1000.0)
+        : nil
+    while deadline == nil || Date() < deadline! {
+        let matches = descendants(window, limit: windowDescendantLimit)
+            .map { record($0).label }
+            .filter { labelMatchesUploadedFile($0, fileName: lowerName) }
+            .count
+        if matches > baselineMatches {
             return
         }
         // Re-resolve window (tree can refresh)
         if let w = try? chatWindow(appElement) {
-            let labels2 = descendants(w, limit: windowDescendantLimit).map { record($0).label.lowercased() }
-            if labels2.contains(where: { $0.contains(lowerName) || $0.contains(".zip") }) {
+            let matches2 = descendants(w, limit: windowDescendantLimit)
+                .map { record($0).label }
+                .filter { labelMatchesUploadedFile($0, fileName: lowerName) }
+                .count
+            if matches2 > baselineMatches {
                 return
             }
         }
@@ -426,8 +472,11 @@ func snapshot(_ window: AXUIElement) -> [String: Any] {
         .filter { $0.role == kAXButtonRole && !$0.label.isEmpty }
         .map(\.label)
     let isAnswering = buttonLabels.contains {
-        $0.range(of: "\\b(stop|cancel)\\b.*\\b(generating|answer|response|stream|thinking)?\\b|\\b(analyzing|thinking)\\b",
-                 options: [.regularExpression, .caseInsensitive]) != nil
+        $0.range(of: "\\b(stop|cancel)\\b", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+    let sendReady = !isAnswering && records.contains { item in
+        item.role == kAXButtonRole &&
+            item.label.range(of: "\\b(send|submit)\\b", options: [.regularExpression, .caseInsensitive]) != nil
     }
     return [
         "title": stringAttr(window, kAXTitleAttribute).isEmpty ? "ChatGPT" : stringAttr(window, kAXTitleAttribute),
@@ -436,12 +485,15 @@ func snapshot(_ window: AXUIElement) -> [String: Any] {
         "frontmostProcessName": "ChatGPT",
         "background": false,
         "hasComposer": composerRecord != nil,
-        "composerValue": composerRecord?.label ?? "",
+        "composerValue": composerRecord.map(composerValue) ?? "",
         "visibleModelLabel": buttonLabels.first { $0.range(of: "5\\.|4\\.|o3|Instant|Thinking|Pro", options: [.regularExpression, .caseInsensitive]) != nil } ?? "",
         "transcriptTexts": staticTexts,
         "visibleText": staticTexts.joined(separator: "\n"),
         "buttonLabels": buttonLabels,
+        "copyMessageCount": copyMessageRecords(window).count,
         "isAnswering": isAnswering,
+        "stopPresent": isAnswering,
+        "sendReady": sendReady,
         "directAx": true,
     ]
 }
@@ -652,10 +704,11 @@ func didSendStart(_ appElement: AXUIElement, prompt: String) throws -> Bool {
         return true
     }
     guard let currentComposer = composer(window) else {
-        return true
+        // Missing composer is AX ambiguity, never proof that the prompt landed.
+        return false
     }
-    let currentValue = normalize(currentComposer.label)
-    return currentValue.isEmpty || currentValue != normalize(prompt)
+    let currentValue = composerValue(currentComposer)
+    return currentValue.isEmpty || currentValue != canonicalPrompt(prompt)
 }
 
 func pressSendAndVerify(_ record: NodeRecord, appElement: AXUIElement, prompt: String, timeoutMs: Double) throws -> Bool {
@@ -736,21 +789,82 @@ func extractCopiedAssistantText(_ copiedText: String, prompt: String) -> String 
 func extractVisibleConversationTextByClipboard(_ appElement: AXUIElement) -> String {
     let pasteboard = NSPasteboard.general
     let snapshot = PasteboardSnapshot(pasteboard)
-    defer {
-        snapshot.restore(pasteboard)
-    }
-    let previousText = pasteboard.string(forType: .string) ?? ""
+    let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
+    pasteboard.clearContents()
+    pasteboard.setString(sentinel, forType: .string)
+    let sentinelChangeCount = pasteboard.changeCount
     key(0, flags: [.maskCommand])
     sleepMs(120)
     key(8, flags: [.maskCommand])
-    sleepMs(120)
-    guard let copiedText = pasteboard.string(forType: .string) else {
-        return ""
+    let copiedChangeCount = pasteboard.changeCount
+    let copiedText = pasteboard.string(forType: .string) ?? ""
+    restorePasteboardIfOwned(snapshot, pasteboard: pasteboard, expectedChangeCount: copiedChangeCount)
+    return copiedChangeCount == sentinelChangeCount ? "" : copiedText
+}
+
+func copyMessageRecords(_ window: AXUIElement) -> [NodeRecord] {
+    descendants(window, limit: windowDescendantLimit).map(record).filter { item in
+        guard item.role == kAXButtonRole else { return false }
+        let lower = normalize(item.label).lowercased()
+        return lower == "copy" || lower.contains("copy message")
     }
-    if copiedText == previousText {
-        return ""
+}
+
+func assistantCopyCandidate(_ copied: String, prompt: String) -> String? {
+    let candidate = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+    let canonicalCopied = canonicalPrompt(candidate)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let canonicalUserPrompt = canonicalPrompt(prompt)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    if canonicalCopied.isEmpty || canonicalCopied == canonicalUserPrompt { return nil }
+    return candidate
+}
+
+func bestAssistantCopyCandidate(_ candidates: [String], prompt: String) -> String {
+    candidates
+        .compactMap { assistantCopyCandidate($0, prompt: prompt) }
+        .max(by: { $0.count < $1.count }) ?? ""
+}
+
+func copyCurrentAssistantMessage(
+    _ appElement: AXUIElement,
+    afterBaselineCount: Int,
+    prompt: String
+) -> String {
+    guard let window = try? chatWindow(appElement) else { return "" }
+    _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    sleepMs(250)
+    let buttons = copyMessageRecords(window)
+    guard buttons.count > afterBaselineCount else { return "" }
+    let pasteboard = NSPasteboard.general
+    var best = ""
+    for button in buttons.dropFirst(afterBaselineCount).suffix(6).reversed() {
+        let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
+        let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
+        pasteboard.clearContents()
+        pasteboard.setString(sentinel, forType: .string)
+        if button.position != nil && button.size != nil {
+            guard (try? click(button, "Copy message")) != nil else { continue }
+        } else {
+            guard (try? press(button, "Copy message")) != nil else { continue }
+        }
+        let copiedChangeCount = pasteboard.changeCount
+        let raw = pasteboard.string(forType: .string) ?? ""
+        let copied = (raw == sentinel ? "" : raw)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // The pressed button is itself bound to this turn by afterBaselineCount.
+        // Do not require AX-text overlap: Copy recovers when AX body text is absent.
+        restorePasteboardIfOwned(
+            pasteboardSnapshot,
+            pasteboard: pasteboard,
+            expectedChangeCount: copiedChangeCount
+        )
+        guard let candidate = assistantCopyCandidate(copied, prompt: prompt) else { continue }
+        if candidate.count > best.count { best = candidate }
     }
-    return copiedText
+    return best
 }
 
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
@@ -811,14 +925,21 @@ func selectUploadDialogFile(_ record: NodeRecord) {
 
 func driveUploadSearchFallback(_ fileName: String) {
     let pasteboard = NSPasteboard.general
+    let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
     pasteboard.clearContents()
     pasteboard.setString(fileName, forType: .string)
+    let ownedChangeCount = pasteboard.changeCount
     key(9, flags: [.maskCommand])
     sleepMs(250)
     key(125)
     sleepMs(150)
     key(36)
     sleepMs(250)
+    restorePasteboardIfOwned(
+        pasteboardSnapshot,
+        pasteboard: pasteboard,
+        expectedChangeCount: ownedChangeCount
+    )
 }
 
 func windowHasSheet(_ window: AXUIElement) -> Bool {
@@ -855,7 +976,14 @@ func chooseUploadDialogPath(_ filePath: String) {
     let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
     pasteboard.clearContents()
     pasteboard.setString(filePath, forType: .string)
-    defer { pasteboardSnapshot.restore(pasteboard) }
+    let ownedChangeCount = pasteboard.changeCount
+    defer {
+        restorePasteboardIfOwned(
+            pasteboardSnapshot,
+            pasteboard: pasteboard,
+            expectedChangeCount: ownedChangeCount
+        )
+    }
 
     key(5, flags: [.maskCommand, .maskShift])
     sleepMs(350)
@@ -1201,42 +1329,46 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
 }
 
 func sendIfNeeded(_ appElement: AXUIElement, prompt: String, timeoutMs: Double) throws {
-    var window = try chatWindow(appElement)
-    if (snapshot(window)["isAnswering"] as? Bool) == true { return }
-    if let send = firstRecord(window, role: kAXButtonRole, matching: "^Send$"), send.enabled ?? true,
-       try pressSendAndVerify(send, appElement: appElement, prompt: prompt, timeoutMs: timeoutMs) {
-        return
-    }
-    if let currentComposer = composer(window), let composerPosition = currentComposer.position, let composerSize = currentComposer.size {
-        let composerBottom = composerPosition.y + min(composerSize.height, 360)
-        let candidates = descendants(window, limit: windowDescendantLimit).map(record).filter { item in
-            guard item.role == kAXButtonRole, item.enabled ?? true, let position = item.position, let size = item.size else {
-                return false
-            }
-            if normalize(item.label).range(of: "ChatGPT|New chat|Share|Move|Sidebar|close|minimize|full screen|5\\.[0-9]|4\\.5|o3|Pro|Thinking",
-                                           options: [.regularExpression, .caseInsensitive]) != nil {
-                return false
-            }
-            let centerY = position.y + size.height / 2
-            return position.x > composerPosition.x + max(180, composerSize.width * 0.35) &&
-                centerY >= composerPosition.y - 40 &&
-                centerY <= composerBottom + 80 &&
-                size.width >= 16 &&
-                size.width <= 80 &&
-                size.height >= 16 &&
-                size.height <= 80
-        }.sorted { ($0.position?.x ?? 0) > ($1.position?.x ?? 0) }
-        for candidate in candidates {
-            if try pressSendAndVerify(candidate, appElement: appElement, prompt: prompt, timeoutMs: timeoutMs) {
-                return
+    let deadline = timeoutMs > 0 ? Date().addingTimeInterval(timeoutMs / 1000.0) : nil
+    var attempted = false
+    while deadline == nil || Date() < deadline! {
+        if attempted {
+            if try didSendStart(appElement, prompt: prompt) {
+                sleepMs(500)
+                if try didSendStart(appElement, prompt: prompt) { return }
             }
         }
+        let window = try chatWindow(appElement)
+        let state = snapshot(window)
+        if (state["isAnswering"] as? Bool) == true { return }
+        guard let currentComposer = composer(window) else {
+            sleepMs(250)
+            continue
+        }
+        let currentValue = composerValue(currentComposer)
+        if currentValue != canonicalPrompt(prompt) {
+            if attempted && currentValue.isEmpty { return }
+            throw AxUploadError.coded(
+                "PSST_GPT_PROMPT_CHANGED_BEFORE_SEND",
+                "Composer no longer exactly matches the requested prompt; refusing a potentially altered or duplicate send."
+            )
+        }
+
+        let send = firstRecord(window, role: kAXButtonRole, matching: "^Send(?: message)?$")
+        guard let send, send.enabled == true else {
+            // Attachment may still be uploading. Unlimited timeout waits for the
+            // enabled Send signal rather than failing after a fixed retry count.
+            sleepMs(300)
+            continue
+        }
+        try press(send, "Send")
+        attempted = true
+        sleepMs(600)
     }
-    key(36)
-    sleepMs(250)
-    _ = try waitFor(timeoutMs, intervalMs: 250) {
-        try didSendStart(appElement, prompt: prompt) ? true : nil
-    } as Bool
+    throw AxUploadError.coded(
+        "PSST_GPT_SEND_TIMEOUT",
+        "The user-supplied upload timeout expired before ChatGPT accepted the message."
+    )
 }
 
 func runProbe(_ input: Input) throws -> [String: Any] {
@@ -1285,11 +1417,60 @@ func run(_ input: Input) throws -> [String: Any] {
         throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
     }
 
+    if input.action == "selfcheckCopyPolicy" {
+        let longPrompt = "Reply exactly with OK and nothing else. " + String(repeating: "prompt ", count: 80)
+        let cases: [[String: Any]] = [
+            [
+                "name": "reject-exact-user-prompt",
+                "pass": assistantCopyCandidate(longPrompt, prompt: longPrompt) == nil,
+            ],
+            [
+                "name": "reject-line-ending-normalized-user-prompt",
+                "pass": assistantCopyCandidate("line one\r\nline two", prompt: "line one\nline two") == nil,
+            ],
+            [
+                "name": "accept-short-exact-reply-contained-in-prompt",
+                "pass": assistantCopyCandidate("OK", prompt: longPrompt) == "OK",
+            ],
+            [
+                "name": "long-prompt-cannot-beat-short-assistant-reply",
+                "pass": bestAssistantCopyCandidate([longPrompt, "OK"], prompt: longPrompt) == "OK",
+            ],
+        ]
+        return [
+            "ok": cases.allSatisfy { $0["pass"] as? Bool == true },
+            "status": "selfcheck-copy-policy",
+            "cases": cases,
+        ]
+    }
+
     if input.action == "probe" {
         return try runProbe(input)
     }
     if input.action == "snapshot" {
         return try runSnapshot(input)
+    }
+    if input.action == "copyLatestAssistant" {
+        let frontmostBefore = input.restoreFrontmostOnExit == true
+            ? NSWorkspace.shared.frontmostApplication
+            : nil
+        defer {
+            if input.restoreFrontmostOnExit == true {
+                restoreFrontmostApplication(frontmostBefore)
+            }
+        }
+        let appElement = try chatGPTAppElement()
+        let text = copyCurrentAssistantMessage(
+            appElement,
+            afterBaselineCount: max(0, input.baselineCopyMessageCount ?? 0),
+            prompt: input.prompt
+        )
+        return [
+            "ok": !text.isEmpty,
+            "status": text.isEmpty ? "unavailable" : "complete",
+            "assistantText": text,
+            "responseCapture": text.isEmpty ? "none" : "current-turn-copy-message",
+        ]
     }
 
     guard !normalize(input.prompt).isEmpty else {
@@ -1319,9 +1500,10 @@ func run(_ input: Input) throws -> [String: Any] {
     try setText(composerRecord, input.prompt)
     sleepMs(300)
     (_, composerRecord) = try waitForComposer(appElement, timeoutMs: uploadTimeoutMs)
-    guard normalize(composerRecord.label) == normalize(input.prompt) else {
+    guard composerValue(composerRecord) == canonicalPrompt(input.prompt) else {
         throw AxUploadError.message("Composer text verification failed")
     }
+    let baselineCopyButtonCount = copyMessageRecords(try chatWindow(appElement)).count
 
     for filePath in input.filePaths {
         try uploadFile(filePath, appElement: appElement, uploadTimeoutMs: uploadTimeoutMs)
@@ -1329,11 +1511,15 @@ func run(_ input: Input) throws -> [String: Any] {
     try sendIfNeeded(appElement, prompt: input.prompt, timeoutMs: uploadTimeoutMs)
     if input.returnAfterSend == true {
         let window = try chatWindow(appElement)
+        var pendingState = snapshot(window)
+        // Preserve the pre-send baseline even if a very fast reply adds its Copy
+        // button before this pending snapshot is returned to the Node waiter.
+        pendingState["copyMessageCount"] = baselineCopyButtonCount
         return [
             "ok": true,
             "status": "pending",
             "assistantText": "",
-            "state": snapshot(window),
+            "state": pendingState,
         ]
     }
 
@@ -1351,6 +1537,7 @@ func run(_ input: Input) throws -> [String: Any] {
     var lastChangedAt = Date()
     var responseStartedEver = false
     var attemptedClipboardRecovery = false
+    var consecutiveEndedObservations = 0
 
     while deadline == nil || Date() < deadline! {
         sleepMs(pollMs)
@@ -1386,6 +1573,12 @@ func run(_ input: Input) throws -> [String: Any] {
         }
         captureState = nextCaptureState
         let answering = state["isAnswering"] as? Bool ?? false
+        let sendReady = state["sendReady"] as? Bool ?? false
+        if sendReady && !answering {
+            consecutiveEndedObservations += 1
+        } else {
+            consecutiveEndedObservations = 0
+        }
         let stableForMs = Date().timeIntervalSince(lastChangedAt) * 1000
         if answering || !captureState.assistantText.isEmpty {
             responseStartedEver = true
@@ -1400,18 +1593,30 @@ func run(_ input: Input) throws -> [String: Any] {
                 "ChatGPT accepted the upload prompt but never started answering."
             )
         }
-        if captureState.incomplete && !answering && stableForMs >= stableMs {
+        if captureState.incomplete && consecutiveEndedObservations >= 2 && stableForMs >= stableMs {
             throw AxUploadError.message(captureState.incompleteReason)
         }
-        if !answering &&
+        if consecutiveEndedObservations >= 2 &&
             !captureState.assistantText.isEmpty &&
             captureState.promptVisibleEver &&
             !captureState.incomplete &&
             stableForMs >= stableMs {
+            let copied = copyCurrentAssistantMessage(
+                appElement,
+                afterBaselineCount: baselineCopyButtonCount,
+                prompt: input.prompt
+            )
+            guard !copied.isEmpty else {
+                throw AxUploadError.coded(
+                    "PSST_GPT_RESPONSE_CAPTURE_INCOMPLETE",
+                    "Generation ended, but no current-turn Copy-message body could be captured; refusing to label visible AX text as complete."
+                )
+            }
             return [
                 "ok": true,
                 "status": "complete",
-                "assistantText": captureState.assistantText,
+                "assistantText": copied,
+                "responseCapture": "current-turn-copy-message",
                 "state": state,
             ]
         }

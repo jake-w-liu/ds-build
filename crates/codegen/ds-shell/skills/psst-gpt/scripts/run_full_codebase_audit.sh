@@ -13,8 +13,9 @@ if [[ ! -f "$HELPER" ]]; then
   echo '{"ok":false,"code":"HELPER_MISSING"}' >&2
   exit 2
 fi
-# Refuse stale extracts missing send-verify / generation state machine / long-run park
-if ! grep -q 'double-check' "$HELPER" \
+# Refuse stale extracts missing this transport revision or required policies.
+if ! grep -q '^// PSST_TRANSPORT_REV=3$' "$HELPER" \
+  || ! grep -q 'double-check' "$HELPER" \
   || ! grep -q 'not treating as sent' "$HELPER" \
   || ! grep -q 'avg < 48' "$HELPER" \
   || ! grep -q 'generation-state-machine' "$HELPER" \
@@ -35,16 +36,24 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 cd "$ROOT"
-# Host note: when DS runs this via bash, set tool timeout to 36000000ms (10h) or
-# timeout:0 + background:true and wait for task_id. Helper itself uses --timeout 0.
+# The bash tool may auto-background this one helper. If it returns a task_id,
+# keep the same DS turn alive and wait on that task until exit; do not relaunch.
+# The helper's own --timeout 0 has no response wall-clock deadline.
 set +e
-/usr/bin/swift "$HELPER" --root "$ROOT" --timeout 0 -- "$PROMPT"
-EC=$?
+RUN_OUTPUT="$(mktemp -t psst-gpt-wrapper.XXXXXX)"
+/usr/bin/swift "$HELPER" --root "$ROOT" --timeout 0 -- "$PROMPT" | tee "$RUN_OUTPUT"
+EC=${PIPESTATUS[0]}
 set -e
-if [[ -f .ds/psst-gpt/last-result.json ]]; then
+STAGE_ID="$(sed -n 's/.*"handoffStageId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RUN_OUTPUT" | tail -n 1)"
+rm -f "$RUN_OUTPUT"
+if [[ -n "$STAGE_ID" ]] \
+  && [[ -f .ds/psst-gpt/last-result.json ]] \
+  && grep -Fq "\"stageId\" : \"$STAGE_ID\"" .ds/psst-gpt/last-result.json; then
   echo "staged_result=.ds/psst-gpt/last-result.json" >&2
-fi
-if [[ -f .ds/psst-gpt/last-response.md ]]; then
-  echo "staged_response_bytes=$(wc -c < .ds/psst-gpt/last-response.md | tr -d ' ')" >&2
+  if [[ -f .ds/psst-gpt/last-response.md ]]; then
+    echo "staged_response_bytes=$(wc -c < .ds/psst-gpt/last-response.md | tr -d ' ')" >&2
+  fi
+else
+  echo "staged_result=unavailable-current-run" >&2
 fi
 exit "$EC"

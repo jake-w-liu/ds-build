@@ -1,4 +1,5 @@
 #!/usr/bin/env swift
+// PSST_TRANSPORT_REV=3
 // Chat-only zip upload + response capture for ChatGPT macOS (com.openai.codex).
 // Uses clipboard file paste (Add files menu is not AX-exposed on current app).
 // NEVER uses Work mode.
@@ -13,6 +14,45 @@ import AppKit
 import Foundation
 import CoreGraphics
 
+/// Lossless best-effort snapshot of every eagerly readable pasteboard item/type.
+/// Restoring only `.string` destroys images, files, RTF, and custom clipboard data.
+struct PasteboardSnapshot {
+  private let items: [[NSPasteboard.PasteboardType: Data]]
+
+  init(_ pasteboard: NSPasteboard) {
+    items = (pasteboard.pasteboardItems ?? []).map { item in
+      var record: [NSPasteboard.PasteboardType: Data] = [:]
+      for type in item.types {
+        if let data = item.data(forType: type) { record[type] = data }
+      }
+      return record
+    }
+  }
+
+  func restore(to pasteboard: NSPasteboard) {
+    pasteboard.clearContents()
+    let restored: [NSPasteboardItem] = items.map { record in
+      let item = NSPasteboardItem()
+      for (type, data) in record { item.setData(data, forType: type) }
+      return item
+    }
+    if !restored.isEmpty { _ = pasteboard.writeObjects(restored) }
+  }
+}
+
+func restorePasteboardIfOwned(
+  _ snapshot: PasteboardSnapshot,
+  pasteboard: NSPasteboard,
+  expectedChangeCount: Int,
+  context: String
+) {
+  guard pasteboard.changeCount == expectedChangeCount else {
+    log("clipboard: skip stale restore after external change (\(context))")
+    return
+  }
+  snapshot.restore(to: pasteboard)
+}
+
 /// Multi-layer macOS wake hold for long zip audits (host may use displaysleep≈2m).
 ///
 /// Layers (see `man caffeinate`):
@@ -26,8 +66,7 @@ import CoreGraphics
 final class WakeHold {
   static let shared = WakeHold()
   private var primary: Process?
-  private var pulse: Process?
-  private var pulsePids: [Int32] = []
+  private var pulseProcesses: [Process] = []
   private(set) var caffeinatePid: Int32?
   private var stopped = false
   private var lastPulseAt = Date.distantPast
@@ -47,7 +86,7 @@ final class WakeHold {
     stopped = false
     restartCount = 0
     pulseCount = 0
-    pulsePids.removeAll()
+    pulseProcesses.removeAll()
     let pid = ensurePrimary(reason: "start")
     // Immediate user-active so idle clock does not start before first wait tick.
     fireUserActivePulse(force: true)
@@ -124,10 +163,8 @@ final class WakeHold {
     p.standardError = FileHandle.nullDevice
     do {
       try p.run()
-      pulse = p
-      pulsePids.append(p.processIdentifier)
-      // Cap bookkeeping list (oldest already expire via -t).
-      if pulsePids.count > 16 { pulsePids.removeFirst(pulsePids.count - 16) }
+      pulseProcesses.removeAll { !$0.isRunning }
+      pulseProcesses.append(p)
       lastPulseAt = now
       pulseCount += 1
       if pulseCount == 1 || pulseCount % 10 == 0 {
@@ -140,16 +177,8 @@ final class WakeHold {
 
   func stop() {
     stopped = true
-    for pid in pulsePids {
-      if kill(pid, 0) == 0 {
-        kill(pid, SIGTERM)
-        Thread.sleep(forTimeInterval: 0.05)
-        if kill(pid, 0) == 0 { kill(pid, SIGKILL) }
-      }
-    }
-    pulsePids.removeAll()
-    terminateTracked(pulse)
-    pulse = nil
+    for process in pulseProcesses { terminateTracked(process) }
+    pulseProcesses.removeAll()
     terminateTracked(primary)
     log("wake-hold: stopped caffeinate pid=\(caffeinatePid.map(String.init) ?? "?") restarts=\(restartCount) pulses=\(pulseCount)")
     primary = nil
@@ -168,7 +197,7 @@ final class WakeHold {
 
   deinit {
     if let p = primary, p.isRunning { p.terminate() }
-    if let p = pulse, p.isRunning { p.terminate() }
+    for process in pulseProcesses where process.isRunning { process.terminate() }
   }
 }
 
@@ -268,16 +297,36 @@ func findChatGPTApp() -> NSRunningApplication? {
 func stageResultForDs(_ obj: [String: Any], responseText: String?) -> [String: String] {
   let cwd = FileManager.default.currentDirectoryPath
   let dir = (cwd as NSString).appendingPathComponent(".ds/psst-gpt")
-  try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
   let jsonPath = (dir as NSString).appendingPathComponent("last-result.json")
   let mdPath = (dir as NSString).appendingPathComponent("last-response.md")
-  if let data = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]) {
-    try? data.write(to: URL(fileURLWithPath: jsonPath))
+  let stageId = UUID().uuidString
+  var staged = obj
+  var paths = ["resultPath": jsonPath, "stageId": stageId]
+  staged["resultPath"] = jsonPath
+  staged["stageId"] = stageId
+  do {
+    try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    // Invalidate the prior manifest before touching its response body. A failed
+    // current transaction can then never leave old JSON paired with new/missing MD.
+    if FileManager.default.fileExists(atPath: jsonPath) {
+      try FileManager.default.removeItem(atPath: jsonPath)
+    }
+    if let responseText, !responseText.isEmpty {
+      try responseText.write(toFile: mdPath, atomically: true, encoding: .utf8)
+      staged["responsePath"] = mdPath
+      paths["responsePath"] = mdPath
+    } else if FileManager.default.fileExists(atPath: mdPath) {
+      // Prevent an old successful reply from masquerading as this response-less turn.
+      try FileManager.default.removeItem(atPath: mdPath)
+      staged.removeValue(forKey: "responsePath")
+    }
+    let data = try JSONSerialization.data(withJSONObject: staged, options: [.prettyPrinted, .sortedKeys])
+    try data.write(to: URL(fileURLWithPath: jsonPath), options: .atomic)
+  } catch {
+    log("stage-result: \(error)")
+    return [:]
   }
-  if let responseText, !responseText.isEmpty {
-    try? responseText.write(toFile: mdPath, atomically: true, encoding: .utf8)
-  }
-  return ["resultPath": jsonPath, "responsePath": mdPath]
+  return paths
 }
 
 func copyAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -286,6 +335,12 @@ func copyAttr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
 }
 func setAttr(_ el: AXUIElement, _ name: String, _ value: CFTypeRef) -> Bool {
   AXUIElementSetAttributeValue(el, name as CFString, value) == .success
+}
+func axEnabled(_ el: AXUIElement) -> Bool {
+  guard let value = copyAttr(el, kAXEnabledAttribute as String) else { return false }
+  if let enabled = value as? Bool { return enabled }
+  if let number = value as? NSNumber { return number.boolValue }
+  return false
 }
 func s(_ el: AXUIElement, _ n: String) -> String {
   guard let v = copyAttr(el, n) else { return "" }
@@ -304,6 +359,45 @@ func kids(_ el: AXUIElement) -> [AXUIElement] {
   return out
 }
 func press(_ el: AXUIElement) -> Bool { AXUIElementPerformAction(el, kAXPressAction as CFString) == .success }
+
+/// Physically click an AX element so Electron focuses its embedded web view
+/// before dispatching focus-sensitive actions such as Copy message.
+func clickCenter(_ el: AXUIElement) -> Bool {
+  guard let positionValue = copyAttr(el, kAXPositionAttribute as String),
+        let sizeValue = copyAttr(el, kAXSizeAttribute as String),
+        CFGetTypeID(positionValue) == AXValueGetTypeID(),
+        CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return false }
+  var position = CGPoint.zero
+  var size = CGSize.zero
+  guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+        AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+        size.width > 0,
+        size.height > 0 else { return false }
+  let center = CGPoint(x: position.x + size.width / 2, y: position.y + size.height / 2)
+  let source = CGEventSource(stateID: .hidSystemState)
+  guard let move = CGEvent(
+    mouseEventSource: source,
+    mouseType: .mouseMoved,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ), let down = CGEvent(
+    mouseEventSource: source,
+    mouseType: .leftMouseDown,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ), let up = CGEvent(
+    mouseEventSource: source,
+    mouseType: .leftMouseUp,
+    mouseCursorPosition: center,
+    mouseButton: .left
+  ) else { return false }
+  move.post(tap: .cghidEventTap)
+  Thread.sleep(forTimeInterval: 0.08)
+  down.post(tap: .cghidEventTap)
+  up.post(tap: .cghidEventTap)
+  Thread.sleep(forTimeInterval: 0.18)
+  return true
+}
 func log(_ m: String) { FileHandle.standardError.write((m + "\n").data(using: .utf8)!) }
 func key(_ code: CGKeyCode, flags: CGEventFlags = []) {
   let src = CGEventSource(stateID: .hidSystemState)
@@ -418,6 +512,9 @@ func isTranscriptSoup(_ text: String) -> Bool {
       l.hasPrefix("(1") || l.hasPrefix("(2") || l.hasPrefix("**") ||
       l.range(of: #"^\d+[\.\)]\s"#, options: .regularExpression) != nil
   }.count
+  // A handful of numbered/sidebar chips must not bless a huge low-density AX
+  // aggregate. This shape reproduced a 627-line transcript/sidebar capture.
+  if lines.count >= 100 && avg < 64 && structuredHits * 5 < lines.count { return true }
   if structuredHits >= 2 && text.count >= 200 { return false }
   // History lists: lots of short unique titles, or extreme line duplication.
   if avg < 64 && lines.count >= 20 { return true }
@@ -471,6 +568,25 @@ func looksLikeMidFragment(_ t: String) -> Bool {
     return true
   }
   return false
+}
+
+/// Extract an explicitly requested exact reply without hard-coding marker prefixes.
+/// This is intentionally phrase-bound so unrelated constants in an audit prompt are ignored.
+func requestedExactReply(_ prompt: String) -> String? {
+  let patterns = [
+    #"\b(?:reply|respond|return|output|print|say)\s+(?:with\s+)?exactly(?:\s+with)?(?:\s+(?:the|this))?(?:\s+(?:token|string))?\s*[:=]?\s*[`\"“]([^`\"”\n]{1,256})[`\"”]"#,
+    #"\b(?:reply|respond|return|output|print|say)\s+(?:with\s+)?exactly(?:\s+with)?(?:\s+(?:the|this))?(?:\s+(?:token|string))?\s*[:=]?\s*([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\s+[0-9]+)?)(?=\s*(?:and\s+nothing\s+else)?[.!?\n]|$)"#,
+  ]
+  let fullRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+  for pattern in patterns {
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+          let match = regex.firstMatch(in: prompt, range: fullRange),
+          match.numberOfRanges > 1,
+          let range = Range(match.range(at: 1), in: prompt) else { continue }
+    let value = prompt[range].trimmingCharacters(in: .whitespacesAndNewlines)
+    if !value.isEmpty { return value }
+  }
+  return nil
 }
 
 /// Merge a new harvest into the current best body without concatenating full history blobs.
@@ -546,12 +662,8 @@ func ingestAxChips(
     partSet.insert(t)
     parts.append(t)
     newParts += 1
-    // Cap part bookkeeping
-    if parts.count > 200 {
-      let drop = parts.count - 200
-      for old in parts.prefix(drop) { partSet.remove(old) }
-      parts.removeFirst(drop)
-    }
+    // Keep the full de-duplicated turn. A fixed part-count cap discarded early
+    // paragraphs when Copy-message was unavailable on very long answers.
   }
   // Prefer complete-looking bodies; never let a mid-sentence ≥200-char chip suppress the rest.
   // Pure logic only (no isChromeText) so --selfcheck-absorb can exercise this without AX/main path.
@@ -571,10 +683,10 @@ func ingestAxChips(
   }
   let joined = uniq.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   let assistant: String
-  if longestGood.count >= 100 {
-    assistant = longestGood
-  } else if !isTranscriptSoup(joined) && joined.count > longestGood.count && joined.count >= 80 {
+  if !isTranscriptSoup(joined) && joined.count > longestGood.count && joined.count >= 80 {
     assistant = joined
+  } else if longestGood.count >= 100 {
+    assistant = longestGood
   } else if longestGood.count >= 40 {
     assistant = longestGood
   } else {
@@ -669,18 +781,42 @@ func runSelfcheckFinishRules() -> Never {
   exit(ok ? 0 : 1)
 }
 
+var ownedGeneratedArchiveDirectory: String?
+
+func cleanupOwnedGeneratedArchive() -> Bool {
+  guard let dir = ownedGeneratedArchiveDirectory else { return false }
+  defer { ownedGeneratedArchiveDirectory = nil }
+  do {
+    try FileManager.default.removeItem(atPath: dir)
+    log("archive-cleanup: removed \(dir)")
+    return true
+  } catch {
+    log("archive-cleanup: failed for \(dir): \(error)")
+    return false
+  }
+}
+
 func emit(_ obj: [String: Any], exitCode: Int32 = 0, stageResponse: String? = nil) -> Never {
   var out = obj
-  if exitCode == 0 || stageResponse != nil {
-    let text = stageResponse ?? (obj["finalDeliveryText"] as? String)
-    let staged = stageResultForDs(out, responseText: text)
-    out["resultPath"] = staged["resultPath"] as Any
-    if out["responsePath"] == nil {
-      out["responsePath"] = staged["responsePath"] as Any
-    }
-  }
   WakeHold.shared.stop()
   out["wakeHoldReleased"] = true
+  // Always stage for DS handoff — success, partial, and error payloads with a body.
+  let text =
+    stageResponse
+    ?? (obj["finalDeliveryText"] as? String)
+    ?? (obj["partial"] as? String)
+  if ownedGeneratedArchiveDirectory != nil {
+    let cleaned = cleanupOwnedGeneratedArchive()
+    out["generatedArchiveCleaned"] = cleaned
+    out["zipPathRetained"] = !cleaned
+    if cleaned { out.removeValue(forKey: "zipPath") }
+  }
+  let staged = stageResultForDs(out, responseText: text)
+  out["handoffStaged"] = !staged.isEmpty
+  if let stageId = staged["stageId"] { out["handoffStageId"] = stageId }
+  if let path = staged["resultPath"] { out["resultPath"] = path }
+  if let path = staged["responsePath"] { out["responsePath"] = path }
+  // Marker for deep-debug / STALE checks: emit always stages DS handoff.
   if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]),
      let str = String(data: d, encoding: .utf8) {
     print(str)
@@ -693,20 +829,23 @@ func zipRoot(_ root: String) throws -> String {
   let outDir = fm.temporaryDirectory.appendingPathComponent("psst-gpt-zip-\(UUID().uuidString)", isDirectory: true)
   try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
   let zipPath = outDir.appendingPathComponent("source-archive.zip").path
-  // Exclude build/cache/VCS noise so "full codebase" audits stay attachable.
+  // Exclude generated/runtime/VCS noise while retaining vendored source. Local
+  // relay results must never be fed back into the next audit archive.
   let excludes = [
     "target/*", "*/target/*",
-    ".git/*",
+    ".git/*", "*/.git/*",
     "node_modules/*", "*/node_modules/*",
-    ".ds/sessions/*", ".ds/cache/*",
+    ".ds/*", "*/.ds/*",
+    "live-audit/*", "*/live-audit/*",
     "*.o", "*.a", "*.rlib", "*.dylib", "*.so",
     ".lyceum-trash/*",
-    "third_party/*", "*/third_party/*",
     "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.pdf",
     "*.mp4", "*.mov", "*.zip", "*.tar", "*.gz",
     "*.wasm", "*.bin",
   ]
-  var args = ["-qr", zipPath, ".", "-x"]
+  // -y stores symbolic links as links. Without it, Info-ZIP follows a repository
+  // symlink and can upload readable files outside the requested root.
+  var args = ["-qry", zipPath, ".", "-x"]
   args.append(contentsOf: excludes)
   let proc = Process()
   proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
@@ -715,6 +854,7 @@ func zipRoot(_ root: String) throws -> String {
   try proc.run()
   proc.waitUntilExit()
   guard proc.terminationStatus == 0, fm.fileExists(atPath: zipPath) else {
+    try? fm.removeItem(at: outDir)
     throw NSError(domain: "psst", code: 1, userInfo: [NSLocalizedDescriptionKey: "zip failed"])
   }
   if let attrs = try? fm.attributesOfItem(atPath: zipPath),
@@ -767,6 +907,7 @@ do {
   timeoutSec = resolved.timeoutSec
 }
 let prompt = promptParts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+let maxAuditArchiveBytes = 200 * 1024 * 1024
 // --pack-only only needs a root (no ChatGPT / no prompt)
 if packOnly {
   let wakePid = WakeHold.shared.start()
@@ -778,12 +919,14 @@ if packOnly {
     let path = try zipRoot(rootPath)
     let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.intValue ?? -1
     // Ensure excludes worked: refuse absurd sizes (> 200MB) as packaging failure for audits
-    let okSize = size > 0 && size < 200 * 1024 * 1024
+    let okSize = size > 0 && size < maxAuditArchiveBytes
     emit([
       "ok": okSize,
       "status": "pack-only",
       "zipPath": path,
       "bytes": size,
+      "temporaryArchive": true,
+      "callerMustDelete": true,
       "wakeHoldPid": wakePid as Any,
       "excludesTargetGit": true,
     ], exitCode: okSize ? 0 : 1)
@@ -796,12 +939,14 @@ guard !prompt.isEmpty else {
 }
 // Start wake-hold before long zip+AX work (released in emit on every exit).
 let wakePid = WakeHold.shared.start()
+// A positive strict/long timeout is one user-owned wall-clock deadline for the
+// whole relay. Zero means no deadline at attachment, send, or response phases.
+let operationDeadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
 // Park until unlock (do not hard-fail immediately). Unlimited timeout waits forever;
 // positive deadline may expire while still locked → then fail.
 do {
-  let startDeadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
   if !waitWhileScreenLocked(
-    deadline: startDeadline,
+    deadline: operationDeadline,
     best: "",
     attached: false,
     phase: "preflight",
@@ -820,6 +965,7 @@ do {
 do {
   if zipPath == nil, let rootPath {
     zipPath = try zipRoot(rootPath)
+    ownedGeneratedArchiveDirectory = URL(fileURLWithPath: zipPath!).deletingLastPathComponent().path
     log("zipped \(rootPath) -> \(zipPath!)")
   }
 } catch {
@@ -827,6 +973,17 @@ do {
 }
 guard let zipPath, FileManager.default.fileExists(atPath: zipPath) else {
   emit(["ok": false, "code": "ZIP_MISSING", "message": "Provide --zip or --root"], exitCode: 2)
+}
+let archiveBytes =
+  (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue ?? -1
+guard archiveBytes > 0, archiveBytes < maxAuditArchiveBytes else {
+  emit([
+    "ok": false,
+    "code": "ZIP_SIZE_INVALID",
+    "message": "Archive must be non-empty and smaller than \(maxAuditArchiveBytes) bytes.",
+    "zipPath": zipPath,
+    "zipBytes": archiveBytes,
+  ], exitCode: 3)
 }
 let zipURL = URL(fileURLWithPath: zipPath)
 
@@ -891,32 +1048,108 @@ guard let composer = bfsFirst(root, pred: { el, r in
 
 // Clipboard file paste
 let pb = NSPasteboard.general
-let oldString = pb.string(forType: .string)
+let clipboardSnapshot = PasteboardSnapshot(pb)
+let zipName = zipURL.lastPathComponent.lowercased()
+func labelContainsExactFilename(_ label: String, fileName: String) -> Bool {
+  func isFilenameTokenCharacter(_ character: Character) -> Bool {
+    character.unicodeScalars.allSatisfy {
+      CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-" || $0 == "."
+    }
+  }
+  var searchStart = label.startIndex
+  while searchStart < label.endIndex,
+        let range = label.range(
+          of: fileName,
+          options: [.caseInsensitive],
+          range: searchStart..<label.endIndex
+        ) {
+    let beforeIsBoundary = range.lowerBound == label.startIndex ||
+      !isFilenameTokenCharacter(label[label.index(before: range.lowerBound)])
+    let afterIsBoundary = range.upperBound == label.endIndex ||
+      !isFilenameTokenCharacter(label[range.upperBound])
+    if beforeIsBoundary && afterIsBoundary { return true }
+    searchStart = range.upperBound
+  }
+  return false
+}
+func attachmentEvidence() -> [String] {
+  bfsAll(root, pred: { _, r in
+    r == "AXButton" || r == "AXGroup" || r == "AXStaticText" || r == "AXTextField"
+  }).compactMap { el in
+    let blob = [
+      s(el, kAXTitleAttribute as String),
+      s(el, kAXDescriptionAttribute as String),
+      s(el, kAXValueAttribute as String),
+    ].joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    let lower = blob.lowercased()
+    guard labelContainsExactFilename(lower, fileName: zipName), lower.count < 500 else { return nil }
+    return String(blob.prefix(180))
+  }
+}
+let attachmentEvidenceBeforePaste = attachmentEvidence()
+log("attachment baseline exact-labels=\(attachmentEvidenceBeforePaste.count)")
 pb.clearContents()
 guard pb.writeObjects([zipURL as NSURL]) else {
   emit(["ok": false, "code": "CLIPBOARD_FAILED"], exitCode: 6)
 }
+let attachmentClipboardChangeCount = pb.changeCount
 _ = AXUIElementSetAttributeValue(composer, kAXFocusedAttribute as CFString, kCFBooleanTrue)
 Thread.sleep(forTimeInterval: 0.25)
 key(9, flags: .maskCommand)
-Thread.sleep(forTimeInterval: 2.0)
-
-let zipName = zipURL.lastPathComponent.lowercased()
-var attached = false
+Thread.sleep(forTimeInterval: 0.35)
+restorePasteboardIfOwned(
+  clipboardSnapshot,
+  pasteboard: pb,
+  expectedChangeCount: attachmentClipboardChangeCount,
+  context: "attachment-paste"
+)
 var labels: [String] = []
-for el in bfsAll(root, pred: { _, _ in true }) {
-  let blob = [s(el, kAXTitleAttribute as String), s(el, kAXDescriptionAttribute as String), s(el, kAXValueAttribute as String)].joined(separator: " ")
-  let lower = blob.lowercased()
-  if lower.contains(zipName) || (lower.contains(".zip") && lower.count < 120) {
-    attached = true
-    labels.append(String(blob.prefix(100)))
+var attachmentPoll = 0
+while true {
+  if let operationDeadline, Date() >= operationDeadline {
+    emit([
+      "ok": false,
+      "code": "ATTACHMENT_TIMEOUT",
+      "message": "The user-supplied --timeout expired before a new exact \(zipName) attachment label appeared.",
+    ], exitCode: 7)
   }
+  if !waitWhileScreenLocked(
+    deadline: operationDeadline,
+    best: "",
+    attached: false,
+    phase: "attachment",
+    wakePid: wakePid,
+    context: "attachment-wait"
+  ) {
+    emit(["ok": false, "code": "ATTACHMENT_TIMEOUT"], exitCode: 7)
+  }
+  attachmentPoll += 1
+  if attachmentPoll % 24 == 0 { _ = refreshAxRoot(reason: "attachment-wait") }
+  labels = attachmentEvidence()
+  if labels.count > attachmentEvidenceBeforePaste.count { break }
+  let errorText = allCaptureTexts().first { text in
+    let lower = text.lowercased()
+    return lower.contains("upload failed") || lower.contains("failed to upload") ||
+      lower.contains("file too large") || lower.contains("unsupported file")
+  }
+  if let errorText {
+    emit([
+      "ok": false,
+      "code": "ATTACHMENT_UPLOAD_FAILED",
+      "message": String(errorText.prefix(500)),
+    ], exitCode: 7)
+  }
+  _ = WakeHold.shared.ensureAlive()
+  Thread.sleep(forTimeInterval: 0.5)
 }
-log("attached=\(attached)")
+let attached = labels.count > attachmentEvidenceBeforePaste.count
+log("attached=\(attached) exact-labels-before=\(attachmentEvidenceBeforePaste.count) after=\(labels.count)")
 if !attached {
-  pb.clearContents()
-  if let oldString { pb.setString(oldString, forType: .string) }
-  emit(["ok": false, "code": "ATTACHMENT_MISSING", "message": "Zip did not attach in Chat composer"], exitCode: 7)
+  emit([
+    "ok": false,
+    "code": "ATTACHMENT_MISSING",
+    "message": "No new exact \(zipName) attachment label appeared; message was not sent.",
+  ], exitCode: 7)
 }
 
 // Baseline static texts before send (for diff-based capture of long audits).
@@ -980,8 +1213,8 @@ func scrollTranscript() {
 }
 
 /// Prefer ChatGPT "Copy message" buttons — clipboard often holds the full assistant body.
-func harvestViaCopyMessageButtons() -> String {
-  let buttons = bfsAll(root, pred: { el, r in
+func copyMessageButtons() -> [AXUIElement] {
+  bfsAll(root, pred: { el, r in
     guard r == "AXButton" else { return false }
     let blob = (
       s(el, kAXDescriptionAttribute as String) + " " +
@@ -994,17 +1227,31 @@ func harvestViaCopyMessageButtons() -> String {
     if blob.contains("copy") && blob.contains("message") { return true }
     return false
   })
-  if buttons.isEmpty {
-    log("copy-harvest: no Copy message buttons")
+}
+
+func harvestViaCopyMessageButtons(afterBaselineCount baselineCount: Int) -> String {
+  // A native-app activation does not guarantee focus inside Electron's web
+  // contents. Refresh, focus the AX window, then use a real pointer click.
+  guard refreshAxRoot(reason: "copy-harvest-focus") else { return "" }
+  _ = setAttr(root, kAXFrontmostAttribute as String, kCFBooleanTrue)
+  if let window = bfsFirst(root, pred: { _, role in role == "AXWindow" }) {
+    _ = setAttr(window, kAXMainAttribute as String, kCFBooleanTrue)
+    _ = setAttr(window, kAXFocusedAttribute as String, kCFBooleanTrue)
+  }
+  Thread.sleep(forTimeInterval: 0.25)
+  let buttons = copyMessageButtons()
+  guard buttons.count > baselineCount else {
+    log("copy-harvest: no current-turn Copy message button (total=\(buttons.count) baseline=\(baselineCount))")
     return ""
   }
-  log("copy-harvest: found \(buttons.count) copy-related button(s)")
+  let currentButtons = Array(buttons.dropFirst(baselineCount))
+  log("copy-harvest: current=\(currentButtons.count) total=\(buttons.count) baseline=\(baselineCount)")
   var bestClip = ""
   // Two passes: normal delay, then slower pass for flaky AX/clipboard after long runs.
   let passes: [(hover: TimeInterval, afterPress: TimeInterval)] = [(0.12, 0.55), (0.25, 1.1)]
   for (passIdx, delays) in passes.enumerated() {
     // Last assistant messages are usually the last copy buttons in the tree order.
-    for btn in buttons.suffix(8).reversed() {
+    for btn in currentButtons.suffix(8).reversed() {
       var posRef: CFTypeRef?
       if AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &posRef) == .success,
          let axPos = posRef {
@@ -1016,10 +1263,31 @@ func harvestViaCopyMessageButtons() -> String {
           Thread.sleep(forTimeInterval: delays.hover)
         }
       }
+      let copyClipboardSnapshot = PasteboardSnapshot(pb)
+      let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
       pb.clearContents()
-      _ = press(btn)
-      Thread.sleep(forTimeInterval: delays.afterPress)
-      let clip = (pb.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      _ = pb.setString(sentinel, forType: .string)
+      let method: String
+      if clickCenter(btn) {
+        method = "mouseClick"
+      } else {
+        method = "axPress-fallback"
+        _ = press(btn)
+      }
+      let copiedChangeCount = pb.changeCount
+      let rawClip = pb.string(forType: .string) ?? ""
+      let clip = rawClip == sentinel
+        ? ""
+        : rawClip.trimmingCharacters(in: .whitespacesAndNewlines)
+      log("copy-harvest: attempt method=\(method) changed=\(rawClip != sentinel) chars=\(clip.count)")
+      // The pressed button is itself bound to this turn by baselineCount. Do
+      // not require AX-text overlap: Copy is the recovery path when AX body text is absent.
+      restorePasteboardIfOwned(
+        copyClipboardSnapshot,
+        pasteboard: pb,
+        expectedChangeCount: copiedChangeCount,
+        context: "copy-message"
+      )
       if clip.count < 40 { continue }
       if isChromeText(clip) { continue }
       if looksLikeMidFragment(clip) && clip.count < 400 { continue }
@@ -1046,9 +1314,8 @@ func bestBodyFromAxTexts(_ texts: [String]) -> String {
   let nonFrag = cleaned.filter { !looksLikeMidFragment($0) }
   let longestGood = nonFrag.max(by: { $0.count < $1.count }) ?? ""
   let longestAny = cleaned.max(by: { $0.count < $1.count }) ?? ""
-  // Prefer a complete-looking long chip.
-  if longestGood.count >= 100 { return longestGood }
-  // Otherwise try a non-soup join of non-fragment chips (preserves multi-paragraph replies).
+  // Build a de-duplicated multi-paragraph view before falling back to one long
+  // AX chip. Returning the first >=100-char paragraph truncated real replies.
   let joinSource = nonFrag.isEmpty ? cleaned : nonFrag
   var seen = Set<String>()
   var uniq: [String] = []
@@ -1069,28 +1336,45 @@ func bestBodyFromAxTexts(_ texts: [String]) -> String {
   return longestAny
 }
 
-/// Deep harvest: scroll + AX tree + optional clipboard copy (when generation finished).
-func deepHarvestReply(includeCopy: Bool) -> String {
+struct HarvestedReply {
+  let body: String
+  let clipboardAuthoritative: Bool
+}
+
+func selectDeepHarvestBody(axBody: String, copiedBody: String) -> HarvestedReply {
+  let copied = copiedBody.trimmingCharacters(in: .whitespacesAndNewlines)
+  if !copied.isEmpty {
+    return HarvestedReply(body: copied, clipboardAuthoritative: true)
+  }
+  return HarvestedReply(
+    body: axBody.trimmingCharacters(in: .whitespacesAndNewlines),
+    clipboardAuthoritative: false
+  )
+}
+
+/// Deep harvest: scroll + AX tree + optional clipboard copy after generation ended.
+/// A current-turn Copy-message body is authoritative even when it is shorter than
+/// an AX aggregate: AX may contain the whole transcript/sidebar rather than one reply.
+func deepHarvestReply(includeCopy: Bool, baseline: Set<String>, baselineCopyCount: Int) -> HarvestedReply {
   scrollTranscript()
   var parts: [String] = []
   var seen = Set<String>()
   for t in allCaptureTexts() {
     if seen.contains(t) { continue }
+    if baseline.contains(t) { continue }
     if prompt.contains(t) && t.count < 80 { continue }
     seen.insert(t)
     parts.append(t)
   }
-  var body = bestBodyFromAxTexts(parts)
+  let body = bestBodyFromAxTexts(parts)
   if includeCopy {
-    let clip = harvestViaCopyMessageButtons()
-    if clip.count > body.count && !(looksLikeMidFragment(clip) && !looksLikeMidFragment(body) && body.count >= 80) {
-      log("deepHarvest: preferring clipboard over AX tree (\(clip.count) > \(body.count))")
-      body = clip
-    } else if !clip.isEmpty {
-      log("deepHarvest: clipboard chars=\(clip.count) kept AX body=\(body.count)")
+    let clip = harvestViaCopyMessageButtons(afterBaselineCount: baselineCopyCount)
+    if !clip.isEmpty {
+      log("deepHarvest: current-turn clipboard authoritative chars=\(clip.count) axChars=\(body.count)")
+      return selectDeepHarvestBody(axBody: body, copiedBody: clip)
     }
   }
-  return body
+  return selectDeepHarvestBody(axBody: body, copiedBody: "")
 }
 
 let baseline = Set(allCaptureTexts())
@@ -1105,12 +1389,15 @@ func focusComposer(_ el: AXUIElement) {
   Thread.sleep(forTimeInterval: 0.15)
 }
 func promptLooksSet(_ value: String, _ expected: String) -> Bool {
-  let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
-  if v.isEmpty { return false }
-  let needle = String(expected.prefix(48)).trimmingCharacters(in: .whitespacesAndNewlines)
-  if !needle.isEmpty && v.contains(needle) { return true }
-  // Long prompts: accept substantial length match even if AX truncates slightly
-  return v.count >= min(80, max(20, expected.count / 3))
+  var v = value.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+  let e = expected.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+  if v == "Message ChatGPT" || v == "\nMessage ChatGPT" { v = "" }
+  if v.hasSuffix("\nMessage ChatGPT") && v != e {
+    v.removeLast("\nMessage ChatGPT".count)
+  }
+  // Exact normalized equality is the send gate. A visible prefix does not prove
+  // that the message tail survived AX/clipboard insertion.
+  return !v.isEmpty && v == e
 }
 func setComposerPrompt(_ el: AXUIElement, _ text: String) -> String {
   focusComposer(el)
@@ -1123,12 +1410,23 @@ func setComposerPrompt(_ el: AXUIElement, _ text: String) -> String {
 
   // 2) Clipboard string paste (updates React state more reliably than pure AX set)
   focusComposer(el)
-  // Do NOT Cmd+A (would risk deselecting/clearing attachment chip). Paste at caret.
+  // Clear only the text area's AXValue before paste; this preserves the separate
+  // attachment chip and prevents a partial AX prefix from being duplicated.
+  _ = setAttr(el, kAXValueAttribute as String, "" as CFTypeRef)
+  Thread.sleep(forTimeInterval: 0.15)
+  let promptClipboardSnapshot = PasteboardSnapshot(pb)
   pb.clearContents()
   pb.setString(text, forType: .string)
+  let promptClipboardChangeCount = pb.changeCount
   key(9, flags: .maskCommand) // Cmd+V
   Thread.sleep(forTimeInterval: 0.5)
   cv = composerText(el)
+  restorePasteboardIfOwned(
+    promptClipboardSnapshot,
+    pasteboard: pb,
+    expectedChangeCount: promptClipboardChangeCount,
+    context: "prompt-paste"
+  )
   log("composer paste chars=\(cv.count) head=\(String(cv.prefix(80)).replacingOccurrences(of: "\n", with: " "))")
   if promptLooksSet(cv, text) { return cv }
 
@@ -1166,10 +1464,12 @@ log("composer prompt ready chars=\(setValue.count)")
 
 // Include prompt fragments in baseline after set (user bubble / draft)
 var baseline2 = baseline.union(Set(allStaticTexts()))
+let baselineCopyButtonCount = copyMessageButtons().count
+log("baseline Copy-message buttons=\(baselineCopyButtonCount)")
 
-func findSendButton() -> AXUIElement? {
+func findSendButton(requireEnabled: Bool = true) -> AXUIElement? {
   bfsFirst(root, pred: { el, r in
-    r == "AXButton" && (
+    r == "AXButton" && (!requireEnabled || axEnabled(el)) && (
       s(el, kAXDescriptionAttribute as String) == "Send" ||
       s(el, kAXTitleAttribute as String) == "Send" ||
       s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Send message")
@@ -1198,7 +1498,9 @@ func messageLooksSent(preChars: Int, preValue: String) -> Bool {
     log("send-check: composer missing — not treating as sent")
     return false
   }
-  let after = composerText(c).trimmingCharacters(in: .whitespacesAndNewlines)
+  var after = composerText(c).replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+  if after == "Message ChatGPT" || after == "\nMessage ChatGPT" { after = "" }
+  if after.hasSuffix("\nMessage ChatGPT") { after.removeLast("\nMessage ChatGPT".count) }
   log("send-check: composer chars=\(after.count) pre=\(preChars)")
   // Still holds the audit draft → definitely not sent
   if promptLooksSet(after, prompt) { return false }
@@ -1220,21 +1522,76 @@ func messageLooksSent(preChars: Int, preValue: String) -> Bool {
 var sendVerified = false
 let preSend = setValue
 let preChars = preSend.count
-for attempt in 1...5 {
+var sendAttempt = 0
+var lastSendRefresh = Date.distantPast
+while !sendVerified {
+  if let operationDeadline, Date() >= operationDeadline {
+    emit([
+      "ok": false,
+      "code": "SEND_TIMEOUT",
+      "message": "The user-supplied --timeout expired before ChatGPT accepted the message.",
+      "attached": attached,
+    ], exitCode: 9)
+  }
+  if !waitWhileScreenLocked(
+    deadline: operationDeadline,
+    best: "",
+    attached: attached,
+    phase: "send",
+    wakePid: wakePid,
+    context: "send-wait"
+  ) {
+    emit(["ok": false, "code": "SEND_TIMEOUT", "attached": attached], exitCode: 9)
+  }
+  if Date().timeIntervalSince(lastSendRefresh) >= 20 {
+    _ = refreshAxRoot(reason: "send-wait")
+    lastSendRefresh = Date()
+  }
+  // A prior press may have landed while AX briefly hid the composer/Stop button.
+  // Re-prove sent state before looking for another Send control to avoid both an
+  // infinite wait and a duplicate submission after a false-negative check.
+  if sendAttempt > 0 && messageLooksSent(preChars: preChars, preValue: preSend) {
+    Thread.sleep(forTimeInterval: 0.6)
+    if messageLooksSent(preChars: preChars, preValue: preSend) {
+      sendVerified = true
+      log("send VERIFIED before retry attempt=\(sendAttempt + 1) (double-check ok)")
+      break
+    }
+  }
+  guard let enabledSend = findSendButton() else {
+    let errorText = allCaptureTexts().first { text in
+      let lower = text.lowercased()
+      return lower.contains("upload failed") || lower.contains("failed to upload") ||
+        lower.contains("file too large") || lower.contains("unsupported file")
+    }
+    if let errorText {
+      emit([
+        "ok": false,
+        "code": "ATTACHMENT_UPLOAD_FAILED",
+        "message": String(errorText.prefix(500)),
+        "attached": attached,
+      ], exitCode: 9)
+    }
+    _ = WakeHold.shared.ensureAlive()
+    Thread.sleep(forTimeInterval: 0.75)
+    continue
+  }
+  sendAttempt += 1
+  let method = (sendAttempt - 1) % 3
   focusComposer(liveComposer)
   // Multi-line composers: bare Return inserts a newline — it does NOT send.
   // Prefer AX Send / mouse click / Cmd+Return only.
-  if attempt == 1, let sendBtn = findSendButton() {
-    let ok = press(sendBtn)
-    log("send attempt=\(attempt) method=axPress ok=\(ok)")
-  } else if attempt == 2 {
+  if method == 0 {
+    let ok = press(enabledSend)
+    log("send attempt=\(sendAttempt) method=axPress ok=\(ok)")
+  } else if method == 1 {
     key(36, flags: .maskCommand) // Cmd+Return
-    log("send attempt=\(attempt) method=cmd-return")
-  } else if attempt == 3, let sendBtn = findSendButton() {
+    log("send attempt=\(sendAttempt) method=cmd-return")
+  } else if method == 2 {
     var pos: CFTypeRef?
     var size: CFTypeRef?
-    if AXUIElementCopyAttributeValue(sendBtn, kAXPositionAttribute as CFString, &pos) == .success,
-       AXUIElementCopyAttributeValue(sendBtn, kAXSizeAttribute as CFString, &size) == .success {
+    if AXUIElementCopyAttributeValue(enabledSend, kAXPositionAttribute as CFString, &pos) == .success,
+       AXUIElementCopyAttributeValue(enabledSend, kAXSizeAttribute as CFString, &size) == .success {
       var p = CGPoint.zero
       var sz = CGSize.zero
       if AXValueGetValue(pos as! AXValue, .cgPoint, &p),
@@ -1244,23 +1601,18 @@ for attempt in 1...5 {
         CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
         CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
-        log("send attempt=\(attempt) method=mouseClick at=\(Int(c.x)),\(Int(c.y))")
+        log("send attempt=\(sendAttempt) method=mouseClick at=\(Int(c.x)),\(Int(c.y))")
       } else {
-        _ = press(sendBtn)
-        log("send attempt=\(attempt) method=axPress-fallback")
+        _ = press(enabledSend)
+        log("send attempt=\(sendAttempt) method=axPress-fallback")
       }
     } else {
-      _ = press(sendBtn)
-      log("send attempt=\(attempt) method=axPress-fallback")
+      _ = press(enabledSend)
+      log("send attempt=\(sendAttempt) method=axPress-fallback")
     }
-  } else if attempt == 4, let sendBtn = findSendButton() {
-    _ = press(sendBtn)
-    Thread.sleep(forTimeInterval: 0.2)
-    key(36, flags: .maskCommand)
-    log("send attempt=\(attempt) method=axPress+cmd-return")
   } else {
-    key(36, flags: .maskCommand)
-    log("send attempt=\(attempt) method=cmd-return-last")
+    _ = press(enabledSend)
+    log("send attempt=\(sendAttempt) method=axPress-fallback")
   }
   Thread.sleep(forTimeInterval: 1.2)
   if messageLooksSent(preChars: preChars, preValue: preSend) {
@@ -1268,10 +1620,10 @@ for attempt in 1...5 {
     Thread.sleep(forTimeInterval: 0.6)
     if messageLooksSent(preChars: preChars, preValue: preSend) {
       sendVerified = true
-      log("send VERIFIED on attempt=\(attempt) (double-check ok)")
+      log("send VERIFIED on attempt=\(sendAttempt) (double-check ok)")
       break
     }
-    log("send attempt=\(attempt) flapped — draft returned after brief clear")
+    log("send attempt=\(sendAttempt) flapped — draft returned after brief clear")
   }
   // Draft may have been wiped by a failed partial send — re-set prompt
   if let c = bfsFirst(root, pred: { el, r in
@@ -1281,50 +1633,27 @@ for attempt in 1...5 {
     let cur = composerText(c)
     if !promptLooksSet(cur, prompt) {
       log("send retry: re-setting prompt (composer chars=\(cur.count))")
-      // Re-check attachment still present
-      var stillAttached = false
-      for el in bfsAll(root, pred: { _, _ in true }) {
-        let blob = [s(el, kAXTitleAttribute as String), s(el, kAXDescriptionAttribute as String), s(el, kAXValueAttribute as String)].joined(separator: " ").lowercased()
-        if blob.contains(zipName) || (blob.contains(".zip") && blob.count < 120) { stillAttached = true; break }
-      }
-      if !stillAttached {
-        log("send retry: re-pasting zip attachment")
-        pb.clearContents()
-        _ = pb.writeObjects([zipURL as NSURL])
-        focusComposer(liveComposer)
-        key(9, flags: .maskCommand)
-        Thread.sleep(forTimeInterval: 1.5)
+      // Exact current archive evidence only; never accept an unrelated old .zip.
+      guard attachmentEvidence().count > attachmentEvidenceBeforePaste.count else {
+        emit([
+          "ok": false,
+          "code": "ATTACHMENT_LOST",
+          "message": "The exact \(zipName) attachment disappeared before send verification; no duplicate was sent.",
+        ], exitCode: 9)
       }
       _ = setComposerPrompt(liveComposer, prompt)
     }
   }
+  _ = WakeHold.shared.ensureAlive()
   Thread.sleep(forTimeInterval: 0.4)
-}
-if !sendVerified {
-  let stuck = bfsFirst(root, pred: { el, r in
-    r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
-  }).map { composerText($0) } ?? ""
-  emit([
-    "ok": false,
-    "code": "SEND_FAILED",
-    "message": "Composer still holds the draft after send attempts — message was NOT submitted to ChatGPT.",
-    "composerChars": stuck.count,
-    "composerHead": String(stuck.prefix(120)),
-    "attached": attached,
-    "wakeHoldPid": wakePid as Any,
-  ], exitCode: 9)
 }
 log("send confirmed; entering wait-loop")
 Thread.sleep(forTimeInterval: 0.8)
 baseline2 = baseline2.union(Set(allStaticTexts().filter { prompt.contains($0) || $0.count < 40 && prompt.contains($0.prefix(20)) }))
 
-// Optional exact token from prompt (PSST_… / OK_…)
-let exactToken: String? = {
-  if let r = prompt.range(of: #"\b((?:PSST|OK)_[A-Z0-9_]+)\b"#, options: .regularExpression) {
-    return String(prompt[r])
-  }
-  return nil
-}()
+// Optional phrase-bound exact reply (works for arbitrary markers such as
+// V4FLASH_HANDOFF_OK, READY, or ACK 1; unrelated constants are ignored).
+let exactToken = requestedExactReply(prompt)
 
 // MARK: - Generation wait state machine (robust finish detection)
 //
@@ -1432,13 +1761,11 @@ func classifyGenerationPhase(_ s: GenerationSample, exactToken: String? = nil) -
     return .awaitingStart
   }
   let acceptable = bodyAcceptableForFinish(s.body, exactToken: exactToken)
-  // Strong end: Send ready. Weak end: Stop cleared + acceptable body + stable harvests
-  // (covers AX where Send is briefly missing after a short Work-nudge reply).
+  // Completion requires the strong, interactive end signal: Send is ready again.
+  // Stop/Send both absent is AX ambiguity and must never become completion merely
+  // because a partial body stopped changing for a few polls.
   let strongEnd = s.controls.isGenerationEnded
-  let weakEnd =
-    s.controls.stopClearedAmbiguous && acceptable && s.consecutiveStableSnapshots >= 3
-  guard strongEnd || weakEnd else {
-    // Ambiguous without acceptable body: stay active-safe (Pro may still be thinking).
+  guard strongEnd else {
     return .active
   }
   // Need a few consecutive "ended" observations for strong end so one AX flicker is ignored.
@@ -1471,28 +1798,13 @@ func pollInterval(for phase: GenerationPhase, secondsInPhase: TimeInterval) -> T
 func readComposerControls(bodyHint: String) -> ComposerControls {
   ComposerControls(
     stop: findStopButton() != nil,
-    send: findSendButton() != nil,
+    send: findSendButton(requireEnabled: false) != nil,
     loadingChrome: hasLoadingChrome(bodyHint)
   )
 }
 
 /// Emit complete result. Only call when phase classification already says complete.
 func emitComplete(_ text: String, finishNote: String) -> Never {
-  pb.clearContents()
-  if let oldString { pb.setString(oldString, forType: .string) }
-  let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-  try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
-  _ = stageResultForDs([
-    "ok": true,
-    "status": "complete",
-    "finalDeliveryText": text,
-    "attached": true,
-    "zipPath": zipPath as Any,
-    "finishNote": finishNote,
-    "wakeHoldPid": wakePid as Any,
-    "wakeHoldReleased": true,
-    "responseChars": text.count,
-  ], responseText: text)
   emit([
     "ok": true,
     "status": "complete",
@@ -1501,7 +1813,6 @@ func emitComplete(_ text: String, finishNote: String) -> Never {
     "attached": true,
     "attachLabels": Array(labels.prefix(5)),
     "zipPath": zipPath as Any,
-    "responsePath": respPath,
     "finalDeliveryText": text,
     "mustReturnFinalDelivery": true,
     "mustReturnVerbatim": true,
@@ -1514,20 +1825,7 @@ func emitComplete(_ text: String, finishNote: String) -> Never {
 }
 
 func emitStablePartial(_ text: String, code: String, message: String, elapsed: Int) -> Never {
-  pb.clearContents()
-  if let oldString { pb.setString(oldString, forType: .string) }
-  let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
-  try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
   log("emitStablePartial code=\(code) chars=\(text.count) elapsed=\(elapsed)s")
-  _ = stageResultForDs([
-    "ok": false,
-    "status": "partial",
-    "code": code,
-    "partial": text,
-    "partialChars": text.count,
-    "attached": true,
-    "elapsedSec": elapsed,
-  ], responseText: text)
   emit([
     "ok": false,
     "code": code,
@@ -1538,12 +1836,10 @@ func emitStablePartial(_ text: String, code: String, message: String, elapsed: I
     "attached": true,
     "attachLabels": Array(labels.prefix(5)),
     "zipPath": zipPath as Any,
-    "responsePath": respPath,
     "partial": text,
     "partialChars": text.count,
-    "finalDeliveryText": text,
-    "mustReturnFinalDelivery": true,
-    "mustReturnVerbatim": true,
+    "partialIsDiagnosticOnly": true,
+    "mustNotReturnAsComplete": true,
     "method": "clipboard-file-paste",
     "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
     "wakeHoldPid": wakePid as Any,
@@ -1650,6 +1946,36 @@ func runSelfcheckAbsorb() -> Never {
     "finalChars": chipBest.count,
     "pass": chipPass,
   ])
+  let structuredSoup = (0..<627).map { index in
+    index < 24 ? "\(index + 1). Recent audit title" : "Recent chat title \(index)"
+  }.joined(separator: "\n")
+  let soupPass = isTranscriptSoup(structuredSoup)
+  if !soupPass { failed += 1 }
+  results.append([
+    "name": "large_low_density_ax_aggregate_is_soup",
+    "lines": 627,
+    "pass": soupPass,
+  ])
+  let cleanCopy = "## Complete response\nFirst paragraph is complete.\n\nFinal paragraph carries the end sentinel: COPY_END."
+  let noisyAx = structuredSoup + "\n" + String(repeating: "sidebar noise\n", count: 200)
+  let selected = selectDeepHarvestBody(axBody: noisyAx, copiedBody: cleanCopy)
+  let copyPass = selected.clipboardAuthoritative && selected.body == cleanCopy
+  if !copyPass { failed += 1 }
+  results.append([
+    "name": "current_turn_copy_beats_longer_ax_aggregate",
+    "axChars": noisyAx.count,
+    "copyChars": cleanCopy.count,
+    "pass": copyPass,
+  ])
+  let exactFilenamePass = labelContainsExactFilename("Attached: a.zip, 12 MB", fileName: "a.zip") &&
+    !labelContainsExactFilename("Attached: data.zip, 12 MB", fileName: "a.zip") &&
+    !labelContainsExactFilename("Attached: éa.zip, 12 MB", fileName: "a.zip") &&
+    !labelContainsExactFilename("Attached: αa.zip, 12 MB", fileName: "a.zip")
+  if !exactFilenamePass { failed += 1 }
+  results.append([
+    "name": "attachment_filename_boundary",
+    "pass": exactFilenamePass,
+  ])
   let ok = failed == 0
   let out: [String: Any] = [
     "ok": ok,
@@ -1718,6 +2044,15 @@ func runSelfcheckGenerationPolicy() -> Never {
       expect: .active
     ),
     Case(
+      name: "ambiguous_controls_stable_partial_never_completes",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: false, loadingChrome: false),
+        body: auditBody, sawThisTurn: true, bodyFingerprint: bodyFingerprint(auditBody),
+        consecutiveStableSnapshots: 100, consecutiveEndedObservations: 0
+      ),
+      expect: .active
+    ),
+    Case(
       name: "settling_after_end",
       sample: GenerationSample(
         controls: ComposerControls(stop: false, send: true, loadingChrome: false),
@@ -1767,6 +2102,39 @@ func runSelfcheckGenerationPolicy() -> Never {
       "pass": pass,
     ])
   }
+  let exactCases: [(String, String?)] = [
+    ("Chat only. Reply with exactly the token V4FLASH_HANDOFF_OK and nothing else.", "V4FLASH_HANDOFF_OK"),
+    ("Reply exactly: READY", "READY"),
+    ("Respond exactly with `ACK 1`", "ACK 1"),
+    ("Audit CONSTANT_NAME but explain it normally.", nil),
+  ]
+  for (input, expected) in exactCases {
+    let got = requestedExactReply(input)
+    let pass = got == expected
+    if !pass { failed += 1 }
+    results.append([
+      "name": "exact-reply-parser",
+      "input": input,
+      "expect": expected as Any,
+      "got": got as Any,
+      "pass": pass,
+    ])
+  }
+  let shortExact = GenerationSample(
+    controls: ComposerControls(stop: false, send: true, loadingChrome: false),
+    body: "V4FLASH_HANDOFF_OK", sawThisTurn: true,
+    bodyFingerprint: bodyFingerprint("V4FLASH_HANDOFF_OK"),
+    consecutiveStableSnapshots: 3, consecutiveEndedObservations: 3
+  )
+  let shortExactPhase = classifyGenerationPhase(shortExact, exactToken: "V4FLASH_HANDOFF_OK")
+  let shortExactPass = shortExactPhase == .complete
+  if !shortExactPass { failed += 1 }
+  results.append([
+    "name": "arbitrary-short-exact-reply-completes",
+    "expect": GenerationPhase.complete.rawValue,
+    "got": shortExactPhase.rawValue,
+    "pass": shortExactPass,
+  ])
   let ok = failed == 0
   let out: [String: Any] = [
     "ok": ok,
@@ -1838,6 +2206,7 @@ func runSelfcheckLongrunPolicy() -> Never {
     "ax-refresh:",
     "auto-upgraded-short-timeout-to-unlimited",
     "--timeout-strict",
+    "Always stage for DS handoff",
   ]
   // Always read the file we are executing if possible
   let helperPathCandidates = CommandLine.arguments.filter { $0.contains("psst_zip_upload") }
@@ -1871,8 +2240,8 @@ func runSelfcheckLongrunPolicy() -> Never {
 var best = ""
 var sawGrowth = false
 var sawThisTurn = false  // must observe active generation or growth after this send
+var sawAuthoritativeCopy = false
 var tick = 0
-var lastCopyAt = Date.distantPast
 var lastSignificantGrowthAt = Date()
 var phase: GenerationPhase = .awaitingStart
 var phaseEnteredAt = Date()
@@ -1886,7 +2255,7 @@ let waitStarted = Date()
 // --timeout 0 = unlimited (wait until phase complete / captureFailed / kill).
 // Screen lock parks until unlock (does not abort). Short N auto-upgraded unless --timeout-strict.
 // --timeout N = optional user wall-clock only. No invented 60m hard cap.
-let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
+let deadline = operationDeadline
 log(
   "wait-loop start timeoutSec=\(timeoutSec) " +
   "deadline=\(deadline.map { "\($0.timeIntervalSince(waitStarted))s" } ?? "none(unlimited)") " +
@@ -1894,8 +2263,11 @@ log(
   "policy=generation-state-machine merge=non-dup lock=park-until-unlock ax-refresh=on"
 )
 
-func absorbBody(_ text: String, minDelta: Int = 20) {
-  let merged = mergeReplyBody(best: best, candidate: text, minDelta: minDelta)
+func absorbBody(_ text: String, minDelta: Int = 20, authoritative: Bool = false) {
+  let candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  let merged = authoritative && !candidate.isEmpty
+    ? candidate
+    : mergeReplyBody(best: best, candidate: candidate, minDelta: minDelta)
   if merged == best { return }
   if merged.count >= best.count + 100 {
     lastSignificantGrowthAt = Date()
@@ -1952,22 +2324,23 @@ while true {
   var controls = readComposerControls(bodyHint: best)
   if controls.isGenerationActive { sawThisTurn = true }
 
-  // Harvest policy by phase: aggressive when settling; light while active (stream still in AX).
-  let sinceCopy = Date().timeIntervalSince(lastCopyAt)
+  // Copy-message is used only after a strong generation-end signal. Copying while
+  // active can capture a partial reply and must never overwrite the growing AX body.
   let shouldCopy: Bool = {
     switch phase {
     case .settling, .complete, .captureFailed:
       return true
-    case .awaitingStart:
-      return sinceCopy >= 4
-    case .active:
-      // Occasional copy while streaming; never used as a finish signal alone.
-      return sinceCopy >= 15 || (best.count > 500 && sinceCopy >= 8)
+    case .awaitingStart, .active:
+      return controls.isGenerationEnded
     }
   }()
-  if shouldCopy { lastCopyAt = Date() }
-  let deep = deepHarvestReply(includeCopy: shouldCopy)
-  absorbBody(deep, minDelta: 20)
+  let deep = deepHarvestReply(
+    includeCopy: shouldCopy,
+    baseline: baseline2,
+    baselineCopyCount: baselineCopyButtonCount
+  )
+  if deep.clipboardAuthoritative { sawAuthoritativeCopy = true }
+  absorbBody(deep.body, minDelta: 20, authoritative: deep.clipboardAuthoritative)
 
   let texts = allCaptureTexts()
   if let token = exactToken {
@@ -1999,10 +2372,8 @@ while true {
     consecutiveStableSnapshots = best.isEmpty ? 0 : 1
     lastFingerprint = fp
   }
-  // Count strong (Send) ends and weak (Stop cleared + acceptable body) ends.
-  let weakEnded =
-    controls.stopClearedAmbiguous && bodyAcceptableForFinish(best, exactToken: exactToken)
-  if controls.isGenerationEnded || weakEnded {
+  // Only Send-ready is a completion signal; AX ambiguity never increments this.
+  if controls.isGenerationEnded {
     consecutiveEndedObservations += 1
   } else {
     consecutiveEndedObservations = 0
@@ -2054,11 +2425,30 @@ while true {
 
   case .settling:
     // Deep harvest every settle tick until complete or captureFailed.
-    let h = deepHarvestReply(includeCopy: true)
-    absorbBody(h, minDelta: 10)
+    let h = deepHarvestReply(
+      includeCopy: true,
+      baseline: baseline2,
+      baselineCopyCount: baselineCopyButtonCount
+    )
+    if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
+    absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
     continue
 
   case .complete:
+    if exactToken == nil && !sawAuthoritativeCopy {
+      if consecutiveEndedObservations >= 40 {
+        emitStablePartial(
+          best,
+          code: "COPY_CAPTURE_UNAVAILABLE",
+          message: "Generation ended, but no current-turn Copy-message body could be captured; refusing to label AX text as complete.",
+          elapsed: elapsed
+        )
+      }
+      phase = .settling
+      phaseEnteredAt = Date()
+      consecutiveStableSnapshots = 0
+      continue
+    }
     let note: String
     if controls.stop && controls.send {
       note = "settled-sticky-stop-send-ready"
@@ -2078,8 +2468,13 @@ while true {
     emitComplete(best, finishNote: note)
 
   case .captureFailed:
-    let h = deepHarvestReply(includeCopy: true)
-    absorbBody(h, minDelta: 10)
+    let h = deepHarvestReply(
+      includeCopy: true,
+      baseline: baseline2,
+      baselineCopyCount: baselineCopyButtonCount
+    )
+    if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
+    absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
     // One more classification pass in case harvest fixed it.
     let retry = GenerationSample(
       controls: readComposerControls(bodyHint: best),
@@ -2106,8 +2501,13 @@ let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
 log("user timeout reached elapsed=\(elapsedFinal)s best=\(best.count) phase=\(phase.rawValue) timeoutSec=\(timeoutSec)")
 let finalControls = readComposerControls(bodyHint: best)
 if !finalControls.isGenerationActive {
-  let h = deepHarvestReply(includeCopy: true)
-  absorbBody(h, minDelta: 10)
+  let h = deepHarvestReply(
+    includeCopy: true,
+    baseline: baseline2,
+    baselineCopyCount: baselineCopyButtonCount
+  )
+  if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
+  absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
   if bodyAcceptableForFinish(best, exactToken: exactToken) && sawThisTurn {
     emitComplete(best, finishNote: "user-timeout-settled-complete")
   }
@@ -2120,8 +2520,6 @@ if best.count >= 40 {
     elapsed: elapsedFinal
   )
 }
-pb.clearContents()
-if let oldString { pb.setString(oldString, forType: .string) }
 emit([
   "ok": false,
   "code": "TIMEOUT",

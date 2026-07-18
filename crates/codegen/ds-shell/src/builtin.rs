@@ -42,6 +42,36 @@ const BUNDLED_SKILL_ASSETS: &[(&str, &str, &str)] = &[
     ),
     (
         "psst-gpt",
+        "scripts/run_full_codebase_audit.sh",
+        include_str!("../skills/psst-gpt/scripts/run_full_codebase_audit.sh"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_absorb.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_absorb.sh"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_finish_rules.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_finish_rules.sh"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_generation_policy.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_generation_policy.sh"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_longrun_policy.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_longrun_policy.sh"),
+    ),
+    (
+        "psst-gpt",
+        "scripts/selfcheck_relay_policy.sh",
+        include_str!("../skills/psst-gpt/scripts/selfcheck_relay_policy.sh"),
+    ),
+    (
+        "psst-gpt",
         "scripts/selfcheck_wake.sh",
         include_str!("../skills/psst-gpt/scripts/selfcheck_wake.sh"),
     ),
@@ -452,7 +482,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn extract_missing_refreshes_stale_skill_content() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -470,6 +499,31 @@ mod tests {
         assert!(!body.contains("STALE_CONTENT"));
     }
 
+    #[test]
+    fn psst_gpt_bundles_every_shipped_script() {
+        let expected: std::collections::BTreeSet<_> = [
+            "scripts/psst_ax_upload.swift",
+            "scripts/psst_chat_relay.swift",
+            "scripts/psst_gpt.mjs",
+            "scripts/psst_zip_upload.swift",
+            "scripts/run_full_codebase_audit.sh",
+            "scripts/selfcheck_absorb.sh",
+            "scripts/selfcheck_finish_rules.sh",
+            "scripts/selfcheck_generation_policy.sh",
+            "scripts/selfcheck_longrun_policy.sh",
+            "scripts/selfcheck_relay_policy.sh",
+            "scripts/selfcheck_wake.sh",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<_> = BUNDLED_SKILL_ASSETS
+            .iter()
+            .filter_map(|(skill, path, _)| (*skill == "psst-gpt").then_some(*path))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn remove_legacy_is_noop_when_directory_does_not_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
