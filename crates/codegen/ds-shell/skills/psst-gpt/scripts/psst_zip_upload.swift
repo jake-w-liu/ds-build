@@ -472,13 +472,93 @@ func isChromeText(_ t: String) -> Bool {
   return false
 }
 
-func allStaticTexts() -> [String] {
-  bfsAll(root, pred: { _, r in r == "AXStaticText" })
-    .map { s($0, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines) }
-    .filter { !$0.isEmpty && !isChromeText($0) }
+func isComposerTextArea(_ el: AXUIElement) -> Bool {
+  let r = s(el, kAXRoleAttribute as String)
+  guard r == "AXTextArea" else { return false }
+  return s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
 }
-let baseline = Set(allStaticTexts())
-log("baseline static texts=\(baseline.count)")
+
+/// Harvest reply-visible AX text (static + non-composer text areas/fields + long group values).
+func allCaptureTexts() -> [String] {
+  var out: [String] = []
+  for el in bfsAll(root, pred: { _, r in
+    r == "AXStaticText" || r == "AXTextArea" || r == "AXTextField" || r == "AXGroup"
+  }) {
+    if isComposerTextArea(el) { continue }
+    let role = s(el, kAXRoleAttribute as String)
+    let v = s(el, kAXValueAttribute as String).trimmingCharacters(in: .whitespacesAndNewlines)
+    if v.isEmpty { continue }
+    if role == "AXGroup" && v.count < 48 { continue }
+    if isChromeText(v) { continue }
+    if v.count >= 2 { out.append(v) }
+  }
+  return out
+}
+func allStaticTexts() -> [String] { allCaptureTexts() }
+
+/// Scroll transcript so long replies stay reachable in the AX tree.
+func scrollTranscript() {
+  // Page Down + End (macOS key codes: 121=PageDown, 119=End)
+  key(121)
+  Thread.sleep(forTimeInterval: 0.12)
+  key(119)
+  Thread.sleep(forTimeInterval: 0.15)
+}
+
+/// Prefer ChatGPT "Copy message" buttons — clipboard often holds the full assistant body.
+func harvestViaCopyMessageButtons() -> String {
+  let buttons = bfsAll(root, pred: { el, r in
+    guard r == "AXButton" else { return false }
+    let blob = (s(el, kAXDescriptionAttribute as String) + " " + s(el, kAXTitleAttribute as String)).lowercased()
+    return blob.contains("copy message") || blob == "copy message"
+  })
+  if buttons.isEmpty {
+    log("copy-harvest: no Copy message buttons")
+    return ""
+  }
+  var bestClip = ""
+  // Last assistant messages are usually the last copy buttons in the tree order.
+  for btn in buttons.suffix(6).reversed() {
+    pb.clearContents()
+    _ = press(btn)
+    Thread.sleep(forTimeInterval: 0.45)
+    let clip = (pb.string(forType: .string) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    if clip.count < 40 { continue }
+    if isChromeText(clip) { continue }
+    // Reject pure prompt echo
+    if promptLooksSet(clip, prompt) && clip.count < prompt.count + 80 { continue }
+    if clip.count > bestClip.count {
+      bestClip = clip
+      log("copy-harvest: clipboard chars=\(clip.count)")
+    }
+  }
+  return bestClip
+}
+
+/// Deep harvest: scroll + AX tree + optional clipboard copy (when generation finished).
+func deepHarvestReply(includeCopy: Bool) -> String {
+  scrollTranscript()
+  var parts: [String] = []
+  var seen = Set<String>()
+  for t in allCaptureTexts() {
+    if seen.contains(t) { continue }
+    if prompt.contains(t) && t.count < 80 { continue }
+    seen.insert(t)
+    parts.append(t)
+  }
+  var body = parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  if includeCopy {
+    let clip = harvestViaCopyMessageButtons()
+    if clip.count > body.count {
+      log("deepHarvest: preferring clipboard over AX tree (\(clip.count) > \(body.count))")
+      body = clip
+    }
+  }
+  return body
+}
+
+let baseline = Set(allCaptureTexts())
+log("baseline capture texts=\(baseline.count)")
 
 // --- Put prompt into composer and PROVE it stuck (Electron often ignores silent AX set) ---
 func composerText(_ el: AXUIElement) -> String {
@@ -804,19 +884,62 @@ var lastSig = ""
 var best = ""
 var sawGrowth = false
 var tick = 0
+var stopGoneTicks = 0
+var lastCopyAttemptTick = -100
 // Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
-// --timeout 0 means "long audit", not "hang forever": hard cap 45 min.
-let hardCapSec: Double = 45 * 60
+// --timeout 0 means "long audit", not "hang forever": hard cap 60 min for full zip audits.
+let hardCapSec: Double = 60 * 60
 let effectiveTimeoutSec: Double = timeoutSec > 0 ? timeoutSec : hardCapSec
 let deadline = Date().addingTimeInterval(effectiveTimeoutSec)
-// After Stop disappears and body stops growing: exit (~2 min at 2.5s/tick).
-let stallTicksStopGone = 48
-// Even if Stop flickers: no growth for ~5 min → exit with partial.
-let stallTicksNoGrowth = 120
+// After Stop gone: allow deep harvest for ~45s then require complete or partial.
+let stopGoneHarvestTicks = 6
+// Stable after full harvest attempts (~2.5 min at 2.5s) before stall partial.
+let stallTicksStopGone = 60
+let stallTicksNoGrowth = 150
 log("wait-loop start timeoutSec=\(timeoutSec) effectiveTimeoutSec=\(effectiveTimeoutSec) hardCap=\(timeoutSec <= 0) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
+
+func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, newParts: Int) {
+  let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
+  let filtered = novel.filter { t in
+    let low = t.lowercased()
+    if t.count < 2 { return false }
+    if low.hasPrefix("audit only") { return false }
+    if low == "audit rust monorepo" || low == "audit request rust repo" { return false }
+    // Keep outline chips ("dependencies,", "H-1.") — ChatGPT streams these as short StaticTexts.
+    if t.count < 12 && !t.contains(" ") {
+      let outlineish =
+        t.hasSuffix(",") || t.hasSuffix(":") || t.hasSuffix(".") || t.hasSuffix(";") ||
+        t.hasSuffix("-") || t.contains("/") ||
+        t.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil ||
+        t.range(of: #"^[A-Z]-\d+"#, options: .regularExpression) != nil
+      if !outlineish { return false }
+    }
+    return true
+  }
+  var newParts = 0
+  for t in filtered {
+    if accumulatedSet.contains(t) { continue }
+    if accumulatedParts.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
+    if let idx = accumulatedParts.firstIndex(where: { t.contains($0) && t.count > $0.count + 10 }) {
+      accumulatedSet.remove(accumulatedParts[idx])
+      accumulatedParts[idx] = t
+      accumulatedSet.insert(t)
+      newParts += 1
+      continue
+    }
+    accumulatedSet.insert(t)
+    accumulatedParts.append(t)
+    newParts += 1
+  }
+  let live = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  let accumulated = accumulatedParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+  let assistant = accumulated.count >= live.count ? accumulated : live
+  return (assistant, novel.count, newParts)
+}
+
 while Date() < deadline {
   Thread.sleep(forTimeInterval: 2.5)
   tick += 1
@@ -837,9 +960,30 @@ while Date() < deadline {
      s(work, kAXValueAttribute as String) == "1" {
     emit(["ok": false, "code": "WORK_FLIP", "attached": attached, "wakeHoldPid": wakePid as Any], exitCode: 20)
   }
-  let texts = allStaticTexts()
-  let stopPresent = findStopButton() != nil
 
+  let stopPresent = findStopButton() != nil
+  if stopPresent { stopGoneTicks = 0 } else { stopGoneTicks += 1 }
+
+  // Periodically scroll while streaming so long replies stay in the AX tree.
+  if tick % 3 == 0 { scrollTranscript() }
+
+  // When generation ends (or every ~8 ticks while streaming), deep-harvest including Copy message.
+  let shouldCopy = !stopPresent || (tick - lastCopyAttemptTick >= 8 && best.count > 200)
+  if shouldCopy { lastCopyAttemptTick = tick }
+  let deep = deepHarvestReply(includeCopy: shouldCopy && !stopPresent)
+  if deep.count > best.count + 20 {
+    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(!stopPresent))")
+    // Feed clipboard body into accumulation as one blob
+    if !deep.isEmpty && !accumulatedSet.contains(deep) {
+      accumulatedSet.insert(deep)
+      accumulatedParts.append(deep)
+    }
+    best = deep
+    sawGrowth = true
+    stable = 0
+  }
+
+  let texts = allCaptureTexts()
   if let token = exactToken {
     let hits = texts.filter {
       $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
@@ -852,47 +996,13 @@ while Date() < deadline {
     }
   }
 
-  // Diff vs baseline: new non-chrome static texts are the assistant body
-  let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
-  // Keep outline chips ChatGPT streams as short StaticTexts ("dependencies,", "H-1.").
-  // Only drop pure noise crumbs — not list items / paths / trailing punctuation.
-  let filtered = novel.filter { t in
-    let low = t.lowercased()
-    if t.count < 2 { return false }
-    if low.hasPrefix("audit only") { return false }
-    if low == "audit rust monorepo" || low == "audit request rust repo" { return false }
-    if t.count < 12 && !t.contains(" ") {
-      let outlineish =
-        t.hasSuffix(",") || t.hasSuffix(":") || t.hasSuffix(".") || t.hasSuffix(";") ||
-        t.hasSuffix("-") || t.contains("/") || t.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil ||
-        t.range(of: #"^[A-Z]-\d+"#, options: .regularExpression) != nil
-      if !outlineish { return false }
-    }
-    return true
-  }
-  var newParts = 0
-  for t in filtered {
-    // Prefer longer supersets: drop shorter prefixes already stored
-    if accumulatedSet.contains(t) { continue }
-    if accumulatedParts.contains(where: { $0.contains(t) && $0.count > t.count + 10 }) { continue }
-    // Replace shorter part that is a prefix of this longer string
-    if let idx = accumulatedParts.firstIndex(where: { t.contains($0) && t.count > $0.count + 10 }) {
-      accumulatedSet.remove(accumulatedParts[idx])
-      accumulatedParts[idx] = t
-      accumulatedSet.insert(t)
-      newParts += 1
-      continue
-    }
-    accumulatedSet.insert(t)
-    accumulatedParts.append(t)
-    newParts += 1
-  }
-  // Live snapshot (current tree) OR accumulated stream — take the richer body
-  let live = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  let accumulated = accumulatedParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-  let assistant = accumulated.count >= live.count ? accumulated : live
-  log("tick=\(tick) elapsed=\(elapsed)s novel=\(novel.count) kept=\(filtered.count) newParts=\(newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) stop=\(stopPresent) sawGrowth=\(sawGrowth)")
-  // Stage partial progress so DS can observe wait (non-final)
+  let ing = ingestCaptureTexts(texts)
+  var assistant = ing.assistant
+  if deep.count > assistant.count { assistant = deep }
+  if best.count > assistant.count { assistant = best }
+
+  log("tick=\(tick) elapsed=\(elapsed)s novel=\(ing.novel) kept newParts=\(ing.newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) stop=\(stopPresent) stopGone=\(stopGoneTicks) sawGrowth=\(sawGrowth)")
+
   if tick % 4 == 0, best.count > 0 {
     _ = stageResultForDs([
       "ok": false,
@@ -903,7 +1013,7 @@ while Date() < deadline {
       "stopPresent": stopPresent,
     ], responseText: best)
   }
-  // Immediate accept: clear Chat/Work refusal or substantive reply (word-boundary, not "architectural"⊃"architecture")
+
   let lower = assistant.lowercased()
   func hasWB(_ word: String) -> Bool {
     lower.range(of: "\\b\(NSRegularExpression.escapedPattern(for: word))\\b", options: .regularExpression) != nil
@@ -913,70 +1023,82 @@ while Date() < deadline {
     hasWB("cannot") || lower.contains("can't open") ||
     lower.contains("unable to") || lower.contains("out of") ||
     hasWB("risk") || hasWB("risks") || hasWB("finding") || hasWB("findings") ||
-    assistant.contains("##") || hasWB("severity") || hasWB("recommend") || hasWB("recommendation")
+    assistant.contains("##") || hasWB("severity") || hasWB("recommend") || hasWB("recommendation") ||
+    lower.contains("executive") || lower.contains("architecture")
   )
-  if looksComplete && stable >= 3 && !stopPresent {
-    if assistant == best || assistant.count >= best.count {
-      _ = finishIfReady(assistant.count >= best.count ? assistant : best)
-    }
-  }
-  // Growth: any meaningful increase (was +20 — missed steady chip accumulation)
+
   if assistant.count > best.count + 5 {
     sawGrowth = true
     best = assistant
     stable = 0
     lastSig = "\(assistant.count)"
-    continue
-  }
-  let sig = "\(assistant.count)"
-  if sig == lastSig && assistant.count > 20 {
-    stable += 1
-    if assistant.count > best.count { best = assistant }
-  } else if assistant.count >= best.count && !assistant.isEmpty {
-    best = assistant
-    lastSig = sig
-    stable = sawGrowth ? 1 : 0
   } else {
-    // Do not reset stable to 0 when assistant temporarily shrinks (AX flicker);
-    // only reset if empty / much smaller.
-    if assistant.isEmpty || assistant.count + 80 < best.count {
-      stable = 0
+    let sig = "\(assistant.count)"
+    if sig == lastSig && assistant.count > 20 {
+      stable += 1
+      if assistant.count > best.count { best = assistant }
+    } else if assistant.count >= best.count && !assistant.isEmpty {
+      best = assistant
+      lastSig = sig
+      stable = sawGrowth ? 1 : 0
+    } else {
+      if assistant.isEmpty || assistant.count + 80 < best.count { stable = 0 }
+      lastSig = sig
     }
-    lastSig = sig
-  }
-  // Long audits: require growth then stability; refuse short fragment bodies
-  if sawGrowth && stable >= 4 && best.count >= 300 && !stopPresent {
-    _ = finishIfReady(best)
-  }
-  // Stabilized substantive replies (still pass incomplete filter)
-  if stable >= 5 && best.count >= 300 && !stopPresent {
-    _ = finishIfReady(best)
-  }
-  // Keyword-complete body that stabilized
-  if looksComplete && stable >= 3 && best.count >= 300 && assistant.count >= best.count && !stopPresent {
-    _ = finishIfReady(best)
   }
 
-  // --- Stall backstops (prevent infinite hang when AX never reaches 300 chars) ---
-  // Generation finished (Stop gone) and body frozen: emit complete if possible, else partial.
+  // Prefer finishing only after Stop is gone + a few harvest ticks (full body via Copy).
+  if !stopPresent && stopGoneTicks >= stopGoneHarvestTicks {
+    // Final deep harvest before finish attempts
+    if stopGoneTicks == stopGoneHarvestTicks || stopGoneTicks % 4 == 0 {
+      let h = deepHarvestReply(includeCopy: true)
+      if h.count > best.count {
+        best = h
+        sawGrowth = true
+        stable = 0
+        log("post-stop harvest chars=\(h.count)")
+      }
+    }
+    if looksComplete && stable >= 2 {
+      _ = finishIfReady(best.count >= assistant.count ? best : assistant)
+    }
+    if sawGrowth && stable >= 3 && best.count >= 300 {
+      _ = finishIfReady(best)
+    }
+    if stable >= 4 && best.count >= 300 {
+      _ = finishIfReady(best)
+    }
+  }
+
+  // While still generating, only early-finish on huge stable bodies (rare).
+  if stopPresent && best.count >= 8000 && stable >= 8 {
+    log("large body while Stop present; waiting for Stop to clear before finish")
+  }
+
+  // --- Stall backstops: deep harvest first, then honest partial (never hang) ---
   if !stopPresent && sawGrowth && stable >= stallTicksStopGone && best.count >= 40 {
-    log("stall backstop: Stop gone + stable=\(stable) best=\(best.count) — finalizing")
+    log("stall backstop: Stop gone + stable=\(stable) — final deep harvest")
+    let h = deepHarvestReply(includeCopy: true)
+    if h.count > best.count { best = h }
     if finishIfReady(best) { /* Never */ }
     emitStablePartial(
       best,
       code: "AX_CAPTURE_STALL",
-      message: "ChatGPT finished generating (Stop gone) but AX capture stayed below complete-audit threshold (chars=\(best.count)). Returning partial capture.",
+      message: "ChatGPT finished (Stop gone) but captured body did not pass complete-audit checks (chars=\(best.count)). Returning best capture after Copy-message harvest.",
       elapsed: elapsed
     )
   }
-  // Even with Stop flicker: no growth for ~5 min with some body → partial (do not hang 45 min).
   if sawGrowth && stable >= stallTicksNoGrowth && best.count >= 40 {
-    log("stall backstop: no-growth stable=\(stable) best=\(best.count) stop=\(stopPresent)")
-    if !stopPresent, finishIfReady(best) { /* Never */ }
+    log("stall backstop: no-growth stable=\(stable) stop=\(stopPresent)")
+    if !stopPresent {
+      let h = deepHarvestReply(includeCopy: true)
+      if h.count > best.count { best = h }
+      if finishIfReady(best) { /* Never */ }
+    }
     emitStablePartial(
       best,
       code: "AX_CAPTURE_STALL",
-      message: "No AX body growth for \(stable) ticks (~\(stable * 25 / 10)s). Returning partial capture (chars=\(best.count)).",
+      message: "No body growth for \(stable) ticks. Returning best capture (chars=\(best.count)).",
       elapsed: elapsed
     )
   }
@@ -984,19 +1106,24 @@ while Date() < deadline {
     log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count) stop=\(stopPresent)")
   }
 }
-// Hard deadline (effective timeout, including --timeout 0 hard cap)
-pb.clearContents()
-if let oldString { pb.setString(oldString, forType: .string) }
+// Hard deadline
 let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
-if findStopButton() == nil, finishIfReady(best) { /* Never */ }
+log("deadline reached elapsed=\(elapsedFinal)s best=\(best.count) — final harvest")
+if findStopButton() == nil {
+  let h = deepHarvestReply(includeCopy: true)
+  if h.count > best.count { best = h }
+  if finishIfReady(best) { /* Never */ }
+}
 if best.count >= 40 {
   emitStablePartial(
     best,
     code: "TIMEOUT",
-    message: "Wait deadline reached (effectiveTimeoutSec=\(Int(effectiveTimeoutSec))). Returning partial capture (chars=\(best.count)).",
+    message: "Wait deadline reached (effectiveTimeoutSec=\(Int(effectiveTimeoutSec))). Returning best capture (chars=\(best.count)).",
     elapsed: elapsedFinal
   )
 }
+pb.clearContents()
+if let oldString { pb.setString(oldString, forType: .string) }
 emit([
   "ok": false,
   "code": "TIMEOUT",
