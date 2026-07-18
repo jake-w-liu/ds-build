@@ -60,11 +60,15 @@ SKILL_SCRIPTS=".ds/skills/psst-gpt/scripts"
 # Preferred entry (blocks until ChatGPT stabilizes; stages .ds/psst-gpt/*):
 bash "$SKILL_SCRIPTS/run_full_codebase_audit.sh" "$PWD"
 
-# Equivalent:
+# Equivalent (GPT-facing prompt only — no operator meta like "Chat only / never Work"):
 swift "$SKILL_SCRIPTS/psst_zip_upload.swift" \
   --root "$PWD" --timeout 0 -- \
-  "AUDIT ONLY. Chat only — never Work. … structured audit …"
+  "Attached is source-archive.zip of a full Rust monorepo…. Produce a structured audit: (1) top risks by severity, (2) architecture notes, (3) concrete recommendations. Do not edit code."
 ```
+
+**Prompt split (important):**
+- **For DS / this skill:** stay in Chat, never Work, audit-only (no code edits), wait for full capture.
+- **For ChatGPT (the string after `--`):** only the audit ask about the zip — do **not** paste operator meta (“Chat only — never Work”, “AUDIT ONLY for the assistant”, etc.).
 
 Host tool timeout for this command must be **long / unlimited** (zip + multi-minute GPT audit).
 
