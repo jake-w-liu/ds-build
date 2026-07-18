@@ -417,6 +417,7 @@ while i < args.count {
   if a == "--no-new-chat" { newChat = false; i += 1; continue }
   if a == "--pack-only" { packOnly = true; i += 1; continue }
   if a == "--selfcheck-finish-rules" { runSelfcheckFinishRules() }
+  if a == "--selfcheck-generation-policy" { runSelfcheckGenerationPolicy() }
   if a == "--" { promptParts.append(contentsOf: args[(i + 1)...]); break }
   if a.hasPrefix("-") { emit(["ok": false, "code": "BAD_ARGS", "message": "Unknown \(a)"], exitCode: 2) }
   promptParts.append(a); i += 1
@@ -893,6 +894,26 @@ let exactToken: String? = {
   return nil
 }()
 
+// MARK: - Generation wait state machine (robust finish detection)
+//
+// Design (signal-driven, NOT wall-clock "force done"):
+//
+//   awaitingStart ──▶ active ──▶ settling ──▶ complete
+//         │             │            │
+//         │             │            └──▶ captureFailed (generation ended, body never complete)
+//         │             └── (hours of Pro thinking stay in active; no stagnation exit)
+//         └── must see this turn start before any finish (no prior-reply false complete)
+//
+// UI signals (ChatGPT Chat composer):
+//   • Stop without Send  ⇒ generation active (thinking or streaming)
+//   • loading chrome     ⇒ generation active
+//   • Send without Stop  ⇒ generation ended (composer ready for next message)
+//   • Stop + Send both   ⇒ sticky Stop after end; treat as ended if body complete
+//
+// Finish requires: phase==settling, body not incomplete, content fingerprint stable
+// for settleConfirmSnapshots consecutive deep harvests. Never use "N seconds quiet"
+// while Stop is active without Send.
+
 func hasLoadingChrome(_ text: String) -> Bool {
   let l = text.lowercased()
   let markers = [
@@ -902,57 +923,134 @@ func hasLoadingChrome(_ text: String) -> Bool {
   return markers.contains(where: { l.contains($0) })
 }
 
-/// True while ChatGPT is still thinking/streaming. Pro thinking can last hours with little body growth.
-/// Rule: Stop without Send ⇒ active. Loading chrome ⇒ active. Never treat pure stagnation as done.
-func isGenerationActive(stopPresent: Bool, sendPresent: Bool, body: String) -> Bool {
-  if hasLoadingChrome(body) { return true }
-  // Normal generating UX: Stop replaces Send.
-  if stopPresent && !sendPresent { return true }
-  // Stop + Send both present is ambiguous sticky AX — not treated as active generation.
-  return false
+/// Snapshot of Chat composer control surface (primary generation signals).
+struct ComposerControls: Equatable {
+  let stop: Bool
+  let send: Bool
+  let loadingChrome: Bool
+
+  /// Model is thinking or streaming. Pro may stay here for hours with zero body growth.
+  var isGenerationActive: Bool {
+    if loadingChrome { return true }
+    // Canonical ChatGPT UX: Stop replaces Send while answering.
+    if stop && !send { return true }
+    return false
+  }
+
+  /// Strong evidence the turn ended (user can send again).
+  var isGenerationEnded: Bool {
+    if loadingChrome { return false }
+    if isGenerationActive { return false }
+    // Send ready, or Stop gone (Send may lag one frame), or sticky Stop with Send.
+    if send { return true }
+    if !stop { return true }
+    return false
+  }
 }
 
-/// Complete only when body is a real reply (not zip-loading chrome). Returns false to keep waiting.
-@discardableResult
-func finishIfReady(_ text: String, allowStickyStop: Bool = false, finishNote: String? = nil) -> Bool {
-  if isIncompleteZipReply(text) {
-    log("finishIfReady: still loading/incomplete chars=\(text.count)")
-    return false
+/// Lifecycle of one post-send wait. Pure classification for tests + wait loop.
+enum GenerationPhase: String {
+  case awaitingStart   // after send; no Stop / growth for this turn yet
+  case active          // thinking or streaming (unbounded duration)
+  case settling        // UI says ended; harvesting until body fingerprint stable
+  case complete        // body complete + settled
+  case captureFailed   // UI ended but body never became a valid audit capture
+}
+
+struct GenerationSample {
+  let controls: ComposerControls
+  let body: String
+  let sawThisTurn: Bool  // Stop/active or body growth observed after this send
+  let bodyFingerprint: String
+  let consecutiveStableSnapshots: Int  // identical fingerprint while settling
+  let consecutiveEndedObservations: Int // consecutive isGenerationEnded samples
+}
+
+func bodyFingerprint(_ text: String) -> String {
+  // Length + ends: cheap, stable across whitespace-equivalent harvests of same content.
+  let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  let head = String(t.prefix(64))
+  let tail = String(t.suffix(64))
+  return "\(t.count)|\(head)|\(tail)"
+}
+
+/// Whether captured text is acceptable as a finished delivery (audit body or exact token).
+func bodyAcceptableForFinish(_ text: String, exactToken: String?) -> Bool {
+  if hasLoadingChrome(text) { return false }
+  if let token = exactToken {
+    let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if t == token || (t.contains(token) && t.count <= token.count + 80) {
+      return true
+    }
   }
-  if hasLoadingChrome(text) {
-    log("finishIfReady: loading chrome still present — waiting")
-    return false
+  return !isIncompleteZipReply(text)
+}
+
+/// Pure phase transition. Signal-driven — no wall-clock "force done" while active.
+func classifyGenerationPhase(_ s: GenerationSample, exactToken: String? = nil) -> GenerationPhase {
+  if s.controls.isGenerationActive {
+    return .active
   }
-  let stopPresent = findStopButton() != nil
-  let sendPresent = findSendButton() != nil
-  if isGenerationActive(stopPresent: stopPresent, sendPresent: sendPresent, body: text) {
-    log("finishIfReady: generation still active stop=\(stopPresent) send=\(sendPresent) — waiting")
-    return false
+  if !s.sawThisTurn {
+    return .awaitingStart
   }
-  // Sticky Stop: only accept complete body when Send is back (model finished) or caller proved idle.
-  if stopPresent && !allowStickyStop {
-    log("finishIfReady: Stop still present — waiting for generation to finish (Pro may think for hours)")
-    return false
+  // This turn ran; UI no longer shows active generation.
+  guard s.controls.isGenerationEnded else {
+    // Ambiguous (e.g. neither Stop nor Send): stay active-safe if we already saw the turn.
+    return .active
   }
-  // Zip audits: require a substantive body; short tokens still OK via exactToken path.
-  if exactToken == nil && text.count < 300 {
-    log("finishIfReady: body too short for zip audit chars=\(text.count)")
-    return false
+  let acceptable = bodyAcceptableForFinish(s.body, exactToken: exactToken)
+  // Need a few consecutive "ended" observations so one AX flicker does not finish early.
+  if s.consecutiveEndedObservations < 2 {
+    return .settling
   }
+  if acceptable && s.consecutiveStableSnapshots >= 3 {
+    return .complete
+  }
+  // Generation ended but capture never became a full audit — only after long settle.
+  // Thresholds are consecutive *observations while ended*, not wall-clock while thinking.
+  if !acceptable && s.consecutiveEndedObservations >= 40 && s.consecutiveStableSnapshots >= 20 {
+    return .captureFailed
+  }
+  return .settling
+}
+
+func pollInterval(for phase: GenerationPhase, secondsInPhase: TimeInterval) -> TimeInterval {
+  switch phase {
+  case .awaitingStart, .settling, .complete, .captureFailed:
+    return 2.0
+  case .active:
+    // Back off while Pro thinks for hours (reduces AX thrash; does not decide finish).
+    if secondsInPhase < 60 { return 2.5 }
+    if secondsInPhase < 300 { return 5.0 }
+    if secondsInPhase < 1800 { return 8.0 }
+    return 12.0
+  }
+}
+
+func readComposerControls(bodyHint: String) -> ComposerControls {
+  ComposerControls(
+    stop: findStopButton() != nil,
+    send: findSendButton() != nil,
+    loadingChrome: hasLoadingChrome(bodyHint)
+  )
+}
+
+/// Emit complete result. Only call when phase classification already says complete.
+func emitComplete(_ text: String, finishNote: String) -> Never {
   pb.clearContents()
   if let oldString { pb.setString(oldString, forType: .string) }
   let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
   try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
-  var stage: [String: Any] = [
+  _ = stageResultForDs([
     "ok": true,
     "status": "complete",
     "finalDeliveryText": text,
     "attached": true,
     "zipPath": zipPath as Any,
-  ]
-  if let finishNote { stage["finishNote"] = finishNote }
-  _ = stageResultForDs(stage, responseText: text)
-  var payload: [String: Any] = [
+    "finishNote": finishNote,
+  ], responseText: text)
+  emit([
     "ok": true,
     "status": "complete",
     "mode": "chat",
@@ -968,14 +1066,10 @@ func finishIfReady(_ text: String, allowStickyStop: Bool = false, finishNote: St
     "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
     "wakeHoldPid": wakePid as Any,
     "responseChars": text.count,
-  ]
-  if let finishNote { payload["finishNote"] = finishNote }
-  emit(payload)
-  // emit is Never; keep compiler happy
-  return true
+    "finishNote": finishNote,
+  ])
 }
 
-/// Never hang forever: emit whatever AX captured after a long stall (honest partial).
 func emitStablePartial(_ text: String, code: String, message: String, elapsed: Int) -> Never {
   pb.clearContents()
   if let oldString { pb.setString(oldString, forType: .string) }
@@ -1015,33 +1109,148 @@ func emitStablePartial(_ text: String, code: String, message: String, elapsed: I
   ], exitCode: 1)
 }
 
-var stable = 0
-var lastSig = ""
+/// Deterministic policy selfcheck (no ChatGPT). Invoked via --selfcheck-generation-policy.
+func runSelfcheckGenerationPolicy() -> Never {
+  struct Case {
+    let name: String
+    let sample: GenerationSample
+    let expect: GenerationPhase
+  }
+  let auditBody = """
+  ## Executive assessment
+  The monorepo shows modular crates and solid tests. Top risk: sandbox fail-open
+  on unsupported platforms returns a permissive path without hard failure.
+  1. Severity high: AlwaysApprove defaults expand privilege.
+  2. Recommendation: fail closed when sandbox cannot apply.
+  Architecture notes: permission resolver, network hooks, plugin install.
+  """
+  let chrome = "ChatGPT is responding\nOur systems are thinking a bit more"
+  let cases: [Case] = [
+    Case(
+      name: "awaiting_start",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: true, loadingChrome: false),
+        body: "", sawThisTurn: false, bodyFingerprint: bodyFingerprint(""),
+        consecutiveStableSnapshots: 0, consecutiveEndedObservations: 5
+      ),
+      expect: .awaitingStart
+    ),
+    Case(
+      name: "active_stop_no_send",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: true, send: false, loadingChrome: false),
+        body: "", sawThisTurn: true, bodyFingerprint: bodyFingerprint(""),
+        consecutiveStableSnapshots: 100, consecutiveEndedObservations: 100
+      ),
+      expect: .active
+    ),
+    Case(
+      name: "active_loading_chrome",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: true, loadingChrome: true),
+        body: chrome, sawThisTurn: true, bodyFingerprint: bodyFingerprint(chrome),
+        consecutiveStableSnapshots: 50, consecutiveEndedObservations: 50
+      ),
+      expect: .active
+    ),
+    Case(
+      name: "active_hours_no_growth_still_stop",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: true, send: false, loadingChrome: false),
+        body: "outline chip", sawThisTurn: true, bodyFingerprint: "x",
+        consecutiveStableSnapshots: 999, consecutiveEndedObservations: 999
+      ),
+      expect: .active
+    ),
+    Case(
+      name: "settling_after_end",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: true, loadingChrome: false),
+        body: auditBody, sawThisTurn: true, bodyFingerprint: bodyFingerprint(auditBody),
+        consecutiveStableSnapshots: 1, consecutiveEndedObservations: 2
+      ),
+      expect: .settling
+    ),
+    Case(
+      name: "complete_settled",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: true, loadingChrome: false),
+        body: auditBody, sawThisTurn: true, bodyFingerprint: bodyFingerprint(auditBody),
+        consecutiveStableSnapshots: 3, consecutiveEndedObservations: 5
+      ),
+      expect: .complete
+    ),
+    Case(
+      name: "complete_sticky_stop_send_ready",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: true, send: true, loadingChrome: false),
+        body: auditBody, sawThisTurn: true, bodyFingerprint: bodyFingerprint(auditBody),
+        consecutiveStableSnapshots: 3, consecutiveEndedObservations: 5
+      ),
+      expect: .complete
+    ),
+    Case(
+      name: "capture_failed_after_end",
+      sample: GenerationSample(
+        controls: ComposerControls(stop: false, send: true, loadingChrome: false),
+        body: "No sources yet", sawThisTurn: true, bodyFingerprint: bodyFingerprint("No sources yet"),
+        consecutiveStableSnapshots: 25, consecutiveEndedObservations: 45
+      ),
+      expect: .captureFailed
+    ),
+  ]
+  var results: [[String: Any]] = []
+  var failed = 0
+  for c in cases {
+    let got = classifyGenerationPhase(c.sample, exactToken: nil)
+    let pass = got == c.expect
+    if !pass { failed += 1 }
+    results.append([
+      "name": c.name,
+      "expect": c.expect.rawValue,
+      "got": got.rawValue,
+      "pass": pass,
+    ])
+  }
+  let ok = failed == 0
+  let out: [String: Any] = [
+    "ok": ok,
+    "status": "selfcheck-generation-policy",
+    "failed": failed,
+    "cases": results,
+    "policy": "signal-driven-state-machine",
+  ]
+  if let d = try? JSONSerialization.data(withJSONObject: out, options: [.prettyPrinted, .sortedKeys]),
+     let str = String(data: d, encoding: .utf8) {
+    print(str)
+  }
+  exit(ok ? 0 : 1)
+}
+
+// --- Wait-loop state ---
 var best = ""
 var sawGrowth = false
-/// Must observe Stop/generating (or body growth) after send before any finish — avoid capturing a prior reply.
-var sawGenerating = false
+var sawThisTurn = false  // must observe active generation or growth after this send
 var tick = 0
-var stopGoneTicks = 0
-var lastCopyAttemptTick = -100
+var lastCopyAt = Date.distantPast
 var lastSignificantGrowthAt = Date()
-var idleDoneStableTicks = 0
+var phase: GenerationPhase = .awaitingStart
+var phaseEnteredAt = Date()
+var lastFingerprint = ""
+var consecutiveStableSnapshots = 0
+var consecutiveEndedObservations = 0
 // Accumulate every novel StaticText ever seen (streaming chips replace each other in AX).
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
-// --timeout 0 / omitted = wait until ChatGPT finishes (Pro thinking can take hours).
-// --timeout N = wall-clock cap of N seconds only. Never invent a 60m hard cap.
+// --timeout 0 = unlimited (wait until phase complete / captureFailed / kill / lock).
+// --timeout N = optional user wall-clock only. No invented 60m hard cap.
 let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
-// After Stop gone: a few harvest ticks so Copy-message can land the full body.
-let stopGoneHarvestTicks = 6
-// Only when Stop is gone: if body never becomes complete, emit partial (AX failure, not slow think).
-let stallTicksAfterStopGone = 80
 log(
   "wait-loop start timeoutSec=\(timeoutSec) " +
   "deadline=\(deadline.map { "\($0.timeIntervalSince(waitStarted))s" } ?? "none(unlimited)") " +
   "wakeHoldPid=\(wakePid.map(String.init) ?? "none") " +
-  "policy=wait-until-generation-done"
+  "policy=generation-state-machine"
 )
 
 func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, newParts: Int) {
@@ -1083,26 +1292,34 @@ func ingestCaptureTexts(_ texts: [String]) -> (assistant: String, novel: Int, ne
   return (assistant, novel.count, newParts)
 }
 
-// Adaptive poll: snappy while streaming; back off during long Pro thinking so we can wait hours.
-func pollIntervalSec(generating: Bool, stagnantSec: TimeInterval) -> TimeInterval {
-  if !generating { return 2.0 }
-  if stagnantSec < 30 { return 2.5 }
-  if stagnantSec < 120 { return 5.0 }
-  if stagnantSec < 600 { return 8.0 }
-  return 12.0
+func absorbBody(_ text: String, minDelta: Int = 20) {
+  guard text.count > best.count + minDelta else {
+    if text.count > best.count { best = text }
+    return
+  }
+  if !text.isEmpty && !accumulatedSet.contains(text) {
+    accumulatedSet.insert(text)
+    accumulatedParts.append(text)
+  }
+  if text.count >= best.count + 100 {
+    lastSignificantGrowthAt = Date()
+  }
+  best = text
+  sawGrowth = true
+  sawThisTurn = true
+  // Growth invalidates settle fingerprint stability.
+  consecutiveStableSnapshots = 0
 }
 
 while true {
   if let deadline, Date() >= deadline { break }
-  let preStop = findStopButton() != nil
-  let preSend = findSendButton() != nil
-  let preActive = isGenerationActive(stopPresent: preStop, sendPresent: preSend, body: best)
-  let stagnantPre = Date().timeIntervalSince(lastSignificantGrowthAt)
-  Thread.sleep(forTimeInterval: pollIntervalSec(generating: preActive, stagnantSec: stagnantPre))
+
+  let secondsInPhase = Date().timeIntervalSince(phaseEnteredAt)
+  Thread.sleep(forTimeInterval: pollInterval(for: phase, secondsInPhase: secondsInPhase))
   tick += 1
-  // Keep display/idle assertions alive for multi-hour Pro audits.
   _ = WakeHold.shared.ensureAlive()
   let elapsed = Int(Date().timeIntervalSince(waitStarted))
+
   if isScreenLocked() {
     emit([
       "ok": false,
@@ -1112,194 +1329,177 @@ while true {
       "partialChars": best.count,
       "attached": attached,
       "elapsedSec": elapsed,
+      "phase": phase.rawValue,
       "wakeHoldPid": wakePid as Any,
     ], exitCode: 30)
   }
   if let work = bfsFirst(root, pred: { el, r in r.contains("Check") && s(el, kAXTitleAttribute as String) == "Work" }),
      s(work, kAXValueAttribute as String) == "1" {
-    emit(["ok": false, "code": "WORK_FLIP", "attached": attached, "wakeHoldPid": wakePid as Any], exitCode: 20)
+    emit(["ok": false, "code": "WORK_FLIP", "attached": attached, "phase": phase.rawValue, "wakeHoldPid": wakePid as Any], exitCode: 20)
   }
 
-  let stopPresent = findStopButton() != nil
-  let sendPresent = findSendButton() != nil
-  if stopPresent { stopGoneTicks = 0 } else { stopGoneTicks += 1 }
-  let generating = isGenerationActive(stopPresent: stopPresent, sendPresent: sendPresent, body: best)
-  if generating { sawGenerating = true }
-  let stagnantSec = Date().timeIntervalSince(lastSignificantGrowthAt)
-
-  // Periodically scroll while streaming so long replies stay in the AX tree.
+  // Scroll so long streams stay in AX tree.
   if tick % 3 == 0 { scrollTranscript() }
 
-  // Copy harvest: when idle/done; while generating only occasionally (stream still growing in AX).
-  let shouldCopy =
-    !generating ||
-    (tick - lastCopyAttemptTick >= 8 && best.count > 200) ||
-    (generating && stagnantSec >= 45 && tick - lastCopyAttemptTick >= 4)
-  if shouldCopy { lastCopyAttemptTick = tick }
+  var controls = readComposerControls(bodyHint: best)
+  if controls.isGenerationActive { sawThisTurn = true }
+
+  // Harvest policy by phase: aggressive when settling; light while active (stream still in AX).
+  let sinceCopy = Date().timeIntervalSince(lastCopyAt)
+  let shouldCopy: Bool = {
+    switch phase {
+    case .settling, .complete, .captureFailed:
+      return true
+    case .awaitingStart:
+      return sinceCopy >= 4
+    case .active:
+      // Occasional copy while streaming; never used as a finish signal alone.
+      return sinceCopy >= 15 || (best.count > 500 && sinceCopy >= 8)
+    }
+  }()
+  if shouldCopy { lastCopyAt = Date() }
   let deep = deepHarvestReply(includeCopy: shouldCopy)
-  if deep.count > best.count + 20 {
-    log("deepHarvest grew best \(best.count) -> \(deep.count) (copy=\(shouldCopy) gen=\(generating))")
-    if !deep.isEmpty && !accumulatedSet.contains(deep) {
-      accumulatedSet.insert(deep)
-      accumulatedParts.append(deep)
-    }
-    if deep.count >= best.count + 100 {
-      lastSignificantGrowthAt = Date()
-    }
-    best = deep
-    sawGrowth = true
-    stable = 0
-    idleDoneStableTicks = 0
-  }
+  absorbBody(deep, minDelta: 20)
 
   let texts = allCaptureTexts()
   if let token = exactToken {
     let hits = texts.filter {
       $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
     }
-    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count) stop=\(stopPresent) gen=\(generating)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
-      if a == best { stable += 1 } else { stable = 0; best = a }
-      if stable >= 2 { _ = finishIfReady(best) }
-      continue
+      absorbBody(a, minDelta: 0)
+      sawThisTurn = true
     }
   }
-
   let ing = ingestCaptureTexts(texts)
-  var assistant = ing.assistant
-  if deep.count > assistant.count { assistant = deep }
-  if best.count > assistant.count { assistant = best }
+  absorbBody(ing.assistant, minDelta: 5)
+
+  // Re-read controls after harvest (chrome may appear in body).
+  controls = readComposerControls(bodyHint: best)
+  if controls.isGenerationActive { sawThisTurn = true }
+
+  let fp = bodyFingerprint(best)
+  if fp == lastFingerprint && !best.isEmpty {
+    consecutiveStableSnapshots += 1
+  } else {
+    consecutiveStableSnapshots = best.isEmpty ? 0 : 1
+    lastFingerprint = fp
+  }
+  if controls.isGenerationEnded {
+    consecutiveEndedObservations += 1
+  } else {
+    consecutiveEndedObservations = 0
+  }
+
+  let sample = GenerationSample(
+    controls: controls,
+    body: best,
+    sawThisTurn: sawThisTurn,
+    bodyFingerprint: fp,
+    consecutiveStableSnapshots: consecutiveStableSnapshots,
+    consecutiveEndedObservations: consecutiveEndedObservations
+  )
+  let newPhase = classifyGenerationPhase(sample, exactToken: exactToken)
+  if newPhase != phase {
+    log("phase \(phase.rawValue) → \(newPhase.rawValue) elapsed=\(elapsed)s best=\(best.count) stop=\(controls.stop) send=\(controls.send)")
+    phase = newPhase
+    phaseEnteredAt = Date()
+  }
 
   log(
-    "tick=\(tick) elapsed=\(elapsed)s novel=\(ing.novel) newParts=\(ing.newParts) " +
-    "chars=\(assistant.count) best=\(best.count) stable=\(stable) " +
-    "stop=\(stopPresent) send=\(sendPresent) gen=\(generating) stopGone=\(stopGoneTicks) " +
-    "stagnant=\(Int(stagnantSec))s sawGrowth=\(sawGrowth)"
+    "tick=\(tick) elapsed=\(elapsed)s phase=\(phase.rawValue) " +
+    "chars=\(best.count) stableSnap=\(consecutiveStableSnapshots) endedObs=\(consecutiveEndedObservations) " +
+    "stop=\(controls.stop) send=\(controls.send) chrome=\(controls.loadingChrome) " +
+    "sawTurn=\(sawThisTurn) novel=\(ing.novel) newParts=\(ing.newParts)"
   )
 
-  if tick % 4 == 0, best.count > 0 || generating {
+  if tick % 3 == 0 {
     _ = stageResultForDs([
       "ok": false,
-      "status": generating ? "waiting-generation" : "waiting",
+      "status": "waiting",
+      "phase": phase.rawValue,
       "partialChars": best.count,
       "elapsedSec": elapsed,
       "attached": attached,
-      "stopPresent": stopPresent,
-      "sendPresent": sendPresent,
-      "generationActive": generating,
+      "stopPresent": controls.stop,
+      "sendPresent": controls.send,
+      "generationActive": controls.isGenerationActive,
     ], responseText: best.isEmpty ? nil : best)
   }
 
-  if assistant.count > best.count + 5 {
-    if assistant.count >= best.count + 100 {
-      lastSignificantGrowthAt = Date()
+  switch phase {
+  case .awaitingStart, .active:
+    // Unbounded wait. Pro thinking for hours stays in .active.
+    if phase == .active, elapsed > 0, elapsed % 300 < 15 {
+      log("active generation after \(elapsed)s best=\(best.count) — keep waiting (no force finish)")
     }
-    sawGrowth = true
-    best = assistant
-    stable = 0
-    idleDoneStableTicks = 0
-    lastSig = "\(assistant.count)"
-  } else {
-    let sig = "\(assistant.count)"
-    if sig == lastSig && assistant.count > 20 {
-      stable += 1
-      if assistant.count > best.count { best = assistant }
-    } else if assistant.count >= best.count && !assistant.isEmpty {
-      best = assistant
-      lastSig = sig
-      stable = sawGrowth ? 1 : 0
+    continue
+
+  case .settling:
+    // Deep harvest every settle tick until complete or captureFailed.
+    let h = deepHarvestReply(includeCopy: true)
+    absorbBody(h, minDelta: 10)
+    continue
+
+  case .complete:
+    let note: String
+    if controls.stop && controls.send {
+      note = "settled-sticky-stop-send-ready"
+    } else if exactToken != nil {
+      note = "settled-exact-token"
     } else {
-      if assistant.isEmpty || assistant.count + 80 < best.count { stable = 0 }
-      lastSig = sig
+      note = "settled-generation-ended"
     }
-  }
-
-  // --- Still thinking / streaming (including multi-hour Pro): never force complete ---
-  if generating {
-    idleDoneStableTicks = 0
-    if elapsed > 0 && elapsed % 300 < 15 {
-      log("still generating after \(elapsed)s best=\(best.count) stop=\(stopPresent) send=\(sendPresent) — keep waiting")
+    // Final safety: refuse incomplete (classifier should already enforce).
+    if !bodyAcceptableForFinish(best, exactToken: exactToken) {
+      log("complete phase but body not acceptable — revert to settling")
+      phase = .settling
+      phaseEnteredAt = Date()
+      consecutiveStableSnapshots = 0
+      continue
     }
-    continue
-  }
+    emitComplete(best, finishNote: note)
 
-  // Do not finish on a pre-send leftover reply — wait until this turn starts generating.
-  if !sawGenerating && !sawGrowth {
-    idleDoneStableTicks = 0
-    if elapsed > 0 && elapsed % 60 < 15 {
-      log("waiting for generation to start after send elapsed=\(elapsed)s")
-    }
-    continue
-  }
-
-  // --- Generation idle: Stop gone and/or Send back. Harvest fully, then finish. ---
-  idleDoneStableTicks += 1
-  if idleDoneStableTicks == 1 || idleDoneStableTicks % 3 == 0 || stopGoneTicks == stopGoneHarvestTicks {
+  case .captureFailed:
     let h = deepHarvestReply(includeCopy: true)
-    if h.count > best.count {
-      if h.count >= best.count + 100 { lastSignificantGrowthAt = Date() }
-      best = h
-      sawGrowth = true
-      stable = 0
-      idleDoneStableTicks = 1
-      log("idle harvest chars=\(h.count) stop=\(stopPresent) send=\(sendPresent)")
+    absorbBody(h, minDelta: 10)
+    // One more classification pass in case harvest fixed it.
+    let retry = GenerationSample(
+      controls: readComposerControls(bodyHint: best),
+      body: best,
+      sawThisTurn: sawThisTurn,
+      bodyFingerprint: bodyFingerprint(best),
+      consecutiveStableSnapshots: max(consecutiveStableSnapshots, 3),
+      consecutiveEndedObservations: max(consecutiveEndedObservations, 5)
+    )
+    if classifyGenerationPhase(retry, exactToken: exactToken) == .complete {
+      emitComplete(best, finishNote: "settled-after-capture-retry")
     }
-  }
-
-  // Sticky Stop (Stop still listed) but Send is back + complete body: model finished.
-  let stickyOk = stopPresent && sendPresent && !isIncompleteZipReply(best) && !hasLoadingChrome(best)
-  if stickyOk && idleDoneStableTicks >= 3 {
-    _ = finishIfReady(best, allowStickyStop: true, finishNote: "stop-sticky-send-ready")
-  }
-
-  // Normal path: Stop gone after a few harvest ticks.
-  if !stopPresent && stopGoneTicks >= stopGoneHarvestTicks {
-    if stable >= 2 || idleDoneStableTicks >= 3 {
-      _ = finishIfReady(best)
-    }
-    if sawGrowth && stable >= 3 && best.count >= 300 {
-      _ = finishIfReady(best)
-    }
-  }
-
-  // Stop gone but body never became a complete audit → honest partial (AX/capture failure).
-  // Does NOT fire while generating (Pro think hours).
-  if !stopPresent && sawGrowth && stable >= stallTicksAfterStopGone && best.count >= 40 {
-    log("stall backstop: Stop gone + stable=\(stable) — final deep harvest")
-    let h = deepHarvestReply(includeCopy: true)
-    if h.count > best.count { best = h }
-    if finishIfReady(best) { /* Never */ }
     emitStablePartial(
       best,
       code: "AX_CAPTURE_STALL",
-      message: "ChatGPT finished (Stop gone) but captured body did not pass complete-audit checks (chars=\(best.count)). Returning best capture after Copy-message harvest.",
+      message: "Generation ended (Send ready / Stop cleared) but captured body never passed complete-audit checks (chars=\(best.count)). Returning best capture after Copy-message harvest.",
       elapsed: elapsed
     )
-  }
-
-  if tick >= 40 && best.count < 40 && !sawGrowth {
-    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count) stop=\(stopPresent) gen=\(generating)")
   }
 }
 
 // Only reached when user set --timeout N and wall clock expired.
 let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
-log("user timeout reached elapsed=\(elapsedFinal)s best=\(best.count) timeoutSec=\(timeoutSec) — final harvest")
-if !isGenerationActive(
-  stopPresent: findStopButton() != nil,
-  sendPresent: findSendButton() != nil,
-  body: best
-) {
+log("user timeout reached elapsed=\(elapsedFinal)s best=\(best.count) phase=\(phase.rawValue) timeoutSec=\(timeoutSec)")
+let finalControls = readComposerControls(bodyHint: best)
+if !finalControls.isGenerationActive {
   let h = deepHarvestReply(includeCopy: true)
-  if h.count > best.count { best = h }
-  if finishIfReady(best) { /* Never */ }
-  if finishIfReady(best, allowStickyStop: true, finishNote: "timeout-sticky") { /* Never */ }
+  absorbBody(h, minDelta: 10)
+  if bodyAcceptableForFinish(best, exactToken: exactToken) && sawThisTurn {
+    emitComplete(best, finishNote: "user-timeout-settled-complete")
+  }
 }
 if best.count >= 40 {
   emitStablePartial(
     best,
     code: "TIMEOUT",
-    message: "User --timeout \(Int(timeoutSec))s reached while waiting. Returning best capture (chars=\(best.count)). Use --timeout 0 to wait until ChatGPT finishes (hours OK).",
+    message: "User --timeout \(Int(timeoutSec))s reached (phase=\(phase.rawValue)). Returning best capture (chars=\(best.count)). Use --timeout 0 to wait until generation ends (hours OK).",
     elapsed: elapsedFinal
   )
 }
@@ -1313,5 +1513,6 @@ emit([
   "partial": best,
   "partialChars": best.count,
   "elapsedSec": elapsedFinal,
+  "phase": phase.rawValue,
   "wakeHoldPid": wakePid as Any,
 ], exitCode: 1)

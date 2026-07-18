@@ -44,12 +44,23 @@ scripts/run_full_codebase_audit.sh      # one-shot full-tree entry
 | Existing zip | `swift …/psst_zip_upload.swift --zip PATH --timeout 0 -- "…"` |
 | Same chat follow-up | add `--no-new-chat` |
 
-`--timeout 0` = **wait until ChatGPT finishes** (no wall-clock cap — Pro thinking
-can take **hours**). The zip helper never treats “no body growth for a few minutes”
-as done while **Stop** is active without **Send**. It **scrolls**, **accumulates**
-streaming AX chips, and after generation ends (Stop gone / Send back) uses **Copy
-message** harvest so full audits reach `.ds/psst-gpt/last-response.md`.
+`--timeout 0` = **wait until generation ends** (no wall-clock cap — Pro thinking
+can take **hours**). Finish detection is a **signal-driven state machine**, not
+timers:
+
+| Phase | Meaning | Exit? |
+|-------|---------|-------|
+| `awaitingStart` | After send; no Stop/growth for this turn yet | No |
+| `active` | Stop without Send, or loading chrome (thinking/streaming) | **Never** (hours OK) |
+| `settling` | UI shows ended (Send ready / Stop gone); deep harvest + fingerprint stability | No until settled |
+| `complete` | Acceptable body + stable harvests | Yes → stage full reply |
+| `captureFailed` | Generation ended but body never passed complete checks | Yes → honest partial |
+
+Never treats “no body growth” as done while **active**. After end: **Copy message**
+harvest so full audits reach `.ds/psst-gpt/last-response.md`.
 `--timeout N` (N>0) is an optional user wall-clock cap only.
+
+Selfcheck: `bash …/selfcheck_generation_policy.sh` (pure phase cases, no ChatGPT).
 
 ### Full-codebase audit (default for “zip this full codebase…”)
 
