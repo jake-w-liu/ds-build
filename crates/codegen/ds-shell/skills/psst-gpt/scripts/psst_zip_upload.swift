@@ -759,6 +759,46 @@ func finishIfReady(_ text: String) -> Bool {
   return true
 }
 
+/// Never hang forever: emit whatever AX captured after a long stall (honest partial).
+func emitStablePartial(_ text: String, code: String, message: String, elapsed: Int) -> Never {
+  pb.clearContents()
+  if let oldString { pb.setString(oldString, forType: .string) }
+  let respPath = zipURL.deletingLastPathComponent().appendingPathComponent("chatgpt-zip-response.md").path
+  try? text.write(toFile: respPath, atomically: true, encoding: .utf8)
+  log("emitStablePartial code=\(code) chars=\(text.count) elapsed=\(elapsed)s")
+  _ = stageResultForDs([
+    "ok": false,
+    "status": "partial",
+    "code": code,
+    "partial": text,
+    "partialChars": text.count,
+    "attached": true,
+    "elapsedSec": elapsed,
+  ], responseText: text)
+  emit([
+    "ok": false,
+    "code": code,
+    "status": "partial",
+    "message": message,
+    "mode": "chat",
+    "workOn": false,
+    "attached": true,
+    "attachLabels": Array(labels.prefix(5)),
+    "zipPath": zipPath as Any,
+    "responsePath": respPath,
+    "partial": text,
+    "partialChars": text.count,
+    "finalDeliveryText": text,
+    "mustReturnFinalDelivery": true,
+    "mustReturnVerbatim": true,
+    "method": "clipboard-file-paste",
+    "zipBytes": (try? FileManager.default.attributesOfItem(atPath: zipPath)[.size] as? NSNumber)?.intValue as Any,
+    "wakeHoldPid": wakePid as Any,
+    "elapsedSec": elapsed,
+    "responseChars": text.count,
+  ], exitCode: 1)
+}
+
 var stable = 0
 var lastSig = ""
 var best = ""
@@ -768,9 +808,16 @@ var tick = 0
 var accumulatedParts: [String] = []
 var accumulatedSet = Set<String>()
 let waitStarted = Date()
-let deadline: Date? = timeoutSec > 0 ? Date().addingTimeInterval(timeoutSec) : nil
-log("wait-loop start timeoutSec=\(timeoutSec) (0=indefinite) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
-while deadline == nil || Date() < deadline! {
+// --timeout 0 means "long audit", not "hang forever": hard cap 45 min.
+let hardCapSec: Double = 45 * 60
+let effectiveTimeoutSec: Double = timeoutSec > 0 ? timeoutSec : hardCapSec
+let deadline = Date().addingTimeInterval(effectiveTimeoutSec)
+// After Stop disappears and body stops growing: exit (~2 min at 2.5s/tick).
+let stallTicksStopGone = 48
+// Even if Stop flickers: no growth for ~5 min → exit with partial.
+let stallTicksNoGrowth = 120
+log("wait-loop start timeoutSec=\(timeoutSec) effectiveTimeoutSec=\(effectiveTimeoutSec) hardCap=\(timeoutSec <= 0) wakeHoldPid=\(wakePid.map(String.init) ?? "none")")
+while Date() < deadline {
   Thread.sleep(forTimeInterval: 2.5)
   tick += 1
   let elapsed = Int(Date().timeIntervalSince(waitStarted))
@@ -791,12 +838,13 @@ while deadline == nil || Date() < deadline! {
     emit(["ok": false, "code": "WORK_FLIP", "attached": attached, "wakeHoldPid": wakePid as Any], exitCode: 20)
   }
   let texts = allStaticTexts()
+  let stopPresent = findStopButton() != nil
 
   if let token = exactToken {
     let hits = texts.filter {
       $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
     }
-    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count)")
+    log("tick=\(tick) elapsed=\(elapsed)s tokenHits=\(hits.count) bestChars=\(best.count) stop=\(stopPresent)")
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       if a == best { stable += 1 } else { stable = 0; best = a }
       if stable >= 2 { _ = finishIfReady(best) }
@@ -806,12 +854,20 @@ while deadline == nil || Date() < deadline! {
 
   // Diff vs baseline: new non-chrome static texts are the assistant body
   let novel = texts.filter { !baseline2.contains($0) && !prompt.contains($0) }
-  // Drop tiny fragments that match prompt words only
+  // Keep outline chips ChatGPT streams as short StaticTexts ("dependencies,", "H-1.").
+  // Only drop pure noise crumbs — not list items / paths / trailing punctuation.
   let filtered = novel.filter { t in
-    if t.count < 4 { return false }
-    if t.count < 12 && !t.contains(" ") { return false }
-    if t.lowercased().hasPrefix("audit only") { return false }
-    if t.lowercased() == "audit rust monorepo" { return false }
+    let low = t.lowercased()
+    if t.count < 2 { return false }
+    if low.hasPrefix("audit only") { return false }
+    if low == "audit rust monorepo" || low == "audit request rust repo" { return false }
+    if t.count < 12 && !t.contains(" ") {
+      let outlineish =
+        t.hasSuffix(",") || t.hasSuffix(":") || t.hasSuffix(".") || t.hasSuffix(";") ||
+        t.hasSuffix("-") || t.contains("/") || t.range(of: #"^\d+[\.\)]"#, options: .regularExpression) != nil ||
+        t.range(of: #"^[A-Z]-\d+"#, options: .regularExpression) != nil
+      if !outlineish { return false }
+    }
     return true
   }
   var newParts = 0
@@ -835,7 +891,7 @@ while deadline == nil || Date() < deadline! {
   let live = filtered.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   let accumulated = accumulatedParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
   let assistant = accumulated.count >= live.count ? accumulated : live
-  log("tick=\(tick) elapsed=\(elapsed)s novel=\(filtered.count) newParts=\(newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) sawGrowth=\(sawGrowth)")
+  log("tick=\(tick) elapsed=\(elapsed)s novel=\(novel.count) kept=\(filtered.count) newParts=\(newParts) chars=\(assistant.count) best=\(best.count) stable=\(stable) stop=\(stopPresent) sawGrowth=\(sawGrowth)")
   // Stage partial progress so DS can observe wait (non-final)
   if tick % 4 == 0, best.count > 0 {
     _ = stageResultForDs([
@@ -844,6 +900,7 @@ while deadline == nil || Date() < deadline! {
       "partialChars": best.count,
       "elapsedSec": elapsed,
       "attached": attached,
+      "stopPresent": stopPresent,
     ], responseText: best)
   }
   // Immediate accept: clear Chat/Work refusal or substantive reply (word-boundary, not "architectural"⊃"architecture")
@@ -858,12 +915,13 @@ while deadline == nil || Date() < deadline! {
     hasWB("risk") || hasWB("risks") || hasWB("finding") || hasWB("findings") ||
     assistant.contains("##") || hasWB("severity") || hasWB("recommend") || hasWB("recommendation")
   )
-  if looksComplete && stable >= 3 {
+  if looksComplete && stable >= 3 && !stopPresent {
     if assistant == best || assistant.count >= best.count {
       _ = finishIfReady(assistant.count >= best.count ? assistant : best)
     }
   }
-  if assistant.count > best.count + 20 {
+  // Growth: any meaningful increase (was +20 — missed steady chip accumulation)
+  if assistant.count > best.count + 5 {
     sawGrowth = true
     best = assistant
     stable = 0
@@ -871,9 +929,9 @@ while deadline == nil || Date() < deadline! {
     continue
   }
   let sig = "\(assistant.count)"
-  if sig == lastSig && assistant.count > 40 {
+  if sig == lastSig && assistant.count > 20 {
     stable += 1
-    if !assistant.isEmpty { best = assistant }
+    if assistant.count > best.count { best = assistant }
   } else if assistant.count >= best.count && !assistant.isEmpty {
     best = assistant
     lastSig = sig
@@ -887,26 +945,57 @@ while deadline == nil || Date() < deadline! {
     lastSig = sig
   }
   // Long audits: require growth then stability; refuse short fragment bodies
-  if sawGrowth && stable >= 4 && best.count >= 300 {
+  if sawGrowth && stable >= 4 && best.count >= 300 && !stopPresent {
     _ = finishIfReady(best)
   }
   // Stabilized substantive replies (still pass incomplete filter)
-  if stable >= 5 && best.count >= 300 {
+  if stable >= 5 && best.count >= 300 && !stopPresent {
     _ = finishIfReady(best)
   }
   // Keyword-complete body that stabilized
-  if looksComplete && stable >= 3 && best.count >= 300 && assistant.count >= best.count {
+  if looksComplete && stable >= 3 && best.count >= 300 && assistant.count >= best.count && !stopPresent {
     _ = finishIfReady(best)
   }
-  // No growth for a long time after a tiny chip body: keep waiting (do not finish)
-  if tick >= 40 && best.count < 120 && !sawGrowth {
-    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count)")
+
+  // --- Stall backstops (prevent infinite hang when AX never reaches 300 chars) ---
+  // Generation finished (Stop gone) and body frozen: emit complete if possible, else partial.
+  if !stopPresent && sawGrowth && stable >= stallTicksStopGone && best.count >= 40 {
+    log("stall backstop: Stop gone + stable=\(stable) best=\(best.count) — finalizing")
+    if finishIfReady(best) { /* Never */ }
+    emitStablePartial(
+      best,
+      code: "AX_CAPTURE_STALL",
+      message: "ChatGPT finished generating (Stop gone) but AX capture stayed below complete-audit threshold (chars=\(best.count)). Returning partial capture.",
+      elapsed: elapsed
+    )
+  }
+  // Even with Stop flicker: no growth for ~5 min with some body → partial (do not hang 45 min).
+  if sawGrowth && stable >= stallTicksNoGrowth && best.count >= 40 {
+    log("stall backstop: no-growth stable=\(stable) best=\(best.count) stop=\(stopPresent)")
+    if !stopPresent, finishIfReady(best) { /* Never */ }
+    emitStablePartial(
+      best,
+      code: "AX_CAPTURE_STALL",
+      message: "No AX body growth for \(stable) ticks (~\(stable * 25 / 10)s). Returning partial capture (chars=\(best.count)).",
+      elapsed: elapsed
+    )
+  }
+  if tick >= 40 && best.count < 40 && !sawGrowth {
+    log("still waiting: only chrome/title chips after \(elapsed)s best=\(best.count) stop=\(stopPresent)")
   }
 }
+// Hard deadline (effective timeout, including --timeout 0 hard cap)
 pb.clearContents()
 if let oldString { pb.setString(oldString, forType: .string) }
-if best.count >= 300, !isIncompleteZipReply(best) {
-  _ = finishIfReady(best)
+let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
+if findStopButton() == nil, finishIfReady(best) { /* Never */ }
+if best.count >= 40 {
+  emitStablePartial(
+    best,
+    code: "TIMEOUT",
+    message: "Wait deadline reached (effectiveTimeoutSec=\(Int(effectiveTimeoutSec))). Returning partial capture (chars=\(best.count)).",
+    elapsed: elapsedFinal
+  )
 }
 emit([
   "ok": false,
@@ -914,6 +1003,6 @@ emit([
   "attached": attached,
   "partial": best,
   "partialChars": best.count,
-  "elapsedSec": Int(Date().timeIntervalSince(waitStarted)),
+  "elapsedSec": elapsedFinal,
   "wakeHoldPid": wakePid as Any,
 ], exitCode: 1)
