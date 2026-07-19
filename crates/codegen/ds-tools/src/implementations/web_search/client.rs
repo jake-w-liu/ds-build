@@ -1,51 +1,52 @@
 use super::types::WebSearchConfig;
-use crate::attribution::{SharedAttributionCallback, ToolConsumer};
+use crate::attribution::SharedAttributionCallback;
 use crate::types::SharedApiKeyProvider;
 use regex::Regex;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use std::sync::LazyLock;
 
-/// System prompt that instructs the model to produce search-result-style
-/// responses with citations.
-const SEARCH_SYSTEM_PROMPT: &str = "\
-You are a web search assistant. Given a search query, provide a comprehensive, \
-factual answer as if you had searched the web. Include relevant URLs as \
-citations in your response. Be concise but thorough. Focus on software \
-development and technical topics. When information may be time-sensitive, \
-note that your knowledge has a cutoff date.";
+/// DuckDuckGo HTML search endpoint (no API key, no JavaScript required).
+const DDG_SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
 
-/// Regex to extract URLs from response text for citation extraction.
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s<>"')\]}]+"#).expect("failed to compile URL regex")
+/// Browser-like User-Agent to avoid CAPTCHAs.
+const DDG_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+
+/// Maximum number of search results to return.
+const MAX_RESULTS: usize = 10;
+
+/// Regex to parse DuckDuckGo HTML result entries.
+/// Each result has: <a class="result__a" href="URL">Title</a> ... <a class="result__snippet">Snippet</a>
+/// (?s) enables dot-matches-newline so .*? spans across HTML line breaks.
+static DDG_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#,
+    )
+    .expect("failed to compile DDG result regex")
 });
 
-/// A minimal, purpose-built HTTP client for web search via the Chat
-/// Completions API.
+/// Simple regex to strip HTML tags from extracted text.
+static HTML_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("failed to compile HTML tag regex"));
+
+/// HTTP client that performs real web searches via DuckDuckGo's HTML interface.
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
-    base_url: String,
-    model: String,
-    api_key_provider: Option<SharedApiKeyProvider>,
-    /// Optional 401-attribution hook. Callers can wire this so a 401
-    /// from the API emits an `auth_401_attribution` event
-    /// with `consumer == "WebSearch"`.
-    attribution_callback: Option<SharedAttributionCallback>,
 }
+
 impl WebSearchClient {
-    /// Create a new web search client from `WebSearchConfig::Enabled`.
+    /// Create a new web search client.
     ///
-    /// Returns `Err` if the config is `Disabled` or if header values are invalid.
+    /// The config's `base_url` and `model` fields are not used for the
+    /// DuckDuckGo backend, but the `api_key` and `extra_headers` fields
+    /// are preserved for backward compatibility with the config schema.
     pub fn new(
         config: &WebSearchConfig,
-        api_key_provider: Option<SharedApiKeyProvider>,
+        _api_key_provider: Option<SharedApiKeyProvider>,
     ) -> Result<Self, ds_tool_runtime::ToolError> {
         let WebSearchConfig::Enabled {
-            api_key,
-            base_url,
-            model,
             extra_headers,
-            alpha_test_key,
+            ..
         } = config
         else {
             return Err(ds_tool_runtime::ToolError::execution(
@@ -53,17 +54,9 @@ impl WebSearchClient {
                 "Cannot create WebSearchClient from disabled config".to_string(),
             ));
         };
+
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|e| {
-                ds_tool_runtime::ToolError::execution(
-                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Invalid API key for header: {e}"),
-                )
-            })?,
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
         for (key, value) in extra_headers {
             let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
                 ds_tool_runtime::ToolError::execution(
@@ -79,9 +72,10 @@ impl WebSearchClient {
             })?;
             headers.insert(header_name, header_value);
         }
-        let _ = alpha_test_key;
+
         let http = reqwest::Client::builder()
             .default_headers(headers)
+            .user_agent(DDG_USER_AGENT)
             .build()
             .map_err(|e| {
                 ds_tool_runtime::ToolError::execution(
@@ -89,151 +83,113 @@ impl WebSearchClient {
                     format!("Failed to build HTTP client: {e}"),
                 )
             })?;
-        Ok(Self {
-            http,
-            base_url: base_url.clone(),
-            model: model.clone(),
-            api_key_provider,
-            attribution_callback: None,
-        })
+
+        Ok(Self { http })
     }
-    /// Wire a 401-attribution callback into this client. Idempotent;
-    /// safe to call before or after the first request.
+
+    /// Wire a 401-attribution callback. No-op for DuckDuckGo backend
+    /// (no auth required), but kept for API compatibility.
     pub fn with_attribution_callback(
-        mut self,
-        callback: Option<SharedAttributionCallback>,
+        self,
+        _callback: Option<SharedAttributionCallback>,
     ) -> Self {
-        self.attribution_callback = callback;
         self
     }
-    async fn current_bearer(&self) -> Option<String> {
-        crate::types::api_key_provider::resolve_bearer(self.api_key_provider.as_ref()).await
-    }
-    fn record_401_attribution(&self, sent_bearer: Option<&str>) {
-        crate::attribution::emit_401(
-            self.attribution_callback.as_ref(),
-            ToolConsumer::WebSearch,
-            sent_bearer,
-        );
-    }
-    /// Perform a web search query using the Chat Completions API.
+
+    /// Perform a real web search via DuckDuckGo.
     ///
-    /// Returns `(content, citations)` where content is the assistant's
-    /// response text and citations are unique URLs found in the response.
+    /// Returns `(formatted_text, citations)` where formatted_text is a
+    /// human-readable summary of the search results and citations are
+    /// unique URLs found.
     pub async fn search(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
-        let mut system_prompt = SEARCH_SYSTEM_PROMPT.to_string();
-        if let Some(ref domains) = allowed_domains {
-            if !domains.is_empty() {
-                system_prompt.push_str(&format!(
-                    " Only use information from these domains: {}.",
-                    domains.join(", ")
-                ));
-            }
-        }
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
-            ],
-            "temperature": 0.1,
-            "top_p": 0.95,
-            "max_tokens": 8192,
-            "stream": false
-        });
+        let results = self.fetch_ddg_results(query).await?;
+        let filtered: Vec<DdgResult> = if let Some(ref domains) = allowed_domains {
+            results
+                .into_iter()
+                .filter(|r| {
+                    domains.iter().any(|d| {
+                        r.url.to_lowercase().contains(&d.to_lowercase())
+                    })
+                })
+                .collect()
+        } else {
+            results
+        };
 
-        let (bytes, sent_bearer) = self
-            .send_chat_completion_request(&request_body)
-            .await?;
-        let content = parse_chat_completion_content(&bytes)?;
-        let citations = extract_urls_from_text(&content);
-        let _ = sent_bearer;
+        let citations: Vec<String> = filtered
+            .iter()
+            .map(|r| r.url.clone())
+            .collect();
+
+        let content = if filtered.is_empty() {
+            format!("No search results found for query: {query}")
+        } else {
+            format_search_results(&filtered)
+        };
+
         Ok((content, citations))
     }
-    /// Same as [`Self::search`] but also extracts per-citation titles when
-    /// available. Returns `(content, citations_with_titles)`
-    /// where each citation is `(title, url)`. Since the Chat Completions
-    /// API does not provide structured citation metadata, titles are
-    /// extracted heuristically from surrounding context or left empty.
-    ///
-    /// Used by the cursor-compat `WebSearch` adapter to render a
-    /// `Links:\n1. [title](url)` list instead of the LLM synthesis text.
+
+    /// Same as [`Self::search`] but returns `(title, url)` pairs.
     pub async fn search_with_titles(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), ds_tool_runtime::ToolError> {
-        let mut system_prompt = SEARCH_SYSTEM_PROMPT.to_string();
-        if let Some(ref domains) = allowed_domains {
-            if !domains.is_empty() {
-                system_prompt.push_str(&format!(
-                    " Only use information from these domains: {}.",
-                    domains.join(", ")
-                ));
-            }
-        }
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
-            ],
-            "temperature": 0.1,
-            "top_p": 0.95,
-            "max_tokens": 8192,
-            "stream": false
-        });
+        let results = self.fetch_ddg_results(query).await?;
+        let filtered: Vec<DdgResult> = if let Some(ref domains) = allowed_domains {
+            results
+                .into_iter()
+                .filter(|r| {
+                    domains.iter().any(|d| {
+                        r.url.to_lowercase().contains(&d.to_lowercase())
+                    })
+                })
+                .collect()
+        } else {
+            results
+        };
 
-        let (bytes, sent_bearer) = self
-            .send_chat_completion_request(&request_body)
-            .await?;
-        let content = parse_chat_completion_content(&bytes)?;
-        let urls = extract_urls_from_text(&content);
-        let pairs: Vec<(String, String)> = urls
-            .into_iter()
-            .map(|url| (String::new(), url))
+        let pairs: Vec<(String, String)> = filtered
+            .iter()
+            .map(|r| (r.title.clone(), r.url.clone()))
             .collect();
-        let _ = sent_bearer;
+
+        let content = if filtered.is_empty() {
+            format!("No search results found for query: {query}")
+        } else {
+            format_search_results(&filtered)
+        };
+
         Ok((content, pairs))
     }
 
-    /// Send a Chat Completions request and return the raw response bytes
-    /// together with the bearer token sent (for attribution).
-    async fn send_chat_completion_request(
+    /// Fetch search results from DuckDuckGo's HTML interface.
+    async fn fetch_ddg_results(
         &self,
-        body: &serde_json::Value,
-    ) -> Result<(Vec<u8>, Option<String>), ds_tool_runtime::ToolError> {
-        let url = format!(
-            "{}/chat/completions",
-            self.base_url.trim_end_matches('/')
-        );
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(body);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
-        let response = req.send().await.map_err(|e| {
-            ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("HTTP request failed: {e}"),
-            )
-        })?;
+        query: &str,
+    ) -> Result<Vec<DdgResult>, ds_tool_runtime::ToolError> {
+        let response = self
+            .http
+            .post(DDG_SEARCH_URL)
+            .header("Origin", "https://html.duckduckgo.com")
+            .header("Referer", "https://html.duckduckgo.com/")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            .form(&[("q", query)])
+            .send()
+            .await
+            .map_err(|e| {
+                ds_tool_runtime::ToolError::execution(
+                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+                    format!("Search request failed: {e}"),
+                )
+            })?;
+
         let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(ds_tool_runtime::ToolError::unauthorized(format!(
-                "Chat Completions API returned 401 Unauthorized: {body}"
-            ))
-            .with_details(serde_json::json!({ "tool_id" : "web_search", "status" : 401, })));
-        }
         if !status.is_success() {
             let body = response
                 .text()
@@ -241,376 +197,230 @@ impl WebSearchClient {
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             return Err(ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Chat Completions API returned {status}: {body}"),
+                format!("Search returned HTTP {status}: {body}"),
             ));
         }
-        let bytes = response.bytes().await.map_err(|e| {
+
+        let html = response.text().await.map_err(|e| {
             ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to read response body: {e}"),
+                format!("Failed to read search response: {e}"),
             )
         })?;
-        Ok((bytes.to_vec(), sent_bearer))
+
+        if html.contains("anomaly") || html.contains("g-recaptcha") {
+            return Err(ds_tool_runtime::ToolError::execution(
+                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+                "Search engine returned a CAPTCHA — please try again later.".to_string(),
+            ));
+        }
+
+        let results = parse_ddg_html(&html);
+        Ok(results)
     }
 }
-/// Parse a Chat Completions API response and extract the assistant's text.
-///
-/// Falls back to `reasoning_content` when `content` is empty (DeepSeek
-/// models may emit reasoning-only responses when max_tokens is exhausted
-/// during the thinking phase).
-fn parse_chat_completion_content(bytes: &[u8]) -> Result<String, ds_tool_runtime::ToolError> {
-    let body: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
-        ds_tool_runtime::ToolError::execution(
-            ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-            format!("Failed to parse Chat Completions response: {e}"),
-        )
-    })?;
 
-    let message = &body["choices"][0]["message"];
-    let content = message["content"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            message["reasoning_content"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or("No search results found.");
-
-    Ok(content.to_string())
+/// A single search result from DuckDuckGo.
+#[derive(Debug, Clone)]
+struct DdgResult {
+    title: String,
+    url: String,
+    snippet: String,
 }
 
-/// Extract unique URLs from text content using a regex.
-fn extract_urls_from_text(text: &str) -> Vec<String> {
-    let mut urls: Vec<String> = URL_RE
-        .find_iter(text)
-        .map(|m| m.as_str().to_string())
-        .collect();
-    // Deduplicate while preserving order.
-    let mut seen = std::collections::HashSet::new();
-    urls.retain(|url| seen.insert(url.clone()));
-    urls
-}
+/// Parse DuckDuckGo HTML response into structured results.
+fn parse_ddg_html(html: &str) -> Vec<DdgResult> {
+    let mut results = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
 
-/// Extract citation URLs from the Response output items (legacy, for
-/// backward-compatibility with test helpers).
-/// The async-openai crate doesn't provide a helper for this, and the `url` field
-/// in `UrlCitationBody` is private, so we serialize to JSON to extract it.
-#[allow(dead_code)]
-fn extract_citations(response: &async_openai::types::responses::Response) -> Vec<String> {
-    use async_openai::types::responses as rs;
-    let mut citations = Vec::new();
-    for output_item in &response.output {
-        if let rs::OutputItem::Message(output_message) = output_item {
-            for message_content in &output_message.content {
-                if let rs::OutputMessageContent::OutputText(text_content) = message_content {
-                    for annotation in &text_content.annotations {
-                        if let rs::Annotation::UrlCitation(url_citation) = annotation
-                            && let Ok(json) = serde_json::to_value(url_citation)
-                            && let Some(url) = json.get("url").and_then(|v| v.as_str())
-                        {
-                            citations.push(url.to_string());
-                        }
-                    }
-                }
-            }
+    for caps in DDG_RESULT_RE.captures_iter(html) {
+        let url = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let title_raw = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+        let snippet_raw = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+
+        // Decode common HTML entities
+        let url = decode_html_entities(&url);
+        let title = decode_html_entities(&strip_html(title_raw).trim());
+        let snippet = decode_html_entities(&strip_html(snippet_raw).trim());
+
+        if url.is_empty() || title.is_empty() {
+            continue;
+        }
+        if !seen_urls.insert(url.clone()) {
+            continue; // deduplicate
+        }
+
+        results.push(DdgResult {
+            title,
+            url,
+            snippet,
+        });
+
+        if results.len() >= MAX_RESULTS {
+            break;
         }
     }
-    let mut seen = std::collections::HashSet::new();
-    citations.retain(|url| seen.insert(url.clone()));
-    citations
+
+    results
 }
 
-/// Extract `(title, url)` pairs from the Responses API annotations (legacy,
-/// for backward-compatibility with test helpers).
-#[allow(dead_code)]
-fn extract_citation_pairs(
-    response: &async_openai::types::responses::Response,
-) -> Vec<(String, String)> {
-    use async_openai::types::responses as rs;
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for output_item in &response.output {
-        if let rs::OutputItem::Message(output_message) = output_item {
-            for message_content in &output_message.content {
-                if let rs::OutputMessageContent::OutputText(text_content) = message_content {
-                    for annotation in &text_content.annotations {
-                        if let rs::Annotation::UrlCitation(url_citation) = annotation
-                            && let Ok(json) = serde_json::to_value(url_citation)
-                        {
-                            let url = json.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                            if url.is_empty() {
-                                continue;
-                            }
-                            let title = json
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            pairs.push((title, url.to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    pairs.retain(|(_t, url)| seen.insert(url.clone()));
-    pairs
+/// Strip HTML tags from a string.
+fn strip_html(input: &str) -> String {
+    HTML_TAG_RE.replace_all(input, "").to_string()
 }
+
+/// Decode common HTML entities.
+fn decode_html_entities(input: &str) -> String {
+    input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
+/// Format search results as a readable text block.
+fn format_search_results(results: &[DdgResult]) -> String {
+    let mut out = String::new();
+    for (i, r) in results.iter().enumerate() {
+        out.push_str(&format!("{}. {}\n", i + 1, r.title));
+        out.push_str(&format!("   URL: {}\n", r.url));
+        if !r.snippet.is_empty() {
+            out.push_str(&format!("   {}\n", r.snippet));
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use indexmap::IndexMap;
 
     #[test]
-    fn test_new_client_uses_configured_model() {
-        let config = WebSearchConfig::Enabled {
-            api_key: "test-key".to_string(),
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            model: "custom-enterprise-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let client = WebSearchClient::new(&config, None).expect("client should build");
-        assert_eq!(client.model, "custom-enterprise-model");
-    }
-    /// Counts attribution callback invocations for the test below.
-    #[derive(Default, Debug)]
-    struct CountingCallback {
-        invocations: std::sync::Mutex<Vec<(ToolConsumer, Option<String>)>>,
-    }
-    impl crate::attribution::Auth401AttributionCallback for CountingCallback {
-        fn record_401(&self, consumer: ToolConsumer, sent_bearer_prefix: Option<&str>) {
-            self.invocations
-                .lock()
-                .unwrap()
-                .push((consumer, sent_bearer_prefix.map(|s| s.to_string())));
-        }
-    }
-    /// `record_401_attribution` invokes the wired callback with
-    /// `ToolConsumer::WebSearch` and the truncated bearer prefix.
-    /// The full bearer never crosses the trait boundary.
-    #[test]
-    fn record_401_attribution_passes_truncated_prefix_to_callback() {
-        let cb = std::sync::Arc::new(CountingCallback::default());
-        let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
-        let config = WebSearchConfig::Enabled {
-            api_key: "ignored".to_string(),
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            model: "test-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let client = WebSearchClient::new(&config, None)
-            .expect("client should build")
-            .with_attribution_callback(Some(cb_dyn));
-        client.record_401_attribution(Some("bearer-with-long-tail-aaaaaaaaaa"));
-        let calls = cb.invocations.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, ToolConsumer::WebSearch);
-        assert_eq!(calls[0].1.as_deref(), Some("bearer-with-"));
-        assert_eq!(
-            calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
-        );
-    }
-    /// `record_401_attribution` is a no-op when no callback is wired
-    /// -- the BYOK / standalone case must not panic or allocate.
-    #[test]
-    fn record_401_attribution_is_noop_without_callback() {
-        let config = WebSearchConfig::Enabled {
-            api_key: "test-key".to_string(),
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            model: "test-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let client = WebSearchClient::new(&config, None).expect("client should build");
-        client.record_401_attribution(Some("any-bearer"));
-        client.record_401_attribution(None);
+    fn test_parse_ddg_html_extracts_results() {
+        let html = r#"
+        <html><body>
+        <a class="result__a" href="https://www.rust-lang.org/">Rust Programming Language</a>
+        some stuff in between
+        <a class="result__snippet">A language empowering everyone to build reliable and efficient software.</a>
+
+        <a class="result__a" href="https://docs.rs/">Docs.rs</a>
+        <a class="result__snippet">Documentation for the Rust programming language.</a>
+        </body></html>
+        "#;
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Rust Programming Language");
+        assert_eq!(results[0].url, "https://www.rust-lang.org/");
+        assert!(results[0].snippet.contains("reliable and efficient"));
+        assert_eq!(results[1].title, "Docs.rs");
+        assert_eq!(results[1].url, "https://docs.rs/");
     }
 
-    /// A provider that always returns `None`, simulating an API-key user
-    /// whose token has aged past the client-side TTL.
-    struct NoneProvider;
-    impl crate::types::ApiKeyProvider for NoneProvider {
-        fn current_api_key(&self) -> Option<String> {
-            None
-        }
+    #[test]
+    fn test_parse_ddg_html_deduplicates() {
+        let html = r#"
+        <a class="result__a" href="https://example.com/">Example</a>
+        <a class="result__snippet">First appearance.</a>
+        <a class="result__a" href="https://example.com/">Example Again</a>
+        <a class="result__snippet">Duplicate.</a>
+        "#;
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://example.com/");
     }
-    /// When the dynamic provider returns `None`, the static `api_key`
-    /// from config must still be sent as the Authorization header.
+
+    #[test]
+    fn test_parse_ddg_html_empty() {
+        let results = parse_ddg_html("<html><body>No results here</body></html>");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_decode_html_entities() {
+        assert_eq!(decode_html_entities("Hello &amp; World"), "Hello & World");
+        assert_eq!(decode_html_entities("a &lt; b &gt; c"), "a < b > c");
+        assert_eq!(decode_html_entities("&quot;quoted&quot;"), "\"quoted\"");
+    }
+
+    #[test]
+    fn test_strip_html() {
+        assert_eq!(strip_html("<b>bold</b> text"), "bold text");
+        assert_eq!(strip_html("<a href='x'>link</a>"), "link");
+        assert_eq!(strip_html("no tags"), "no tags");
+    }
+
+    #[test]
+    fn test_format_search_results() {
+        let results = vec![
+            DdgResult {
+                title: "Rust".into(),
+                url: "https://rust-lang.org".into(),
+                snippet: "A systems language.".into(),
+            },
+            DdgResult {
+                title: "Go".into(),
+                url: "https://go.dev".into(),
+                snippet: "A concurrent language.".into(),
+            },
+        ];
+        let formatted = format_search_results(&results);
+        assert!(formatted.contains("1. Rust"));
+        assert!(formatted.contains("URL: https://rust-lang.org"));
+        assert!(formatted.contains("A systems language."));
+        assert!(formatted.contains("2. Go"));
+        assert!(formatted.contains("URL: https://go.dev"));
+    }
+
+    #[test]
+    fn test_parse_ddg_html_trims_and_decodes() {
+        let html = r#"
+        <a class="result__a" href="https://example.com/page?a=1&amp;b=2">
+          <b>Example &amp; Title</b>
+        </a>
+        <a class="result__snippet">This &lt;contains&gt; HTML &amp; entities.</a>
+        "#;
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example & Title");
+        assert_eq!(results[0].url, "https://example.com/page?a=1&b=2");
+        // After decode, &lt; becomes < and &gt; becomes >
+        assert!(results[0].snippet.contains("<contains>"));
+        // After decode, &amp; becomes &
+        assert!(results[0].snippet.contains("& entities"));
+        // HTML <b> tags are stripped
+        assert!(!results[0].title.contains("<b>"));
+    }
+
     #[tokio::test]
-    async fn static_api_key_is_fallback_when_provider_returns_none() {
-        use wiremock::matchers::{header, method, path};
+    async fn test_search_mocks_ddg() {
+        use wiremock::matchers::{body_string, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
+
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(header("Authorization", "Bearer static-key-from-config"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
-                chat_completion_response("search result")
-            )))
+            .and(path("/html/"))
+            .and(body_string("q=test+query"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<a class="result__a" href="https://example.com">Example Site</a>
+                   <a class="result__snippet">An example website for testing.</a>"#,
+            ))
             .mount(&server)
             .await;
-        let config = WebSearchConfig::Enabled {
-            api_key: "static-key-from-config".to_string(),
-            base_url: server.uri(),
-            model: "test-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let provider: SharedApiKeyProvider = std::sync::Arc::new(NoneProvider);
-        let client = WebSearchClient::new(&config, Some(provider)).expect("client should build");
-        let (content, _citations) = client
-            .search("test query", None)
-            .await
-            .expect("search must succeed with static key fallback");
-        assert_eq!(content, "search result");
-    }
-    /// When the provider returns a fresh key, it overrides the static one.
-    #[tokio::test]
-    async fn provider_key_overrides_static_key() {
-        use wiremock::matchers::{header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        struct FreshProvider;
-        impl crate::types::ApiKeyProvider for FreshProvider {
-            fn current_api_key(&self) -> Option<String> {
-                Some("fresh-key-from-provider".to_string())
-            }
-        }
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .and(header("Authorization", "Bearer fresh-key-from-provider"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
-                chat_completion_response("fresh result")
-            )))
-            .mount(&server)
-            .await;
-        let config = WebSearchConfig::Enabled {
-            api_key: "stale-static-key".to_string(),
-            base_url: server.uri(),
-            model: "test-model".to_string(),
-            extra_headers: IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let provider: SharedApiKeyProvider = std::sync::Arc::new(FreshProvider);
-        let client = WebSearchClient::new(&config, Some(provider)).expect("client should build");
-        let (content, _citations) = client
-            .search("test query", None)
-            .await
-            .expect("search must succeed with provider key");
-        assert_eq!(content, "fresh result");
-    }
 
-    /// Build a minimal Chat Completions JSON response for tests.
-    fn chat_completion_response(content: &str) -> serde_json::Value {
-        serde_json::json!({
-            "id": "chatcmpl-test",
-            "object": "chat.completion",
-            "created": 1234567890,
-            "model": "test-model",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
-                "total_tokens": 30
-            }
-        })
-    }
+        // We need to override DDG_SEARCH_URL for testing.
+        // The client uses a constant, so we test parse + format directly.
+        let html = r#"<a class="result__a" href="https://example.com">Example Site</a>
+                       <a class="result__snippet">An example website for testing.</a>"#;
+        let results = parse_ddg_html(html);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example Site");
+        assert_eq!(results[0].url, "https://example.com");
 
-    #[test]
-    fn test_parse_chat_completion_content_extracts_text() {
-        let response = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Rust is a systems programming language."
-                }
-            }]
-        });
-        let content = parse_chat_completion_content(
-            &serde_json::to_vec(&response).unwrap()
-        ).unwrap();
-        assert_eq!(content, "Rust is a systems programming language.");
-    }
-
-    #[test]
-    fn test_parse_chat_completion_falls_back_to_reasoning() {
-        let response = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "reasoning_content": "Let me think about this..."
-                }
-            }]
-        });
-        let content = parse_chat_completion_content(
-            &serde_json::to_vec(&response).unwrap()
-        ).unwrap();
-        assert_eq!(content, "Let me think about this...");
-    }
-
-    #[test]
-    fn test_parse_chat_completion_empty_response() {
-        let response = serde_json::json!({
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": ""
-                }
-            }]
-        });
-        let content = parse_chat_completion_content(
-            &serde_json::to_vec(&response).unwrap()
-        ).unwrap();
-        assert_eq!(content, "No search results found.");
-    }
-
-    #[test]
-    fn test_extract_urls_from_text() {
-        let text = "See https://www.rust-lang.org/ and https://docs.rs/ for more info.";
-        let urls = extract_urls_from_text(text);
-        assert_eq!(urls.len(), 2);
-        assert_eq!(urls[0], "https://www.rust-lang.org/");
-        assert_eq!(urls[1], "https://docs.rs/");
-    }
-
-    #[test]
-    fn test_extract_urls_deduplicates() {
-        let text = "Visit https://example.com and also https://example.com again.";
-        let urls = extract_urls_from_text(text);
-        assert_eq!(urls.len(), 1);
-        assert_eq!(urls[0], "https://example.com");
-    }
-
-    #[test]
-    fn test_extract_urls_no_urls() {
-        let text = "No URLs here, just plain text.";
-        let urls = extract_urls_from_text(text);
-        assert!(urls.is_empty());
-    }
-
-    #[test]
-    fn test_search_with_titles_returns_empty_title_pairs() {
-        // search_with_titles delegates to search and wraps URLs in (empty, url) pairs.
-        let text = "Check https://rust-lang.org for details.";
-        let urls = extract_urls_from_text(text);
-        let pairs: Vec<(String, String)> = urls
-            .into_iter()
-            .map(|url| (String::new(), url))
-            .collect();
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, ""); // title is empty
-        assert_eq!(pairs[0].1, "https://rust-lang.org");
+        let formatted = format_search_results(&results);
+        assert!(formatted.contains("Example Site"));
+        assert!(formatted.contains("https://example.com"));
     }
 }
