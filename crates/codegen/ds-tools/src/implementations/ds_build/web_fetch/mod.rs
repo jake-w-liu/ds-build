@@ -189,6 +189,18 @@ impl ds_tool_runtime::Tool for WebFetchTool {
                 execute_tool_name.as_deref(),
             )
             .await?;
+
+        // Verification gate: reject output that indicates fabrication
+        if let WebFetchOutput::Content(ref c) = output {
+            let citations = vec![c.url.clone()];
+            if let Err(dq) = crate::verification::verify("web_fetch", &c.content, &citations) {
+                return Err(ds_tool_runtime::ToolError::execution(
+                    ds_tool_protocol::ToolId::new("web_fetch").expect("valid"),
+                    dq.to_string(),
+                ));
+            }
+        }
+
         Ok(output)
     }
 }

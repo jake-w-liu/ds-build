@@ -97,6 +97,14 @@ impl ds_tool_runtime::Tool for WebSearchTool {
                 )
             })?;
 
+        // Verification gate: reject output that indicates fabrication
+        if let Err(dq) = crate::verification::verify("web_search", &content, &citations) {
+            return Err(ds_tool_runtime::ToolError::execution(
+                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+                dq.to_string(),
+            ));
+        }
+
         Ok(WebSearchOutput {
             query: input.query.clone(),
             content,
