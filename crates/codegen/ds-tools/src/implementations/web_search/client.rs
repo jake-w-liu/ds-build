@@ -100,18 +100,21 @@ impl WebSearchClient {
     ///
     /// Returns `(formatted_text, citations)` where formatted_text is a
     /// human-readable summary of the search results and citations are
-    /// unique URLs found.
+    /// unique URLs found. When `allowed_domains` is provided, `site:`
+    /// operators are injected into the query so DDG returns results
+    /// from those domains directly.
     pub async fn search(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
-        let results = self.fetch_ddg_results(query).await?;
-        let filtered: Vec<DdgResult> = if let Some(ref domains) = allowed_domains {
+        let search_query = build_search_query(query, allowed_domains.as_deref());
+        let results = self.fetch_ddg_results(&search_query).await?;
+        let filtered: Vec<DdgResult> = if allowed_domains.is_some() {
             results
                 .into_iter()
                 .filter(|r| {
-                    domains.iter().any(|d| {
+                    allowed_domains.as_ref().unwrap().iter().any(|d| {
                         r.url.to_lowercase().contains(&d.to_lowercase())
                     })
                 })
@@ -140,12 +143,13 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), ds_tool_runtime::ToolError> {
-        let results = self.fetch_ddg_results(query).await?;
-        let filtered: Vec<DdgResult> = if let Some(ref domains) = allowed_domains {
+        let search_query = build_search_query(query, allowed_domains.as_deref());
+        let results = self.fetch_ddg_results(&search_query).await?;
+        let filtered: Vec<DdgResult> = if allowed_domains.is_some() {
             results
                 .into_iter()
                 .filter(|r| {
-                    domains.iter().any(|d| {
+                    allowed_domains.as_ref().unwrap().iter().any(|d| {
                         r.url.to_lowercase().contains(&d.to_lowercase())
                     })
                 })
@@ -280,6 +284,20 @@ fn decode_html_entities(input: &str) -> String {
         .replace("&#x27;", "'")
 }
 
+/// Build the search query, injecting `site:` operators for allowed domains.
+fn build_search_query(base_query: &str, allowed_domains: Option<&[String]>) -> String {
+    match allowed_domains {
+        Some(domains) if !domains.is_empty() => {
+            let site_clauses: Vec<String> = domains
+                .iter()
+                .map(|d| format!("site:{}", d.trim()))
+                .collect();
+            format!("{} {}", base_query, site_clauses.join(" OR "))
+        }
+        _ => base_query.to_string(),
+    }
+}
+
 /// Format search results as a readable text block.
 fn format_search_results(results: &[DdgResult]) -> String {
     let mut out = String::new();
@@ -350,6 +368,23 @@ mod tests {
         assert_eq!(strip_html("<b>bold</b> text"), "bold text");
         assert_eq!(strip_html("<a href='x'>link</a>"), "link");
         assert_eq!(strip_html("no tags"), "no tags");
+    }
+
+    #[test]
+    fn test_build_search_query() {
+        // No domains
+        assert_eq!(build_search_query("rust lang", None), "rust lang");
+        assert_eq!(build_search_query("rust lang", Some(&[])), "rust lang");
+        // Single domain
+        assert_eq!(
+            build_search_query("rust lang", Some(&["github.com".into()])),
+            "rust lang site:github.com"
+        );
+        // Multiple domains
+        assert_eq!(
+            build_search_query("rust lang", Some(&["github.com".into(), "docs.rs".into()])),
+            "rust lang site:github.com OR site:docs.rs"
+        );
     }
 
     #[test]
