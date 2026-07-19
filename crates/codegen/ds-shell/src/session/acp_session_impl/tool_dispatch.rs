@@ -22,14 +22,45 @@ pub(super) async fn dispatch_tool(
         mode = "local",
         "dispatch_tool"
     );
-    workspace_ops
+    let result = workspace_ops
         .call_tool(
             &prepared.tool_name,
             prepared.parsed_args.clone(),
             &prepared.tool_call_id.0,
             Some(session_id),
         )
-        .await
+        .await?;
+
+    // ── System-level output verification harness ─────────────────────────
+    // Every tool's prompt text is checked for disqualifying phrases that
+    // indicate fabrication rather than actual execution. This is a
+    // mechanical backstop — no tool can bypass it.
+    verify_tool_output(&prepared.tool_name, &result.prompt_text)?;
+
+    Ok(result)
+}
+
+/// System-level verification harness: check tool output for fabrication
+/// indicators. Returns `Err` if the output appears fabricated.
+fn verify_tool_output(
+    tool_name: &str,
+    prompt_text: &str,
+) -> Result<(), ds_tool_runtime::ToolError> {
+    // Only check tools that claim external data access
+    let gated_tools = ["web_search", "web_fetch"];
+    if !gated_tools.contains(&tool_name) {
+        return Ok(());
+    }
+    if let Err(reason) = ds_tools::verification::verify_text(tool_name, prompt_text) {
+        return Err(ds_tool_runtime::ToolError::execution(
+            ds_tool_protocol::ToolId::new("verification_gate").expect("valid"),
+            format!(
+                "VERIFICATION GATE: {} output rejected — {}",
+                tool_name, reason
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// First string-valued argument among `keys`, in priority order.

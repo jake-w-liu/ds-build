@@ -33,3 +33,10 @@ pub fn verify(
 ) -> Result<(), Disqualification> {
     verify_impl(tool_name, output_text, citations)
 }
+
+/// Lightweight verification that only checks the text content (no citation
+/// requirement). Used by the system-level tool dispatch harness where
+/// citation lists aren't available.
+pub fn verify_text(tool_name: &str, output_text: &str) -> Result<(), String> {
+    phrases::check_phrases(tool_name, output_text).map_err(|dq| dq.to_string())
+}

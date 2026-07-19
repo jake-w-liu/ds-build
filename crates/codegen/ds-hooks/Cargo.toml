@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-hooks"
-version = "0.1.21"
+version = "0.1.22"
 edition.workspace = true
 description = "Runtime hook system for DS — file-based discovery, command execution, and policy enforcement"
 

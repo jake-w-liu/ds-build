@@ -85,7 +85,27 @@ pub fn verify(
     output_text: &str,
     citations: &[String],
 ) -> Result<(), Disqualification> {
-    // Check for disqualifying phrases in the output text
+    check_phrases(tool_name, output_text)?;
+
+    // Citation checks for tools that claim external data access
+    let citation_tools = ["web_search", "web_fetch"];
+    if citation_tools.contains(&tool_name) && citations.is_empty() {
+        return Err(Disqualification {
+            tool_name: tool_name.to_string(),
+            reason: "tool claims external access but returned zero citations/URLs".to_string(),
+            matched_phrase: "empty citations".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Check only the text content for disqualifying phrases (no citation
+/// requirement). Used by the system-level harness.
+pub fn check_phrases(
+    tool_name: &str,
+    output_text: &str,
+) -> Result<(), Disqualification> {
     for pattern in PATTERNS.iter() {
         if let Some(m) = pattern.re.find(output_text) {
             let reason = match pattern.category {
@@ -106,17 +126,6 @@ pub fn verify(
             });
         }
     }
-
-    // Citation checks for tools that claim external data access
-    let citation_tools = ["web_search", "web_fetch"];
-    if citation_tools.contains(&tool_name) && citations.is_empty() {
-        return Err(Disqualification {
-            tool_name: tool_name.to_string(),
-            reason: "tool claims external access but returned zero citations/URLs".to_string(),
-            matched_phrase: "empty citations".to_string(),
-        });
-    }
-
     Ok(())
 }
 
