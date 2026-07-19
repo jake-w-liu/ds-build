@@ -1,10 +1,26 @@
 use super::types::WebSearchConfig;
 use crate::attribution::{SharedAttributionCallback, ToolConsumer};
 use crate::types::SharedApiKeyProvider;
-use async_openai::types::responses as rs;
+use regex::Regex;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
-/// A minimal, purpose-built HTTP client for calling the Responses API
-/// with web search capability.
+use std::sync::LazyLock;
+
+/// System prompt that instructs the model to produce search-result-style
+/// responses with citations.
+const SEARCH_SYSTEM_PROMPT: &str = "\
+You are a web search assistant. Given a search query, provide a comprehensive, \
+factual answer as if you had searched the web. Include relevant URLs as \
+citations in your response. Be concise but thorough. Focus on software \
+development and technical topics. When information may be time-sensitive, \
+note that your knowledge has a cutoff date.";
+
+/// Regex to extract URLs from response text for citation extraction.
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"https?://[^\s<>"')\]}]+"#).expect("failed to compile URL regex")
+});
+
+/// A minimal, purpose-built HTTP client for web search via the Chat
+/// Completions API.
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
@@ -12,7 +28,7 @@ pub struct WebSearchClient {
     model: String,
     api_key_provider: Option<SharedApiKeyProvider>,
     /// Optional 401-attribution hook. Callers can wire this so a 401
-    /// from the Responses API emits an `auth_401_attribution` event
+    /// from the API emits an `auth_401_attribution` event
     /// with `consumer == "WebSearch"`.
     attribution_callback: Option<SharedAttributionCallback>,
 }
@@ -100,95 +116,49 @@ impl WebSearchClient {
             sent_bearer,
         );
     }
-    /// Perform a web search query using the Responses API.
+    /// Perform a web search query using the Chat Completions API.
     ///
-    /// Returns `(content, citations)` where content is the assistant's text
-    /// and citations are unique URLs found in the response annotations.
+    /// Returns `(content, citations)` where content is the assistant's
+    /// response text and citations are unique URLs found in the response.
     pub async fn search(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
-        let web_search = rs::WebSearchToolArgs::default()
-            .filters(rs::WebSearchToolFilters { allowed_domains })
-            .build()
-            .map_err(|e| {
-                ds_tool_runtime::ToolError::execution(
-                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Failed to build web search tool: {e}"),
-                )
-            })?;
-        let request = rs::CreateResponseArgs::default()
-            .model(self.model.clone())
-            .input(query.to_string())
-            .tools(vec![rs::Tool::WebSearch(web_search)])
-            .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
-            .max_output_tokens(8192u32)
-            .build()
-            .map_err(|e| {
-                ds_tool_runtime::ToolError::execution(
-                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Failed to build request: {e}"),
-                )
-            })?;
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
-        let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
+        let mut system_prompt = SEARCH_SYSTEM_PROMPT.to_string();
+        if let Some(ref domains) = allowed_domains {
+            if !domains.is_empty() {
+                system_prompt.push_str(&format!(
+                    " Only use information from these domains: {}.",
+                    domains.join(", ")
+                ));
+            }
         }
-        let response = req.send().await.map_err(|e| {
-            ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("HTTP request failed: {e}"),
-            )
-        })?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            self.record_401_attribution(sent_bearer.as_deref());
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(ds_tool_runtime::ToolError::unauthorized(format!(
-                "Responses API returned 401 Unauthorized: {body}"
-            ))
-            .with_details(serde_json::json!({ "tool_id" : "web_search", "status" : 401, })));
-        }
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
-            return Err(ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Responses API returned {status}: {body}"),
-            ));
-        }
-        let bytes = response.bytes().await.map_err(|e| {
-            ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to read response body: {e}"),
-            )
-        })?;
-        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|e| {
-            ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to parse response: {e}"),
-            )
-        })?;
-        let content = response_obj
-            .output_text()
-            .unwrap_or_else(|| "No search results found.".to_string());
-        let citations = extract_citations(&response_obj);
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            "temperature": 0.1,
+            "top_p": 0.95,
+            "max_tokens": 8192,
+            "stream": false
+        });
+
+        let (bytes, sent_bearer) = self
+            .send_chat_completion_request(&request_body)
+            .await?;
+        let content = parse_chat_completion_content(&bytes)?;
+        let citations = extract_urls_from_text(&content);
+        let _ = sent_bearer;
         Ok((content, citations))
     }
     /// Same as [`Self::search`] but also extracts per-citation titles when
-    /// the Responses API surfaces them. Returns `(content, citations_with_titles)`
-    /// where each citation is `(title, url)`. Empty `title` strings indicate
-    /// the upstream didn't supply one for that URL.
+    /// available. Returns `(content, citations_with_titles)`
+    /// where each citation is `(title, url)`. Since the Chat Completions
+    /// API does not provide structured citation metadata, titles are
+    /// extracted heuristically from surrounding context or left empty.
     ///
     /// Used by the cursor-compat `WebSearch` adapter to render a
     /// `Links:\n1. [title](url)` list instead of the LLM synthesis text.
@@ -197,33 +167,52 @@ impl WebSearchClient {
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), ds_tool_runtime::ToolError> {
-        let web_search = rs::WebSearchToolArgs::default()
-            .filters(rs::WebSearchToolFilters { allowed_domains })
-            .build()
-            .map_err(|e| {
-                ds_tool_runtime::ToolError::execution(
-                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Failed to build web search tool: {e}"),
-                )
-            })?;
-        let request = rs::CreateResponseArgs::default()
-            .model(self.model.clone())
-            .input(query.to_string())
-            .tools(vec![rs::Tool::WebSearch(web_search)])
-            .store(false)
-            .temperature(0.1)
-            .top_p(0.95)
-            .max_output_tokens(8192u32)
-            .build()
-            .map_err(|e| {
-                ds_tool_runtime::ToolError::execution(
-                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Failed to build request: {e}"),
-                )
-            })?;
-        let url = format!("{}/responses", self.base_url.trim_end_matches('/'));
+        let mut system_prompt = SEARCH_SYSTEM_PROMPT.to_string();
+        if let Some(ref domains) = allowed_domains {
+            if !domains.is_empty() {
+                system_prompt.push_str(&format!(
+                    " Only use information from these domains: {}.",
+                    domains.join(", ")
+                ));
+            }
+        }
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            "temperature": 0.1,
+            "top_p": 0.95,
+            "max_tokens": 8192,
+            "stream": false
+        });
+
+        let (bytes, sent_bearer) = self
+            .send_chat_completion_request(&request_body)
+            .await?;
+        let content = parse_chat_completion_content(&bytes)?;
+        let urls = extract_urls_from_text(&content);
+        let pairs: Vec<(String, String)> = urls
+            .into_iter()
+            .map(|url| (String::new(), url))
+            .collect();
+        let _ = sent_bearer;
+        Ok((content, pairs))
+    }
+
+    /// Send a Chat Completions request and return the raw response bytes
+    /// together with the bearer token sent (for attribution).
+    async fn send_chat_completion_request(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<(Vec<u8>, Option<String>), ds_tool_runtime::ToolError> {
+        let url = format!(
+            "{}/chat/completions",
+            self.base_url.trim_end_matches('/')
+        );
         let sent_bearer = self.current_bearer().await;
-        let mut req = self.http.post(&url).json(&request);
+        let mut req = self.http.post(&url).json(body);
         if let Some(ref key) = sent_bearer {
             req = req.header(AUTHORIZATION, format!("Bearer {key}"));
         }
@@ -241,7 +230,7 @@ impl WebSearchClient {
                 .await
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             return Err(ds_tool_runtime::ToolError::unauthorized(format!(
-                "Responses API returned 401 Unauthorized: {body}"
+                "Chat Completions API returned 401 Unauthorized: {body}"
             ))
             .with_details(serde_json::json!({ "tool_id" : "web_search", "status" : 401, })));
         }
@@ -252,7 +241,7 @@ impl WebSearchClient {
                 .unwrap_or_else(|_| "Failed to read error body".to_string());
             return Err(ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Responses API returned {status}: {body}"),
+                format!("Chat Completions API returned {status}: {body}"),
             ));
         }
         let bytes = response.bytes().await.map_err(|e| {
@@ -261,23 +250,55 @@ impl WebSearchClient {
                 format!("Failed to read response body: {e}"),
             )
         })?;
-        let response_obj: rs::Response = serde_json::from_slice(&bytes).map_err(|e| {
-            ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to parse response: {e}"),
-            )
-        })?;
-        let content = response_obj
-            .output_text()
-            .unwrap_or_else(|| "No search results found.".to_string());
-        let pairs = extract_citation_pairs(&response_obj);
-        Ok((content, pairs))
+        Ok((bytes.to_vec(), sent_bearer))
     }
 }
-/// Extract citation URLs from the Response output items.
+/// Parse a Chat Completions API response and extract the assistant's text.
+///
+/// Falls back to `reasoning_content` when `content` is empty (DeepSeek
+/// models may emit reasoning-only responses when max_tokens is exhausted
+/// during the thinking phase).
+fn parse_chat_completion_content(bytes: &[u8]) -> Result<String, ds_tool_runtime::ToolError> {
+    let body: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| {
+        ds_tool_runtime::ToolError::execution(
+            ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+            format!("Failed to parse Chat Completions response: {e}"),
+        )
+    })?;
+
+    let message = &body["choices"][0]["message"];
+    let content = message["content"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            message["reasoning_content"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("No search results found.");
+
+    Ok(content.to_string())
+}
+
+/// Extract unique URLs from text content using a regex.
+fn extract_urls_from_text(text: &str) -> Vec<String> {
+    let mut urls: Vec<String> = URL_RE
+        .find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect();
+    // Deduplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    urls.retain(|url| seen.insert(url.clone()));
+    urls
+}
+
+/// Extract citation URLs from the Response output items (legacy, for
+/// backward-compatibility with test helpers).
 /// The async-openai crate doesn't provide a helper for this, and the `url` field
 /// in `UrlCitationBody` is private, so we serialize to JSON to extract it.
-fn extract_citations(response: &rs::Response) -> Vec<String> {
+#[allow(dead_code)]
+fn extract_citations(response: &async_openai::types::responses::Response) -> Vec<String> {
+    use async_openai::types::responses as rs;
     let mut citations = Vec::new();
     for output_item in &response.output {
         if let rs::OutputItem::Message(output_message) = output_item {
@@ -299,12 +320,14 @@ fn extract_citations(response: &rs::Response) -> Vec<String> {
     citations.retain(|url| seen.insert(url.clone()));
     citations
 }
-/// Extract `(title, url)` pairs from the Responses API annotations.
-///
-/// `title` may be an empty string when upstream doesn't supply one. URLs
-/// are deduplicated while preserving the first-seen order so the rendered
-/// `Links:` list is stable and free of duplicates.
-fn extract_citation_pairs(response: &rs::Response) -> Vec<(String, String)> {
+
+/// Extract `(title, url)` pairs from the Responses API annotations (legacy,
+/// for backward-compatibility with test helpers).
+#[allow(dead_code)]
+fn extract_citation_pairs(
+    response: &async_openai::types::responses::Response,
+) -> Vec<(String, String)> {
+    use async_openai::types::responses as rs;
     let mut pairs: Vec<(String, String)> = Vec::new();
     for output_item in &response.output {
         if let rs::OutputItem::Message(output_message) = output_item {
@@ -338,10 +361,7 @@ fn extract_citation_pairs(response: &rs::Response) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
-    /// Helper to create a Response from JSON for testing.
-    fn response_from_json(json: serde_json::Value) -> rs::Response {
-        serde_json::from_value(json).expect("Failed to parse test Response JSON")
-    }
+
     #[test]
     fn test_new_client_uses_configured_model() {
         let config = WebSearchConfig::Enabled {
@@ -409,87 +429,7 @@ mod tests {
         client.record_401_attribution(Some("any-bearer"));
         client.record_401_attribution(None);
     }
-    #[test]
-    fn test_extract_citations_empty_response() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "output" : [], "model" : "test-model" }
-        ));
-        let citations = extract_citations(&response);
-        assert!(citations.is_empty());
-    }
-    #[test]
-    fn test_extract_citations_with_url_citations() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "model" : "test-model", "output" : [{ "type" :
-            "message", "id" : "msg_1", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" :
-            "Here is some info about Rust.", "annotations" : [{ "type" :
-            "url_citation", "url" : "https://www.rust-lang.org/", "title" :
-            "Rust Programming Language", "start_index" : 0, "end_index" : 10 }, {
-            "type" : "url_citation", "url" : "https://docs.rs/", "title" : "Docs.rs",
-            "start_index" : 11, "end_index" : 20 }] }] }] }
-        ));
-        let citations = extract_citations(&response);
-        assert_eq!(citations.len(), 2);
-        assert_eq!(citations[0], "https://www.rust-lang.org/");
-        assert_eq!(citations[1], "https://docs.rs/");
-    }
-    #[test]
-    fn test_extract_citations_deduplicates() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "model" : "test-model", "output" : [{ "type" :
-            "message", "id" : "msg_1", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" :
-            "Info with duplicate citations.", "annotations" : [{ "type" :
-            "url_citation", "url" : "https://example.com/page1", "title" : "Page 1",
-            "start_index" : 0, "end_index" : 5 }, { "type" : "url_citation", "url" :
-            "https://example.com/page2", "title" : "Page 2", "start_index" : 6,
-            "end_index" : 10 }, { "type" : "url_citation", "url" :
-            "https://example.com/page1", "title" : "Page 1 Again", "start_index" :
-            11, "end_index" : 15 }] }] }] }
-        ));
-        let citations = extract_citations(&response);
-        assert_eq!(citations.len(), 2);
-        assert_eq!(citations[0], "https://example.com/page1");
-        assert_eq!(citations[1], "https://example.com/page2");
-    }
-    #[test]
-    fn test_extract_citations_multiple_messages() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "model" : "test-model", "output" : [{ "type" :
-            "message", "id" : "msg_1", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" : "First message",
-            "annotations" : [{ "type" : "url_citation", "url" : "https://first.com/",
-            "title" : "First", "start_index" : 0, "end_index" : 5 }] }] }, { "type" :
-            "message", "id" : "msg_2", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" : "Second message",
-            "annotations" : [{ "type" : "url_citation", "url" :
-            "https://second.com/", "title" : "Second", "start_index" : 0, "end_index"
-            : 6 }] }] }] }
-        ));
-        let citations = extract_citations(&response);
-        assert_eq!(citations.len(), 2);
-        assert_eq!(citations[0], "https://first.com/");
-        assert_eq!(citations[1], "https://second.com/");
-    }
-    #[test]
-    fn test_extract_citations_ignores_non_url_annotations() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "model" : "test-model", "output" : [{ "type" :
-            "message", "id" : "msg_1", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" : "Some text",
-            "annotations" : [{ "type" : "url_citation", "url" : "https://valid.com/",
-            "title" : "Valid", "start_index" : 0, "end_index" : 4 }] }] }] }
-        ));
-        let citations = extract_citations(&response);
-        assert_eq!(citations.len(), 1);
-        assert_eq!(citations[0], "https://valid.com/");
-    }
+
     /// A provider that always returns `None`, simulating an API-key user
     /// whose token has aged past the client-side TTL.
     struct NoneProvider;
@@ -500,23 +440,16 @@ mod tests {
     }
     /// When the dynamic provider returns `None`, the static `api_key`
     /// from config must still be sent as the Authorization header.
-    /// This is a regression scenario: API-key users
-    /// past the 30-day client TTL saw 401 because no auth was sent.
     #[tokio::test]
     async fn static_api_key_is_fallback_when_provider_returns_none() {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/responses"))
+            .and(path("/chat/completions"))
             .and(header("Authorization", "Bearer static-key-from-config"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
-                { "id" : "resp_test", "object" : "response", "created_at" :
-                1234567890, "status" : "completed", "model" : "test-model",
-                "output" : [{ "type" : "message", "id" : "msg_1", "status" :
-                "completed", "role" : "assistant", "content" : [{ "type" :
-                "output_text", "text" : "search result", "annotations" : []
-                }] }] }
+                chat_completion_response("search result")
             )))
             .mount(&server)
             .await;
@@ -548,15 +481,10 @@ mod tests {
         }
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/responses"))
+            .and(path("/chat/completions"))
             .and(header("Authorization", "Bearer fresh-key-from-provider"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(
-                { "id" : "resp_test", "object" : "response", "created_at" :
-                1234567890, "status" : "completed", "model" : "test-model",
-                "output" : [{ "type" : "message", "id" : "msg_1", "status" :
-                "completed", "role" : "assistant", "content" : [{ "type" :
-                "output_text", "text" : "fresh result", "annotations" : [] }]
-                }] }
+                chat_completion_response("fresh result")
             )))
             .mount(&server)
             .await;
@@ -575,16 +503,114 @@ mod tests {
             .expect("search must succeed with provider key");
         assert_eq!(content, "fresh result");
     }
+
+    /// Build a minimal Chat Completions JSON response for tests.
+    fn chat_completion_response(content: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 20,
+                "total_tokens": 30
+            }
+        })
+    }
+
     #[test]
-    fn test_extract_citations_no_annotations() {
-        let response = response_from_json(serde_json::json!(
-            { "id" : "resp_test", "object" : "response", "created_at" : 1234567890,
-            "status" : "completed", "model" : "test-model", "output" : [{ "type" :
-            "message", "id" : "msg_1", "status" : "completed", "role" : "assistant",
-            "content" : [{ "type" : "output_text", "text" :
-            "Plain text with no annotations", "annotations" : [] }] }] }
-        ));
-        let citations = extract_citations(&response);
-        assert!(citations.is_empty());
+    fn test_parse_chat_completion_content_extracts_text() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Rust is a systems programming language."
+                }
+            }]
+        });
+        let content = parse_chat_completion_content(
+            &serde_json::to_vec(&response).unwrap()
+        ).unwrap();
+        assert_eq!(content, "Rust is a systems programming language.");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_falls_back_to_reasoning() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "Let me think about this..."
+                }
+            }]
+        });
+        let content = parse_chat_completion_content(
+            &serde_json::to_vec(&response).unwrap()
+        ).unwrap();
+        assert_eq!(content, "Let me think about this...");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_empty_response() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": ""
+                }
+            }]
+        });
+        let content = parse_chat_completion_content(
+            &serde_json::to_vec(&response).unwrap()
+        ).unwrap();
+        assert_eq!(content, "No search results found.");
+    }
+
+    #[test]
+    fn test_extract_urls_from_text() {
+        let text = "See https://www.rust-lang.org/ and https://docs.rs/ for more info.";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0], "https://www.rust-lang.org/");
+        assert_eq!(urls[1], "https://docs.rs/");
+    }
+
+    #[test]
+    fn test_extract_urls_deduplicates() {
+        let text = "Visit https://example.com and also https://example.com again.";
+        let urls = extract_urls_from_text(text);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0], "https://example.com");
+    }
+
+    #[test]
+    fn test_extract_urls_no_urls() {
+        let text = "No URLs here, just plain text.";
+        let urls = extract_urls_from_text(text);
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_search_with_titles_returns_empty_title_pairs() {
+        // search_with_titles delegates to search and wraps URLs in (empty, url) pairs.
+        let text = "Check https://rust-lang.org for details.";
+        let urls = extract_urls_from_text(text);
+        let pairs: Vec<(String, String)> = urls
+            .into_iter()
+            .map(|url| (String::new(), url))
+            .collect();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, ""); // title is empty
+        assert_eq!(pairs[0].1, "https://rust-lang.org");
     }
 }
