@@ -41,25 +41,34 @@ pub(super) async fn dispatch_tool(
 }
 
 /// System-level verification harness: check tool output for fabrication
-/// indicators. Returns `Err` if the output appears fabricated.
+/// indicators AND completion claims without evidence.
+/// Returns `Err` if the output appears fabricated or makes unsubstantiated claims.
 fn verify_tool_output(
     tool_name: &str,
     prompt_text: &str,
 ) -> Result<(), ds_tool_runtime::ToolError> {
     // Only check tools that claim external data access
     let gated_tools = ["web_search", "web_fetch"];
-    if !gated_tools.contains(&tool_name) {
-        return Ok(());
+    if gated_tools.contains(&tool_name) {
+        if let Err(reason) = ds_tools::verification::verify_text(tool_name, prompt_text) {
+            return Err(ds_tool_runtime::ToolError::execution(
+                ds_tool_protocol::ToolId::new("verification_gate").expect("valid"),
+                format!(
+                    "VERIFICATION GATE: {} output rejected — {}",
+                    tool_name, reason
+                ),
+            ));
+        }
     }
-    if let Err(reason) = ds_tools::verification::verify_text(tool_name, prompt_text) {
+
+    // Completion gate: check for unsubstantiated completion claims
+    if let Err(reason) = ds_tools::verification::completion::check_completion(prompt_text) {
         return Err(ds_tool_runtime::ToolError::execution(
-            ds_tool_protocol::ToolId::new("verification_gate").expect("valid"),
-            format!(
-                "VERIFICATION GATE: {} output rejected — {}",
-                tool_name, reason
-            ),
+            ds_tool_protocol::ToolId::new("completion_gate").expect("valid"),
+            reason,
         ));
     }
+
     Ok(())
 }
 

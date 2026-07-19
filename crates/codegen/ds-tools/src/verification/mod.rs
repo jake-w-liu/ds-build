@@ -8,6 +8,7 @@
 //! fabricated rather than observed.
 
 mod phrases;
+pub mod completion;
 
 pub use phrases::Disqualification;
 use phrases::verify as verify_impl;
