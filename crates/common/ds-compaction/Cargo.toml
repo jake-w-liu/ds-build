@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-compaction"
-version = "0.1.15"
+version = "0.1.16"
 edition.workspace = true
 description = "Shared, transport-agnostic compaction engine for DS chat and DS Build."
 

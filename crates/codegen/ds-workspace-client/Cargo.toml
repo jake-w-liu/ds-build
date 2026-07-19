@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-workspace-client"
-version = "0.1.15"
+version = "0.1.16"
 edition.workspace = true
 description = "Lightweight typed client for hub-proxied workspace.* RPCs (shared by ds-shell proxy mode and other consumers)"
 
