@@ -1,5 +1,5 @@
 #!/usr/bin/env swift
-// PSST_TRANSPORT_REV=3
+// PSST_TRANSPORT_REV=5
 // Chat-only zip upload + response capture for ChatGPT macOS (com.openai.codex).
 // Uses clipboard file paste (Add files menu is not AX-exposed on current app).
 // NEVER uses Work mode.
@@ -851,7 +851,14 @@ func zipRoot(_ root: String) throws -> String {
   proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
   proc.arguments = args
   proc.currentDirectoryURL = URL(fileURLWithPath: root)
-  try proc.run()
+  do {
+    try proc.run()
+  } catch {
+    // The temporary archive directory is helper-owned. A launch failure (for
+    // example, an invalid root directory) occurs before the status guard below.
+    try? fm.removeItem(at: outDir)
+    throw error
+  }
   proc.waitUntilExit()
   guard proc.terminationStatus == 0, fm.fileExists(atPath: zipPath) else {
     try? fm.removeItem(at: outDir)
@@ -875,13 +882,26 @@ var packOnly = false
 var promptParts: [String] = []
 var args = Array(CommandLine.arguments.dropFirst())
 var i = 0
+
+func parseNonnegativeFiniteTimeout(_ raw: String) -> Double? {
+  guard let value = Double(raw), value.isFinite, value >= 0 else { return nil }
+  return value
+}
+
 while i < args.count {
   let a = args[i]
   if a == "--zip", i + 1 < args.count { zipPath = args[i + 1]; i += 2; continue }
   if a == "--root", i + 1 < args.count { rootPath = args[i + 1]; i += 2; continue }
-  if a == "--timeout", i + 1 < args.count {
-    timeoutSec = Double(args[i + 1]) ?? 0
-    if timeoutSec < 0 { timeoutSec = 0 }
+  if a == "--timeout" {
+    guard i + 1 < args.count,
+          let parsed = parseNonnegativeFiniteTimeout(args[i + 1]) else {
+      emit([
+        "ok": false,
+        "code": "BAD_ARGS",
+        "message": "--timeout requires a finite, non-negative number of seconds",
+      ], exitCode: 2)
+    }
+    timeoutSec = parsed
     i += 2
     continue
   }
@@ -1034,10 +1054,20 @@ if let work = bfsFirst(root, pred: { el, r in r.contains("Check") && s(el, kAXTi
   emit(["ok": false, "code": "WORK_MODE", "message": "Work is still on — refuse (no Work credits)"], exitCode: 20)
 }
 
-if newChat, let nc = bfsFirst(root, pred: { el, r in
-  r == "AXButton" && (s(el, kAXTitleAttribute as String) == "New chat" || s(el, kAXDescriptionAttribute as String) == "New chat")
-}) {
-  _ = press(nc); Thread.sleep(forTimeInterval: 1.1)
+if newChat {
+  let nc = bfsFirst(root, pred: { el, r in
+    r == "AXButton" && (s(el, kAXTitleAttribute as String) == "New chat" || s(el, kAXDescriptionAttribute as String) == "New chat")
+  })
+  let pressed = nc.map(press) ?? false
+  if pressed {
+    log("new-chat: AX press")
+  } else {
+    // Electron may virtualize the sidebar button out of the AX tree.
+    key(45, flags: .maskCommand) // Cmd+N
+    log("new-chat: Cmd+N fallback")
+  }
+  Thread.sleep(forTimeInterval: 1.1)
+  _ = refreshAxRoot(reason: "new-chat")
 }
 
 guard let composer = bfsFirst(root, pred: { el, r in
@@ -1229,9 +1259,99 @@ func copyMessageButtons() -> [AXUIElement] {
   })
 }
 
-func harvestViaCopyMessageButtons(afterBaselineCount baselineCount: Int) -> String {
+func normalizedCopyIdentity(_ value: String) -> String {
+  value
+    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+    .lowercased()
+}
+
+func copyIdentityWords(_ value: String) -> [String] {
+  value.lowercased().split { character in
+    character.unicodeScalars.allSatisfy { !CharacterSet.alphanumerics.contains($0) }
+  }.map(String.init)
+}
+
+func copyMatchesObservedZipBody(_ copied: String, observedBody: String) -> Bool {
+  let candidate = normalizedCopyIdentity(copied)
+  let observed = normalizedCopyIdentity(observedBody)
+  guard !candidate.isEmpty, !observed.isEmpty else { return false }
+  if candidate == observed {
+    return true
+  }
+  let observedWords = copyIdentityWords(observed)
+  let candidateWords = copyIdentityWords(candidate)
+  // For short bodies, substring overlap is not identity evidence: an older
+  // audit can easily contain the same generic word. Require equality instead.
+  guard observedWords.count >= 8, candidateWords.count >= 8 else { return false }
+  if candidate.contains(observed) || observed.contains(candidate) {
+    return true
+  }
+  let candidateWordText = candidateWords.joined(separator: " ")
+  let width = min(10, observedWords.count)
+  let maxStart = observedWords.count - width
+  let starts = Set([0, maxStart / 4, maxStart / 2, (maxStart * 3) / 4, maxStart])
+  let matches = starts.reduce(into: 0) { count, start in
+    let anchor = observedWords[start..<(start + width)].joined(separator: " ")
+    if candidateWordText.contains(anchor) { count += 1 }
+  }
+  return matches >= min(2, starts.count)
+}
+
+func currentZipCopyCandidate(
+  _ copied: String,
+  promptText: String,
+  observedBody: String,
+  hasPostBaselineButtonEvidence: Bool,
+  baselineWasEmpty: Bool,
+  expectedExactReply: String? = nil,
+  isNewestButtonAttempt: Bool = false
+) -> String? {
+  let candidate = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+  if candidate.isEmpty || normalizedCopyIdentity(candidate) == normalizedCopyIdentity(promptText) {
+    return nil
+  }
+  // A repeated exact reply can already exist in the baseline transcript. Only
+  // the newest button can prove that the copied instance belongs to this turn.
+  if isNewestButtonAttempt,
+     let expectedExactReply,
+     normalizedCopyIdentity(candidate) == normalizedCopyIdentity(expectedExactReply) {
+    return candidate
+  }
+  if !observedBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    guard copyMatchesObservedZipBody(candidate, observedBody: observedBody) else { return nil }
+  } else if !hasPostBaselineButtonEvidence && !baselineWasEmpty {
+    return nil
+  }
+  return candidate
+}
+
+func waitForCopiedClipboardString(
+  _ pasteboard: NSPasteboard,
+  sentinel: String,
+  sentinelChangeCount: Int,
+  timeoutSec: TimeInterval
+) -> (text: String, changeCount: Int) {
+  let deadline = Date().addingTimeInterval(max(0.05, timeoutSec))
+  repeat {
+    let changeCount = pasteboard.changeCount
+    let raw = pasteboard.string(forType: .string) ?? ""
+    if changeCount != sentinelChangeCount && raw != sentinel {
+      return (raw, changeCount)
+    }
+    Thread.sleep(forTimeInterval: 0.04)
+  } while Date() < deadline
+  return ("", pasteboard.changeCount)
+}
+
+func harvestViaCopyMessageButtons(
+  afterBaselineCount baselineCount: Int,
+  observedBody: String,
+  expectedExactReply: String?
+) -> String {
   // A native-app activation does not guarantee focus inside Electron's web
-  // contents. Refresh, focus the AX window, then use a real pointer click.
+  // contents. Refresh and re-resolve controls before every attempt because the
+  // Electron toolbar re-renders from "Copy" to "Copied" after a click.
   guard refreshAxRoot(reason: "copy-harvest-focus") else { return "" }
   _ = setAttr(root, kAXFrontmostAttribute as String, kCFBooleanTrue)
   if let window = bfsFirst(root, pred: { _, role in role == "AXWindow" }) {
@@ -1239,70 +1359,84 @@ func harvestViaCopyMessageButtons(afterBaselineCount baselineCount: Int) -> Stri
     _ = setAttr(window, kAXFocusedAttribute as String, kCFBooleanTrue)
   }
   Thread.sleep(forTimeInterval: 0.25)
-  let buttons = copyMessageButtons()
-  guard buttons.count > baselineCount else {
-    log("copy-harvest: no current-turn Copy message button (total=\(buttons.count) baseline=\(baselineCount))")
+  let initialButtons = copyMessageButtons()
+  guard !initialButtons.isEmpty else {
+    log("copy-harvest: no visible Copy message button (baseline=\(baselineCount))")
     return ""
   }
-  let currentButtons = Array(buttons.dropFirst(baselineCount))
-  log("copy-harvest: current=\(currentButtons.count) total=\(buttons.count) baseline=\(baselineCount)")
-  var bestClip = ""
-  // Two passes: normal delay, then slower pass for flaky AX/clipboard after long runs.
-  let passes: [(hover: TimeInterval, afterPress: TimeInterval)] = [(0.12, 0.55), (0.25, 1.1)]
-  for (passIdx, delays) in passes.enumerated() {
-    // Last assistant messages are usually the last copy buttons in the tree order.
-    for btn in currentButtons.suffix(8).reversed() {
-      var posRef: CFTypeRef?
-      if AXUIElementCopyAttributeValue(btn, kAXPositionAttribute as CFString, &posRef) == .success,
-         let axPos = posRef {
-        var point = CGPoint.zero
-        if AXValueGetValue(axPos as! AXValue, .cgPoint, &point) {
-          let src = CGEventSource(stateID: .hidSystemState)
-          CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
-          Thread.sleep(forTimeInterval: delays.hover)
-        }
+  let maxButtonsToTry = min(8, initialButtons.count)
+  log("copy-harvest: visible=\(initialButtons.count) baseline=\(baselineCount) observed=\(observedBody.count)")
+  let passes: [(physical: Bool, waitSec: TimeInterval, name: String)] = [
+    (true, 1.2, "mouseClick"),
+    (false, 2.5, "axPress"),
+  ]
+  for (passIdx, pass) in passes.enumerated() {
+    for offsetFromEnd in 0..<maxButtonsToTry {
+      guard refreshAxRoot(reason: "copy-harvest-attempt") else { continue }
+      _ = setAttr(root, kAXFrontmostAttribute as String, kCFBooleanTrue)
+      if let window = bfsFirst(root, pred: { _, role in role == "AXWindow" }) {
+        _ = setAttr(window, kAXMainAttribute as String, kCFBooleanTrue)
+        _ = setAttr(window, kAXFocusedAttribute as String, kCFBooleanTrue)
       }
+      let buttons = copyMessageButtons()
+      guard offsetFromEnd < buttons.count else {
+        Thread.sleep(forTimeInterval: 0.25)
+        continue
+      }
+      let index = buttons.count - 1 - offsetFromEnd
+      let btn = buttons[index]
+      let hasPostBaselineEvidence = buttons.count > baselineCount && index >= baselineCount
       let copyClipboardSnapshot = PasteboardSnapshot(pb)
       let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
       pb.clearContents()
       _ = pb.setString(sentinel, forType: .string)
-      let method: String
-      if clickCenter(btn) {
-        method = "mouseClick"
-      } else {
-        method = "axPress-fallback"
-        _ = press(btn)
-      }
-      let copiedChangeCount = pb.changeCount
-      let rawClip = pb.string(forType: .string) ?? ""
-      let clip = rawClip == sentinel
-        ? ""
-        : rawClip.trimmingCharacters(in: .whitespacesAndNewlines)
-      log("copy-harvest: attempt method=\(method) changed=\(rawClip != sentinel) chars=\(clip.count)")
-      // The pressed button is itself bound to this turn by baselineCount. Do
-      // not require AX-text overlap: Copy is the recovery path when AX body text is absent.
+      let sentinelChangeCount = pb.changeCount
+      let acted = pass.physical ? clickCenter(btn) : press(btn)
+      let copiedResult = acted
+        ? waitForCopiedClipboardString(
+            pb,
+            sentinel: sentinel,
+            sentinelChangeCount: sentinelChangeCount,
+            timeoutSec: pass.waitSec
+          )
+        : (text: "", changeCount: pb.changeCount)
+      let clip = copiedResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      log(
+        "copy-harvest: attempt method=\(pass.name) acted=\(acted) changed=\(!clip.isEmpty) " +
+        "chars=\(clip.count) total=\(buttons.count) baseline=\(baselineCount) index=\(index)"
+      )
       restorePasteboardIfOwned(
         copyClipboardSnapshot,
         pasteboard: pb,
-        expectedChangeCount: copiedChangeCount,
+        expectedChangeCount: copiedResult.changeCount,
         context: "copy-message"
       )
-      if clip.count < 40 { continue }
-      if isChromeText(clip) { continue }
-      if looksLikeMidFragment(clip) && clip.count < 400 { continue }
-      if promptLooksSet(clip, prompt) && clip.count < prompt.count + 80 { continue }
-      if clip.count > bestClip.count {
-        bestClip = clip
-        log(
-          "copy-harvest: clipboard chars=\(clip.count) fragment=\(looksLikeMidFragment(clip)) pass=\(passIdx + 1)"
-        )
+      guard let candidate = currentZipCopyCandidate(
+        clip,
+        promptText: prompt,
+        observedBody: observedBody,
+        hasPostBaselineButtonEvidence: hasPostBaselineEvidence,
+        baselineWasEmpty: baselineCount == 0,
+        expectedExactReply: expectedExactReply,
+        isNewestButtonAttempt: offsetFromEnd == 0
+      ) else {
+        Thread.sleep(forTimeInterval: 0.25)
+        continue
       }
+      let isExpectedExact = expectedExactReply.map {
+        normalizedCopyIdentity(candidate) == normalizedCopyIdentity($0)
+      } ?? false
+      if (candidate.count < 40 && !isExpectedExact) || isChromeText(candidate) { continue }
+      if looksLikeMidFragment(candidate) && candidate.count < 400 { continue }
+      log(
+        "copy-harvest: clipboard chars=\(candidate.count) fragment=\(looksLikeMidFragment(candidate)) pass=\(passIdx + 1)"
+      )
+      // Newest-first traversal makes the first proven body authoritative. Do
+      // not let a longer, older superset replace the current response.
+      return candidate
     }
-    // Good full body already — skip second pass.
-    if bestClip.count >= 400 && !looksLikeMidFragment(bestClip) { break }
   }
-  return bestClip
+  return ""
 }
 
 /// Pick the best single-body view from AX capture texts (no history soup).
@@ -1355,7 +1489,12 @@ func selectDeepHarvestBody(axBody: String, copiedBody: String) -> HarvestedReply
 /// Deep harvest: scroll + AX tree + optional clipboard copy after generation ended.
 /// A current-turn Copy-message body is authoritative even when it is shorter than
 /// an AX aggregate: AX may contain the whole transcript/sidebar rather than one reply.
-func deepHarvestReply(includeCopy: Bool, baseline: Set<String>, baselineCopyCount: Int) -> HarvestedReply {
+func deepHarvestReply(
+  includeCopy: Bool,
+  baseline: Set<String>,
+  baselineCopyCount: Int,
+  expectedExactReply: String?
+) -> HarvestedReply {
   scrollTranscript()
   var parts: [String] = []
   var seen = Set<String>()
@@ -1368,7 +1507,11 @@ func deepHarvestReply(includeCopy: Bool, baseline: Set<String>, baselineCopyCoun
   }
   let body = bestBodyFromAxTexts(parts)
   if includeCopy {
-    let clip = harvestViaCopyMessageButtons(afterBaselineCount: baselineCopyCount)
+    let clip = harvestViaCopyMessageButtons(
+      afterBaselineCount: baselineCopyCount,
+      observedBody: body,
+      expectedExactReply: expectedExactReply
+    )
     if !clip.isEmpty {
       log("deepHarvest: current-turn clipboard authoritative chars=\(clip.count) axChars=\(body.count)")
       return selectDeepHarvestBody(axBody: body, copiedBody: clip)
@@ -1723,6 +1866,20 @@ enum GenerationPhase: String {
   case captureFailed   // UI ended but body never became a valid audit capture
 }
 
+func shouldHarvestZipCopy(
+  sawAuthoritativeCopy: Bool,
+  phase: GenerationPhase,
+  controls: ComposerControls
+) -> Bool {
+  guard !sawAuthoritativeCopy, !controls.isGenerationActive else { return false }
+  switch phase {
+  case .settling, .complete, .captureFailed:
+    return true
+  case .awaitingStart, .active:
+    return controls.isGenerationEnded
+  }
+}
+
 struct GenerationSample {
   let controls: ComposerControls
   let body: String
@@ -1750,6 +1907,21 @@ func bodyAcceptableForFinish(_ text: String, exactToken: String?) -> Bool {
     }
   }
   return !isIncompleteZipReply(text)
+}
+
+func exactAxCandidate(_ text: String, token: String, baseline: Set<String>) -> Bool {
+  guard !baseline.contains(text) else { return false }
+  return text == token ||
+    (text.contains(token) && !text.lowercased().contains("reply with") && text.count <= token.count + 40)
+}
+
+func canEmitAuthoritativeCompletion(
+  body: String,
+  exactToken: String?,
+  sawThisTurn: Bool,
+  sawAuthoritativeCopy: Bool
+) -> Bool {
+  sawThisTurn && sawAuthoritativeCopy && bodyAcceptableForFinish(body, exactToken: exactToken)
 }
 
 /// Pure phase transition. Signal-driven — no wall-clock "force done" while active.
@@ -1975,6 +2147,135 @@ func runSelfcheckAbsorb() -> Never {
   results.append([
     "name": "attachment_filename_boundary",
     "pass": exactFilenamePass,
+  ])
+  let identityObserved = "This current archive audit has distinctive words for robust Copy identity matching."
+  let identityFull = identityObserved + " " + String(repeating: "verified archive continuation ", count: 20)
+  let virtualizedPass = currentZipCopyCandidate(
+    identityFull,
+    promptText: "unrelated archive prompt",
+    observedBody: identityObserved,
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  ) == identityFull.trimmingCharacters(in: .whitespacesAndNewlines)
+  if !virtualizedPass { failed += 1 }
+  results.append([
+    "name": "virtualized-equal-button-count-uses-body-identity",
+    "pass": virtualizedPass,
+  ])
+  let oldResponsePass = currentZipCopyCandidate(
+    "An older archive audit about an unrelated project.",
+    promptText: "unrelated archive prompt",
+    observedBody: identityObserved,
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  ) == nil
+  if !oldResponsePass { failed += 1 }
+  results.append([
+    "name": "virtualized-equal-button-count-rejects-old-response",
+    "pass": oldResponsePass,
+  ])
+  let shortSubstringPass = currentZipCopyCandidate(
+    "An older archive audit says OK but is not the current answer.",
+    promptText: "unrelated archive prompt",
+    observedBody: "OK",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  ) == nil
+  if !shortSubstringPass { failed += 1 }
+  results.append([
+    "name": "short-body-substring-rejects-old-response",
+    "pass": shortSubstringPass,
+  ])
+  let olderSuperset = "Older prefix \(identityFull) older suffix"
+  let firstProven = [identityObserved, olderSuperset].compactMap {
+    currentZipCopyCandidate(
+      $0,
+      promptText: "unrelated archive prompt",
+      observedBody: identityObserved,
+      hasPostBaselineButtonEvidence: false,
+      baselineWasEmpty: false
+    )
+  }.first
+  let newestFirstPass = firstProven == identityObserved
+  if !newestFirstPass { failed += 1 }
+  results.append([
+    "name": "newest-proven-copy-wins-over-older-longer-superset",
+    "pass": newestFirstPass,
+  ])
+  let exactPrompt = "Reply exactly with ZIP_REPEAT_OK and nothing else."
+  let repeatedExactPass = currentZipCopyCandidate(
+    "ZIP_REPEAT_OK",
+    promptText: exactPrompt,
+    observedBody: "",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false,
+    expectedExactReply: "ZIP_REPEAT_OK",
+    isNewestButtonAttempt: true
+  ) == "ZIP_REPEAT_OK" && currentZipCopyCandidate(
+    "ZIP_REPEAT_OK",
+    promptText: exactPrompt,
+    observedBody: "",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false,
+    expectedExactReply: "ZIP_REPEAT_OK",
+    isNewestButtonAttempt: false
+  ) == nil
+  if !repeatedExactPass { failed += 1 }
+  results.append([
+    "name": "repeated-exact-reply-accepts-only-newest-copy-control",
+    "pass": repeatedExactPass,
+  ])
+  let exactBaseline: Set<String> = ["ZIP_REPEAT_OK"]
+  let baselineExactPass = !exactAxCandidate("ZIP_REPEAT_OK", token: "ZIP_REPEAT_OK", baseline: exactBaseline)
+  if !baselineExactPass { failed += 1 }
+  results.append([
+    "name": "baseline-exact-ax-text-cannot-start-current-turn",
+    "pass": baselineExactPass,
+  ])
+  let noCopyCompletionPass = !canEmitAuthoritativeCompletion(
+    body: "ZIP_REPEAT_OK",
+    exactToken: "ZIP_REPEAT_OK",
+    sawThisTurn: true,
+    sawAuthoritativeCopy: false
+  ) && canEmitAuthoritativeCompletion(
+    body: "ZIP_REPEAT_OK",
+    exactToken: "ZIP_REPEAT_OK",
+    sawThisTurn: true,
+    sawAuthoritativeCopy: true
+  )
+  if !noCopyCompletionPass { failed += 1 }
+  results.append([
+    "name": "complete-delivery-always-requires-current-turn-copy-proof",
+    "pass": noCopyCompletionPass,
+  ])
+  let timeoutParserPass = parseNonnegativeFiniteTimeout("0") == 0 &&
+    parseNonnegativeFiniteTimeout("1.25") == 1.25 &&
+    parseNonnegativeFiniteTimeout("-1") == nil &&
+    parseNonnegativeFiniteTimeout("NaN") == nil &&
+    parseNonnegativeFiniteTimeout("infinity") == nil
+  if !timeoutParserPass { failed += 1 }
+  results.append([
+    "name": "timeout-parser-rejects-invalid-unlimited-fallbacks",
+    "pass": timeoutParserPass,
+  ])
+  let endedControls = ComposerControls(stop: false, send: true, loadingChrome: false)
+  let singleCopyPass = shouldHarvestZipCopy(
+    sawAuthoritativeCopy: false,
+    phase: .settling,
+    controls: endedControls
+  ) && !shouldHarvestZipCopy(
+    sawAuthoritativeCopy: true,
+    phase: .settling,
+    controls: endedControls
+  ) && !shouldHarvestZipCopy(
+    sawAuthoritativeCopy: false,
+    phase: .settling,
+    controls: ComposerControls(stop: true, send: false, loadingChrome: false)
+  )
+  if !singleCopyPass { failed += 1 }
+  results.append([
+    "name": "settling-copy-requires-ended-ui-and-no-prior-proof",
+    "pass": singleCopyPass,
   ])
   let ok = failed == 0
   let out: [String: Any] = [
@@ -2322,31 +2623,39 @@ while true {
   if tick % 3 == 0 { scrollTranscript() }
 
   var controls = readComposerControls(bodyHint: best)
-  if controls.isGenerationActive { sawThisTurn = true }
+  if controls.isGenerationActive {
+    sawThisTurn = true
+    if sawAuthoritativeCopy {
+      log("generation resumed; invalidating prior Copy proof")
+      sawAuthoritativeCopy = false
+    }
+  }
 
   // Copy-message is used only after a strong generation-end signal. Copying while
   // active can capture a partial reply and must never overwrite the growing AX body.
-  let shouldCopy: Bool = {
-    switch phase {
-    case .settling, .complete, .captureFailed:
-      return true
-    case .awaitingStart, .active:
-      return controls.isGenerationEnded
-    }
-  }()
+  let shouldCopy = shouldHarvestZipCopy(
+    sawAuthoritativeCopy: sawAuthoritativeCopy,
+    phase: phase,
+    controls: controls
+  )
   let deep = deepHarvestReply(
     includeCopy: shouldCopy,
     baseline: baseline2,
-    baselineCopyCount: baselineCopyButtonCount
+    baselineCopyCount: baselineCopyButtonCount,
+    expectedExactReply: exactToken
   )
-  if deep.clipboardAuthoritative { sawAuthoritativeCopy = true }
-  absorbBody(deep.body, minDelta: 20, authoritative: deep.clipboardAuthoritative)
+  if deep.clipboardAuthoritative {
+    sawAuthoritativeCopy = true
+    absorbBody(deep.body, minDelta: 20, authoritative: true)
+  } else if !sawAuthoritativeCopy {
+    // Once Copy has proven exact current-turn bytes, later AX aggregates must
+    // not overwrite them while the UI remains ended.
+    absorbBody(deep.body, minDelta: 20)
+  }
 
   let texts = allCaptureTexts()
-  if let token = exactToken {
-    let hits = texts.filter {
-      $0 == token || ($0.contains(token) && !$0.lowercased().contains("reply with") && $0.count <= token.count + 40)
-    }
+  if !sawAuthoritativeCopy, let token = exactToken {
+    let hits = texts.filter { exactAxCandidate($0, token: token, baseline: baseline2) }
     if let a = hits.first(where: { $0 == token }) ?? hits.first {
       absorbBody(a, minDelta: 0)
       sawThisTurn = true
@@ -2359,7 +2668,7 @@ while true {
     parts: &accumulatedParts,
     partSet: &accumulatedSet
   )
-  absorbBody(ing.assistant, minDelta: 5)
+  if !sawAuthoritativeCopy { absorbBody(ing.assistant, minDelta: 5) }
 
   // Re-read controls after harvest (chrome may appear in body).
   controls = readComposerControls(bodyHint: best)
@@ -2425,17 +2734,19 @@ while true {
 
   case .settling:
     // Deep harvest every settle tick until complete or captureFailed.
+    if sawAuthoritativeCopy { continue }
     let h = deepHarvestReply(
       includeCopy: true,
       baseline: baseline2,
-      baselineCopyCount: baselineCopyButtonCount
+      baselineCopyCount: baselineCopyButtonCount,
+      expectedExactReply: exactToken
     )
     if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
     absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
     continue
 
   case .complete:
-    if exactToken == nil && !sawAuthoritativeCopy {
+    if !sawAuthoritativeCopy {
       if consecutiveEndedObservations >= 40 {
         emitStablePartial(
           best,
@@ -2458,7 +2769,12 @@ while true {
       note = "settled-generation-ended"
     }
     // Final safety: refuse incomplete (classifier should already enforce).
-    if !bodyAcceptableForFinish(best, exactToken: exactToken) {
+    if !canEmitAuthoritativeCompletion(
+      body: best,
+      exactToken: exactToken,
+      sawThisTurn: sawThisTurn,
+      sawAuthoritativeCopy: sawAuthoritativeCopy
+    ) {
       log("complete phase but body not acceptable — revert to settling")
       phase = .settling
       phaseEnteredAt = Date()
@@ -2468,13 +2784,16 @@ while true {
     emitComplete(best, finishNote: note)
 
   case .captureFailed:
-    let h = deepHarvestReply(
-      includeCopy: true,
-      baseline: baseline2,
-      baselineCopyCount: baselineCopyButtonCount
-    )
-    if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
-    absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
+    if !sawAuthoritativeCopy {
+      let h = deepHarvestReply(
+        includeCopy: true,
+        baseline: baseline2,
+        baselineCopyCount: baselineCopyButtonCount,
+        expectedExactReply: exactToken
+      )
+      if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
+      absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
+    }
     // One more classification pass in case harvest fixed it.
     let retry = GenerationSample(
       controls: readComposerControls(bodyHint: best),
@@ -2484,7 +2803,13 @@ while true {
       consecutiveStableSnapshots: max(consecutiveStableSnapshots, 3),
       consecutiveEndedObservations: max(consecutiveEndedObservations, 5)
     )
-    if classifyGenerationPhase(retry, exactToken: exactToken) == .complete {
+    if classifyGenerationPhase(retry, exactToken: exactToken) == .complete &&
+       canEmitAuthoritativeCompletion(
+         body: best,
+         exactToken: exactToken,
+         sawThisTurn: sawThisTurn,
+         sawAuthoritativeCopy: sawAuthoritativeCopy
+       ) {
       emitComplete(best, finishNote: "settled-after-capture-retry")
     }
     emitStablePartial(
@@ -2501,14 +2826,22 @@ let elapsedFinal = Int(Date().timeIntervalSince(waitStarted))
 log("user timeout reached elapsed=\(elapsedFinal)s best=\(best.count) phase=\(phase.rawValue) timeoutSec=\(timeoutSec)")
 let finalControls = readComposerControls(bodyHint: best)
 if !finalControls.isGenerationActive {
-  let h = deepHarvestReply(
-    includeCopy: true,
-    baseline: baseline2,
-    baselineCopyCount: baselineCopyButtonCount
-  )
-  if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
-  absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
-  if bodyAcceptableForFinish(best, exactToken: exactToken) && sawThisTurn {
+  if !sawAuthoritativeCopy {
+    let h = deepHarvestReply(
+      includeCopy: true,
+      baseline: baseline2,
+      baselineCopyCount: baselineCopyButtonCount,
+      expectedExactReply: exactToken
+    )
+    if h.clipboardAuthoritative { sawAuthoritativeCopy = true }
+    absorbBody(h.body, minDelta: 10, authoritative: h.clipboardAuthoritative)
+  }
+  if canEmitAuthoritativeCompletion(
+    body: best,
+    exactToken: exactToken,
+    sawThisTurn: sawThisTurn,
+    sawAuthoritativeCopy: sawAuthoritativeCopy
+  ) {
     emitComplete(best, finishNote: "user-timeout-settled-complete")
   }
 }

@@ -14,7 +14,7 @@ if [[ ! -f "$HELPER" ]]; then
   exit 2
 fi
 # Refuse stale extracts missing this transport revision or required policies.
-if ! grep -q '^// PSST_TRANSPORT_REV=3$' "$HELPER" \
+if ! grep -q '^// PSST_TRANSPORT_REV=5$' "$HELPER" \
   || ! grep -q 'double-check' "$HELPER" \
   || ! grep -q 'not treating as sent' "$HELPER" \
   || ! grep -q 'avg < 48' "$HELPER" \
@@ -41,11 +41,17 @@ cd "$ROOT"
 # The helper's own --timeout 0 has no response wall-clock deadline.
 set +e
 RUN_OUTPUT="$(mktemp -t psst-gpt-wrapper.XXXXXX)"
+cleanup() {
+  rm -f -- "$RUN_OUTPUT"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 /usr/bin/swift "$HELPER" --root "$ROOT" --timeout 0 -- "$PROMPT" | tee "$RUN_OUTPUT"
 EC=${PIPESTATUS[0]}
 set -e
 STAGE_ID="$(sed -n 's/.*"handoffStageId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RUN_OUTPUT" | tail -n 1)"
-rm -f "$RUN_OUTPUT"
 if [[ -n "$STAGE_ID" ]] \
   && [[ -f .ds/psst-gpt/last-result.json ]] \
   && grep -Fq "\"stageId\" : \"$STAGE_ID\"" .ds/psst-gpt/last-result.json; then

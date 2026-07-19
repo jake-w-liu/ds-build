@@ -25,7 +25,7 @@ ad-hoc shell recipes.
 | **Wake hold** | On macOS, helpers use a **multi-layer** hold for long audits (host `displaysleep` can be ~2m): (1) primary `caffeinate -dims -w <self>`, (2) periodic `caffeinate -u -t 120` user-active pulses, (3) `ensureAlive()` restarts a dead primary from the wait loop. Released on every exit. Only while the **Swift helper** runs — **do not** wrap in an extra long-lived `caffeinate` unless the user asks. |
 | **Host / DS bash lifecycle** | Production `ds` may auto-background a foreground bash call after its short turn-blocking budget. That is a transport transition, **not completion**: keep the same `task_id`, wait for completion/auto-wake, and re-read task output as often as needed with **no overall polling cap**. Background helpers have no wall-clock deadline. Never launch a second helper, use `nohup`/manual `&`, or return while the task is pending. |
 | **Short `--timeout N`** | N>0 and N&lt;3600 **auto-upgrades to unlimited (0)** unless `--timeout-strict` (prevents accidental cutoffs). Prefer `--timeout 0`. |
-| **AX flake (long runs)** | Wait loop re-activates ChatGPT + refreshes AX root periodically; Copy-message harvest retries with a slow second pass. Still depends on Accessibility remaining granted. |
+| **AX flake (long runs)** | Wait loop re-activates ChatGPT + refreshes AX root periodically. Copy-message harvest polls for asynchronous clipboard delivery, re-resolves controls after toolbar rerenders, and binds equal/reordered/virtualized button sets to the current turn by matching the copied body to the observed response. It traverses newest-first, accepts the first proven current body, and does not click again after proof unless generation resumes. Still depends on Accessibility remaining granted. |
 | **Vision** | None — shell + AX only. |
 
 ## Scripts
@@ -57,11 +57,15 @@ timers:
 | `awaitingStart` | After send; no Stop/growth for this turn yet | No |
 | `active` | Stop without Send, or loading chrome (thinking/streaming) | **Never** (hours OK) |
 | `settling` | UI shows ended (Send ready / Stop gone); deep harvest + fingerprint stability | No until settled |
-| `complete` | Acceptable body + stable harvests | Yes → stage full reply |
+| `complete` | Acceptable body + stable harvests + current-turn Copy proof | Yes → stage full reply |
 | `captureFailed` | Generation ended but body never passed complete checks | Yes → honest partial |
 
 Never treats “no body growth” as done while **active**. After end: **Copy message**
-harvest so full audits reach `.ds/psst-gpt/last-response.md`.
+harvest so full audits reach `.ds/psst-gpt/last-response.md`. Copy-button counts
+are diagnostic only because ChatGPT may virtualize or replace old controls; a
+full copied body is accepted only when it is proven to belong to this turn.
+This proof is required for every successful completion, including short or
+repeated exact replies; AX text alone is never labeled complete.
 `--timeout N` (N>0) is an optional user wall-clock cap only.
 
 Selfcheck: `bash …/selfcheck_generation_policy.sh` (pure phase cases, no ChatGPT).
@@ -115,7 +119,14 @@ If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open
    - `.ds/psst-gpt/last-response.md` — full body
    - `.ds/psst-gpt/last-result.json` — full JSON
 
-4. **Handoff:** Use the full response for “report back”. If `mustReturnVerbatim`, preserve ChatGPT’s body. For “reverify”, re-read the staged files and confirm they are a real audit (not chrome / zip filename only).
+4. **Handoff:** Use the full response for “report back”. When the current-run
+   JSON has `mustReturnFinalDelivery: true` or `mustReturnVerbatim: true`, the
+   **entire DS final answer must equal `finalDeliveryText` byte-for-byte**. Emit
+   the raw string as the answer: no success preface, summary, Markdown fence,
+   indentation, metadata, path, or trailing verification note. Do not copy the
+   helper's surrounding JSON. For “reverify”, re-read the staged files and
+   confirm they are a real audit (not chrome / zip filename only) before making
+   that exact handoff.
 
    A relay is successful **only** when its current-run JSON says both `ok: true`
    and `status: "complete"`. If the helper exits nonzero, says `ok: false`, or
@@ -132,6 +143,7 @@ If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open
 | `PSST_GPT_SCREEN_LOCKED` | Stayed locked until deadline; unlock and re-run with `--timeout 0`. |
 | `WORK_MODE` | Switch to Chat. |
 | `ATTACHMENT_MISSING` | Retry zip attach. |
+| `COPY_CAPTURE_UNAVAILABLE` / `PSST_GPT_COPY_CAPTURE_UNAVAILABLE` | Generation ended, but current-turn Copy proof failed; treat the body as diagnostic partial only and restore Accessibility/clipboard control before retrying. |
 | `TIMEOUT` | Use helper `--timeout 0`; if bash auto-backgrounded, keep waiting on the same task until exit. |
 
 ## Setup
@@ -143,7 +155,10 @@ If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open
 ## CRITICAL
 
 Never use Work. Never invent an audit if the helper failed.  
-When complete with non-empty `finalDeliveryText`, that text is the audit deliverable for DS continuation.
+When complete with non-empty `finalDeliveryText`, that text is the audit
+deliverable for DS continuation. If either return flag is true, return exactly
+that string as the whole DS final answer, byte-for-byte, with nothing added or
+removed.
 
 For **zip / full codebase**: run `run_full_codebase_audit.sh` (or zip helper with `--timeout 0`) **once**, follow the same process/task until exit, then read staged JSON/md.
 **Forbidden:** short response deadlines, launching duplicate/manual-background helpers, returning while the auto-background task is pending, or abandoning zip for a text-only “describe the tree” substitute when the user asked to attach the zip.

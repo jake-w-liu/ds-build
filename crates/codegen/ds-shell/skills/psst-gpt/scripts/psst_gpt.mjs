@@ -36,6 +36,10 @@ const DIRECT_AX_PROBE_TIMEOUT_MS = 30 * 1000;
 const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = 2 * 60 * 1000;
 const DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS = 15 * 1000;
 const DIRECT_AX_UPLOAD_PROCESS_OVERHEAD_MS = 120 * 1000;
+// Generation has no default deadline. Once the UI has strongly ended and the
+// AX body is stable, bound only the separate Copy-proof recovery loop so a
+// permanently revoked clipboard/Accessibility permission returns a real error.
+const MAX_COPY_CAPTURE_FAILURES = 6;
 // Rate-limit setup dialogs so missing permissions do not interrupt every run.
 const ACCESSIBILITY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS = 25000;
@@ -1413,6 +1417,7 @@ async function readDirectAxPsstGPTState({
 async function copyDirectAxCurrentAssistant({
   baselineCopyMessageCount = 0,
   prompt = "",
+  observedAssistantText = "",
   restoreFrontmostOnExit = true,
 } = {}) {
   const result = await runDirectAxHelper({
@@ -1420,6 +1425,7 @@ async function copyDirectAxCurrentAssistant({
     prompt,
     filePaths: [],
     baselineCopyMessageCount,
+    observedAssistantText,
     restoreFrontmostOnExit,
   }, {
     timeoutMs: DIRECT_AX_PROBE_TIMEOUT_MS + DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS,
@@ -3000,9 +3006,28 @@ async function waitForAppAssistantResponse({
         const copied = await copyDirectAxCurrentAssistant({
           baselineCopyMessageCount: currentProgress.baselineCopyMessageCount ?? 0,
           prompt,
+          observedAssistantText: captureState.assistantText,
           restoreFrontmostOnExit: true,
         });
-        if (copied) finalAssistantText = copied;
+        if (!copied) {
+          currentProgress = {
+            ...currentProgress,
+            copyCaptureFailures: currentProgress.copyCaptureFailures + 1,
+          };
+          if (currentProgress.copyCaptureFailures >= MAX_COPY_CAPTURE_FAILURES) {
+            throw codedError(
+              "PSST_GPT_RESPONSE_CAPTURE_INCOMPLETE",
+              "Generation ended, but repeated current-turn Copy-message recovery could not prove a complete assistant response.",
+              {
+                captureState,
+                lastState: state,
+                copyCaptureFailures: currentProgress.copyCaptureFailures,
+              }
+            );
+          }
+          continue;
+        }
+        finalAssistantText = copied;
       }
       if (
         typeof isFinalResponseAcceptable === "function" &&
@@ -3197,6 +3222,7 @@ function createAssistantWaitProgress(now = Date.now()) {
     responseStartedEver: false,
     consecutiveEndedObservations: 0,
     baselineCopyMessageCount: null,
+    copyCaptureFailures: 0,
   };
 }
 
@@ -3219,6 +3245,9 @@ function normalizeAssistantWaitProgress(progress = {}, now = Date.now()) {
     baselineCopyMessageCount: Number.isInteger(progress.baselineCopyMessageCount)
       ? Math.max(0, progress.baselineCopyMessageCount)
       : null,
+    copyCaptureFailures: Number.isInteger(progress.copyCaptureFailures)
+      ? Math.max(0, progress.copyCaptureFailures)
+      : 0,
   };
 }
 
@@ -3243,6 +3272,7 @@ function advanceAssistantWaitProgress(progress = {}, state = {}, prompt = "", no
       : 0,
     baselineCopyMessageCount: current.baselineCopyMessageCount ??
       (Number.isInteger(state.copyMessageCount) ? Math.max(0, state.copyMessageCount) : null),
+    copyCaptureFailures: current.copyCaptureFailures,
   };
 }
 

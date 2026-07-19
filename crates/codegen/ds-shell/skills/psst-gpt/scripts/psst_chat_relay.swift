@@ -1,5 +1,5 @@
 #!/usr/bin/env swift
-// PSST_TRANSPORT_REV=3
+// PSST_TRANSPORT_REV=5
 // psst_chat_relay.swift — Chat-only Accessibility relay for ChatGPT macOS app.
 // NEVER uses Work / Codex agent usage. DeepSeek has no vision; pure AX only.
 //
@@ -509,13 +509,24 @@ func findChatComposer(_ root: AXUIElement) -> AXUIElement? {
   return nil
 }
 
-func newChat(_ root: AXUIElement) {
+@discardableResult
+func newChat(_ root: AXUIElement) -> Bool {
   if let nc = bfsAll(root, pred: { el, r in
     r == "AXButton" && (s(el, kAXTitleAttribute as String) == "New chat" || s(el, kAXDescriptionAttribute as String) == "New chat")
   }).first {
-    log("New chat press=\(press(nc))")
-    Thread.sleep(forTimeInterval: 1.1)
+    let pressed = press(nc)
+    log("New chat press=\(pressed)")
+    if pressed {
+      Thread.sleep(forTimeInterval: 1.1)
+      return true
+    }
   }
+  // Electron occasionally virtualizes the sidebar button out of the AX tree.
+  // ChatGPT's native New chat shortcut is the deterministic fallback.
+  key(45, flags: .maskCommand) // Cmd+N
+  log("New chat fallback=cmd-n")
+  Thread.sleep(forTimeInterval: 1.1)
+  return true
 }
 
 func trySelectFlash(_ root: AXUIElement) {
@@ -655,6 +666,93 @@ func requestedExactReply(_ prompt: String) -> String? {
   return nil
 }
 
+func normalizedCopyIdentity(_ value: String) -> String {
+  value
+    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+    .lowercased()
+}
+
+func copyIdentityWords(_ value: String) -> [String] {
+  value.lowercased().split { character in
+    character.unicodeScalars.allSatisfy { !CharacterSet.alphanumerics.contains($0) }
+  }.map(String.init)
+}
+
+func copyMatchesObservedRelayBody(_ copied: String, observedBody: String) -> Bool {
+  let candidate = normalizedCopyIdentity(copied)
+  let observed = normalizedCopyIdentity(observedBody)
+  guard !candidate.isEmpty, !observed.isEmpty else { return false }
+  if candidate == observed {
+    return true
+  }
+  let observedWords = copyIdentityWords(observed)
+  let candidateWords = copyIdentityWords(candidate)
+  // Short bodies are only identifiable by equality. Substring acceptance can
+  // let an old response containing "OK" impersonate the current short reply.
+  guard observedWords.count >= 8, candidateWords.count >= 8 else { return false }
+  if candidate.contains(observed) || observed.contains(candidate) {
+    return true
+  }
+  let candidateWordText = candidateWords.joined(separator: " ")
+  let width = min(10, observedWords.count)
+  let maxStart = observedWords.count - width
+  let starts = Set([0, maxStart / 4, maxStart / 2, (maxStart * 3) / 4, maxStart])
+  let matches = starts.reduce(into: 0) { count, start in
+    let anchor = observedWords[start..<(start + width)].joined(separator: " ")
+    if candidateWordText.contains(anchor) { count += 1 }
+  }
+  return matches >= min(2, starts.count)
+}
+
+func currentRelayCopyCandidate(
+  _ copied: String,
+  prompt: String,
+  observedBody: String,
+  hasPostBaselineButtonEvidence: Bool,
+  baselineWasEmpty: Bool,
+  expectedExactReply: String? = nil,
+  isNewestButtonAttempt: Bool = false
+) -> String? {
+  let candidate = copied.trimmingCharacters(in: .whitespacesAndNewlines)
+  if candidate.isEmpty || normalizedCopyIdentity(candidate) == normalizedCopyIdentity(prompt) {
+    return nil
+  }
+  // A repeated exact reply may already be present in the baseline transcript,
+  // so AX text identity cannot distinguish the new instance. The newest Copy
+  // control can: accept only its bytes, and only when they equal the exact
+  // reply parsed from this run's prompt. Never accept an older matching button.
+  if isNewestButtonAttempt,
+     let expectedExactReply,
+     normalizedCopyIdentity(candidate) == normalizedCopyIdentity(expectedExactReply) {
+    return candidate
+  }
+  if !observedBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+    guard copyMatchesObservedRelayBody(candidate, observedBody: observedBody) else { return nil }
+  } else if !hasPostBaselineButtonEvidence && !baselineWasEmpty {
+    return nil
+  }
+  return candidate
+}
+
+func waitForCopiedClipboardString(
+  _ pasteboard: NSPasteboard,
+  sentinel: String,
+  sentinelChangeCount: Int,
+  timeoutSec: TimeInterval
+) -> (text: String, changeCount: Int) {
+  let deadline = Date().addingTimeInterval(max(0.05, timeoutSec))
+  repeat {
+    let changeCount = pasteboard.changeCount
+    let raw = pasteboard.string(forType: .string) ?? ""
+    if changeCount != sentinelChangeCount && raw != sentinel {
+      return (raw, changeCount)
+    }
+    Thread.sleep(forTimeInterval: 0.04)
+  } while Date() < deadline
+  return ("", pasteboard.changeCount)
+}
+
 func mergeRelayBody(_ current: String, _ candidate: String) -> String {
   let a = current.trimmingCharacters(in: .whitespacesAndNewlines)
   let b = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -663,6 +761,15 @@ func mergeRelayBody(_ current: String, _ candidate: String) -> String {
   if b.contains(a) && b.count > a.count { return b }
   if a.contains(b) { return a }
   return b.count > a.count ? b : a
+}
+
+// Streaming AX text can briefly expose a longer prefix that the final render
+// replaces (for example, a generated answer replaced by a short error body).
+// Copy identity must follow the current render, not the monotonic best-so-far
+// buffer, or a valid final Copy can never match the stale prefix.
+func relayCopyIdentityBody(currentAxBody: String, accumulatedBody: String) -> String {
+  let current = currentAxBody.trimmingCharacters(in: .whitespacesAndNewlines)
+  return current.isEmpty ? accumulatedBody.trimmingCharacters(in: .whitespacesAndNewlines) : current
 }
 
 func bestRelayAxBody(
@@ -696,41 +803,77 @@ func bestRelayAxBody(
 
 func harvestCurrentRelayCopy(
   baselineCopyCount: Int,
-  prompt: String
+  prompt: String,
+  observedBody: String,
+  expectedExactReply: String?
 ) -> String {
   guard let focusedRoot = focusedChatGPTRootForCopy() else { return "" }
-  let buttons = relayCopyButtons(focusedRoot)
-  guard buttons.count > baselineCopyCount else { return "" }
-  let pb = NSPasteboard.general
-  var best = ""
-  for button in buttons.dropFirst(baselineCopyCount).suffix(4).reversed() {
-    let snapshot = PasteboardSnapshot(pb)
-    let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
-    pb.clearContents()
-    _ = pb.setString(sentinel, forType: .string)
-    let method: String
-    if clickCenter(button) {
-      method = "mouseClick"
-    } else {
-      method = "axPress-fallback"
-      _ = press(button)
-    }
-    let copiedChangeCount = pb.changeCount
-    let raw = pb.string(forType: .string) ?? ""
-    let text = raw == sentinel ? "" : raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    log("copy-attempt method=\(method) changed=\(raw != sentinel) chars=\(text.count)")
-    // The pressed button is itself bound to this turn by baselineCopyCount. Do
-    // not require AX-text overlap: Copy is the recovery path when AX body text is absent.
-    restorePasteboardIfOwned(
-      snapshot,
-      pasteboard: pb,
-      expectedChangeCount: copiedChangeCount,
-      context: "copy-message"
-    )
-    if text.isEmpty || text == prompt || isRelayChrome(text) { continue }
-    best = mergeRelayBody(best, text)
+  let initialButtons = relayCopyButtons(focusedRoot)
+  guard !initialButtons.isEmpty else {
+    log("copy-harvest: no visible Copy message button (baseline=\(baselineCopyCount))")
+    return ""
   }
-  return best
+  let maxButtonsToTry = min(8, initialButtons.count)
+  let pb = NSPasteboard.general
+  let methods: [(physical: Bool, waitSec: TimeInterval, name: String)] = [
+    (true, 1.2, "mouseClick"),
+    (false, 2.5, "axPress"),
+  ]
+  for method in methods {
+    for offsetFromEnd in 0..<maxButtonsToTry {
+      guard let freshRoot = focusedChatGPTRootForCopy() else { continue }
+      let buttons = relayCopyButtons(freshRoot)
+      guard offsetFromEnd < buttons.count else {
+        Thread.sleep(forTimeInterval: 0.25)
+        continue
+      }
+      let index = buttons.count - 1 - offsetFromEnd
+      let button = buttons[index]
+      let hasPostBaselineEvidence = buttons.count > baselineCopyCount && index >= baselineCopyCount
+      let snapshot = PasteboardSnapshot(pb)
+      let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
+      pb.clearContents()
+      _ = pb.setString(sentinel, forType: .string)
+      let sentinelChangeCount = pb.changeCount
+      let acted = method.physical ? clickCenter(button) : press(button)
+      let copiedResult = acted
+        ? waitForCopiedClipboardString(
+            pb,
+            sentinel: sentinel,
+            sentinelChangeCount: sentinelChangeCount,
+            timeoutSec: method.waitSec
+          )
+        : (text: "", changeCount: pb.changeCount)
+      let text = copiedResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      log(
+        "copy-attempt method=\(method.name) acted=\(acted) changed=\(!text.isEmpty) " +
+        "chars=\(text.count) total=\(buttons.count) baseline=\(baselineCopyCount) index=\(index)"
+      )
+      restorePasteboardIfOwned(
+        snapshot,
+        pasteboard: pb,
+        expectedChangeCount: copiedResult.changeCount,
+        context: "copy-message"
+      )
+      guard let candidate = currentRelayCopyCandidate(
+        text,
+        prompt: prompt,
+        observedBody: observedBody,
+        hasPostBaselineButtonEvidence: hasPostBaselineEvidence,
+        baselineWasEmpty: baselineCopyCount == 0,
+        expectedExactReply: expectedExactReply,
+        isNewestButtonAttempt: offsetFromEnd == 0
+      ), !isRelayChrome(candidate) else {
+        Thread.sleep(forTimeInterval: 0.25)
+        continue
+      }
+      // Buttons are traversed newest-first. Once the current reply is proven,
+      // returning immediately prevents an older, longer superset response from
+      // replacing it on a later attempt.
+      return candidate
+    }
+  }
+  return ""
 }
 
 func selectEndedRelayBody(axBody: String, copiedBody: String) -> String {
@@ -779,6 +922,15 @@ struct RelayControls {
 
 enum RelayPhase: String {
   case awaitingStart, active, settling, complete, captureFailed
+}
+
+func shouldHarvestRelayCopy(
+  sawAuthoritativeCopy: Bool,
+  controls: RelayControls,
+  phase: RelayPhase
+) -> Bool {
+  guard !sawAuthoritativeCopy, !controls.active else { return false }
+  return controls.ended || phase == .settling
 }
 
 func classifyRelayPhase(
@@ -878,7 +1030,7 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
   var root = AXUIElementCreateApplication(app.processIdentifier)
   ensureChatOnly(root)
   if newChatFlag {
-    newChat(root)
+    _ = newChat(root)
     root = AXUIElementCreateApplication(app.processIdentifier)
     ensureChatOnly(root)
   }
@@ -1007,6 +1159,7 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
   var best = ""
   var sawThisTurn = false
   var sawAuthoritativeCopy = false
+  var authoritativeBody = ""
   var fingerprint = ""
   var stableSnapshots = 0
   var endedObservations = 0
@@ -1050,20 +1203,42 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
       stop: findStopButton(root) != nil,
       send: findSendButton(root, requireEnabled: false) != nil
     )
-    if controls.active { sawThisTurn = true }
+    if controls.active {
+      sawThisTurn = true
+      // If generation resumes after an apparent end, the earlier Copy body is
+      // no longer final proof. Re-enable harvest after the next strong end.
+      if sawAuthoritativeCopy {
+        log("relay generation resumed; invalidating prior Copy proof")
+        sawAuthoritativeCopy = false
+        authoritativeBody = ""
+      }
+    }
     let texts = relayCaptureTexts(root)
     let axBody = bestRelayAxBody(texts: texts, baseline: baseline, prompt: prompt, exactReply: exactReply)
-    best = mergeRelayBody(best, axBody)
+    if !sawAuthoritativeCopy {
+      best = mergeRelayBody(best, axBody)
+    }
     if !axBody.isEmpty { sawThisTurn = true }
 
-    if controls.ended || phase == .settling {
+    if shouldHarvestRelayCopy(
+      sawAuthoritativeCopy: sawAuthoritativeCopy,
+      controls: controls,
+      phase: phase
+    ) {
+      let copyIdentityBody = relayCopyIdentityBody(
+        currentAxBody: axBody,
+        accumulatedBody: best
+      )
       let copied = harvestCurrentRelayCopy(
         baselineCopyCount: baselineCopyCount,
-        prompt: prompt
+        prompt: prompt,
+        observedBody: copyIdentityBody,
+        expectedExactReply: exactReply
       )
       if !copied.isEmpty {
         log("relay current-turn Copy-message authoritative chars=\(copied.count) axChars=\(best.count)")
         best = selectEndedRelayBody(axBody: best, copiedBody: copied)
+        authoritativeBody = best
         sawThisTurn = true
         sawAuthoritativeCopy = true
       }
@@ -1111,7 +1286,7 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
 
     switch phase {
     case .complete:
-      if exactReply == nil && !sawAuthoritativeCopy {
+      if !sawAuthoritativeCopy {
         if endedObservations >= 40 {
           finish(best, status: "partial", code: "PSST_GPT_COPY_CAPTURE_UNAVAILABLE", exitCode: 3)
         }
@@ -1120,7 +1295,7 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
         stableSnapshots = 0
         continue
       }
-      finish(best, status: "complete", exitCode: 0)
+      finish(authoritativeBody, status: "complete", exitCode: 0)
     case .captureFailed:
       finish(best, status: "partial", code: "PSST_GPT_CAPTURE_FAILED", exitCode: 3)
     case .awaitingStart, .active, .settling:
@@ -1229,6 +1404,130 @@ func runSelfcheckRelayPolicy() -> Never {
     "copyChars": cleanCopy.count,
     "pass": authoritativePass,
   ])
+  let staleStreamingPrefix = "PSST_ROBUST_CONTINUE_BEGIN"
+  let finalRenderedError = "FAILURE HELPER_JSON_UNAVAILABLE"
+  let copyIdentityBody = relayCopyIdentityBody(
+    currentAxBody: finalRenderedError,
+    accumulatedBody: staleStreamingPrefix
+  )
+  let finalRenderPass = copyIdentityBody == finalRenderedError &&
+    currentRelayCopyCandidate(
+      finalRenderedError,
+      prompt: "unrelated user prompt",
+      observedBody: copyIdentityBody,
+      hasPostBaselineButtonEvidence: false,
+      baselineWasEmpty: false
+    ) == finalRenderedError
+  if !finalRenderPass { failed += 1 }
+  results.append([
+    "name": "final-render-replaces-stale-streaming-prefix-for-copy-identity",
+    "pass": finalRenderPass,
+  ])
+  let identityObserved = "This current assistant answer has distinctive words for robust Copy identity matching."
+  let identityFull = identityObserved + " " + String(repeating: "verified continuation segment ", count: 20)
+  let virtualizedCandidate = currentRelayCopyCandidate(
+    identityFull,
+    prompt: "unrelated user prompt",
+    observedBody: identityObserved,
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  )
+  let virtualizedPass = virtualizedCandidate == identityFull.trimmingCharacters(in: .whitespacesAndNewlines)
+  if !virtualizedPass { failed += 1 }
+  results.append([
+    "name": "virtualized-equal-button-count-uses-body-identity",
+    "pass": virtualizedPass,
+  ])
+  let oldResponsePass = currentRelayCopyCandidate(
+    "An older assistant response about an unrelated subject.",
+    prompt: "unrelated user prompt",
+    observedBody: identityObserved,
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  ) == nil
+  if !oldResponsePass { failed += 1 }
+  results.append([
+    "name": "virtualized-equal-button-count-rejects-old-response",
+    "pass": oldResponsePass,
+  ])
+  let shortSubstringPass = currentRelayCopyCandidate(
+    "An older response says OK but is not the current answer.",
+    prompt: "unrelated user prompt",
+    observedBody: "OK",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false
+  ) == nil
+  if !shortSubstringPass { failed += 1 }
+  results.append([
+    "name": "short-body-substring-rejects-old-response",
+    "pass": shortSubstringPass,
+  ])
+  let repeatedExactReplyPass = currentRelayCopyCandidate(
+    "PSST_FINAL_COMPLETE_OK",
+    prompt: "Reply exactly with PSST_FINAL_COMPLETE_OK and nothing else.",
+    observedBody: "",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false,
+    expectedExactReply: "PSST_FINAL_COMPLETE_OK",
+    isNewestButtonAttempt: true
+  ) == "PSST_FINAL_COMPLETE_OK" && currentRelayCopyCandidate(
+    "PSST_FINAL_COMPLETE_OK",
+    prompt: "Reply exactly with PSST_FINAL_COMPLETE_OK and nothing else.",
+    observedBody: "",
+    hasPostBaselineButtonEvidence: false,
+    baselineWasEmpty: false,
+    expectedExactReply: "PSST_FINAL_COMPLETE_OK",
+    isNewestButtonAttempt: false
+  ) == nil
+  if !repeatedExactReplyPass { failed += 1 }
+  results.append([
+    "name": "repeated-exact-reply-accepts-only-newest-copy-control",
+    "pass": repeatedExactReplyPass,
+  ])
+  let olderSuperset = "Older prefix \(identityFull) older suffix"
+  let firstProven = [identityObserved, olderSuperset].compactMap {
+    currentRelayCopyCandidate(
+      $0,
+      prompt: "unrelated user prompt",
+      observedBody: identityObserved,
+      hasPostBaselineButtonEvidence: false,
+      baselineWasEmpty: false
+    )
+  }.first
+  let newestFirstPass = firstProven == identityObserved
+  if !newestFirstPass { failed += 1 }
+  results.append([
+    "name": "newest-proven-copy-wins-over-older-longer-superset",
+    "pass": newestFirstPass,
+  ])
+  let timeoutParserPass = parseNonnegativeFiniteTimeout("0") == 0 &&
+    parseNonnegativeFiniteTimeout("1.25") == 1.25 &&
+    parseNonnegativeFiniteTimeout("-1") == nil &&
+    parseNonnegativeFiniteTimeout("NaN") == nil &&
+    parseNonnegativeFiniteTimeout("infinity") == nil
+  if !timeoutParserPass { failed += 1 }
+  results.append([
+    "name": "timeout-parser-rejects-invalid-unlimited-fallbacks",
+    "pass": timeoutParserPass,
+  ])
+  let singleCopyPass = shouldHarvestRelayCopy(
+    sawAuthoritativeCopy: false,
+    controls: RelayControls(stop: false, send: true),
+    phase: .settling
+  ) && !shouldHarvestRelayCopy(
+    sawAuthoritativeCopy: true,
+    controls: RelayControls(stop: false, send: true),
+    phase: .settling
+  ) && !shouldHarvestRelayCopy(
+    sawAuthoritativeCopy: false,
+    controls: RelayControls(stop: true, send: false),
+    phase: .settling
+  )
+  if !singleCopyPass { failed += 1 }
+  results.append([
+    "name": "settling-copy-requires-ended-ui-and-no-prior-proof",
+    "pass": singleCopyPass,
+  ])
   let testPasteboard = NSPasteboard(name: NSPasteboard.Name("psst-gpt-selfcheck-\(UUID().uuidString)"))
   let customType = NSPasteboard.PasteboardType("dev.psst.selfcheck")
   let originalString = Data("clipboard text".utf8)
@@ -1332,6 +1631,11 @@ var selfcheckWake = false
 var selfcheckRelayPolicy = false
 var promptParts: [String] = []
 
+func parseNonnegativeFiniteTimeout(_ raw: String) -> Double? {
+  guard let value = Double(raw), value.isFinite, value >= 0 else { return nil }
+  return value
+}
+
 var i = 0
 while i < args.count {
   let a = args[i]
@@ -1342,10 +1646,13 @@ while i < args.count {
   if a == "--no-new-chat" { newChatFlag = false; i += 1; continue }
   if a == "--no-flash" { preferFlash = false; i += 1; continue }
   if a == "--timeout-strict" { timeoutStrict = true; i += 1; continue }
-  if a == "--timeout", i + 1 < args.count {
+  if a == "--timeout" {
+    guard i + 1 < args.count,
+          let parsed = parseNonnegativeFiniteTimeout(args[i + 1]) else {
+      fail("PSST_GPT_BAD_ARGS", "--timeout requires a finite, non-negative number of seconds")
+    }
     // 0 = no overall cap (poll until complete or process killed)
-    timeoutSec = Double(args[i + 1]) ?? 0
-    if timeoutSec < 0 { timeoutSec = 0 }
+    timeoutSec = parsed
     i += 2
     continue
   }

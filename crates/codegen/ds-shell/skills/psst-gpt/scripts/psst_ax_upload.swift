@@ -15,6 +15,7 @@ struct Input: Decodable {
     let returnAfterSend: Bool?
     let restoreFrontmostOnExit: Bool?
     let baselineCopyMessageCount: Int?
+    let observedAssistantText: String?
 }
 
 struct NodeRecord {
@@ -810,61 +811,179 @@ func copyMessageRecords(_ window: AXUIElement) -> [NodeRecord] {
     }
 }
 
-func assistantCopyCandidate(_ copied: String, prompt: String) -> String? {
+func copyIdentityWords(_ value: String) -> [String] {
+    value.lowercased().split { character in
+        character.unicodeScalars.allSatisfy { !CharacterSet.alphanumerics.contains($0) }
+    }.map(String.init)
+}
+
+/// Prove that a clipboard body belongs to the assistant body already observed
+/// for this turn. ChatGPT virtualizes message controls, so Copy-button counts
+/// and AX element identities are not stable enough to establish turn identity.
+func copyMatchesObservedAssistant(_ copied: String, observedAssistantText: String) -> Bool {
+    let candidate = normalize(copied).lowercased()
+    let observed = normalize(observedAssistantText).lowercased()
+    guard !candidate.isEmpty, !observed.isEmpty else { return false }
+    if candidate == observed {
+        return true
+    }
+
+    let observedWords = copyIdentityWords(observed)
+    let candidateWords = copyIdentityWords(candidate)
+    // Short bodies such as "OK" are unsafe substring identities because an
+    // older response can contain them. Equality above is sufficient for them.
+    guard observedWords.count >= 8, candidateWords.count >= 8 else { return false }
+    if candidate.contains(observed) || observed.contains(candidate) {
+        return true
+    }
+    let candidateWordText = candidateWords.joined(separator: " ")
+    let width = min(10, observedWords.count)
+    let maxStart = observedWords.count - width
+    let starts = Set([0, maxStart / 4, maxStart / 2, (maxStart * 3) / 4, maxStart])
+    let matches = starts.reduce(into: 0) { count, start in
+        let anchor = observedWords[start..<(start + width)].joined(separator: " ")
+        if candidateWordText.contains(anchor) { count += 1 }
+    }
+    return matches >= min(2, starts.count)
+}
+
+func assistantCopyCandidate(
+    _ copied: String,
+    prompt: String,
+    observedAssistantText: String,
+    hasPostBaselineButtonEvidence: Bool,
+    baselineWasEmpty: Bool
+) -> String? {
     let candidate = copied.trimmingCharacters(in: .whitespacesAndNewlines)
     let canonicalCopied = canonicalPrompt(candidate)
         .trimmingCharacters(in: .whitespacesAndNewlines)
     let canonicalUserPrompt = canonicalPrompt(prompt)
         .trimmingCharacters(in: .whitespacesAndNewlines)
     if canonicalCopied.isEmpty || canonicalCopied == canonicalUserPrompt { return nil }
+    if !observedAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        guard copyMatchesObservedAssistant(candidate, observedAssistantText: observedAssistantText) else {
+            return nil
+        }
+    } else if !hasPostBaselineButtonEvidence && !baselineWasEmpty {
+        // With no AX body, accepting an arbitrary old visible Copy control would
+        // be indistinguishable from returning a prior conversation response.
+        return nil
+    }
     return candidate
 }
 
-func bestAssistantCopyCandidate(_ candidates: [String], prompt: String) -> String {
+func firstAssistantCopyCandidate(
+    _ candidates: [String],
+    prompt: String,
+    observedAssistantText: String,
+    hasPostBaselineButtonEvidence: Bool,
+    baselineWasEmpty: Bool
+) -> String {
     candidates
-        .compactMap { assistantCopyCandidate($0, prompt: prompt) }
-        .max(by: { $0.count < $1.count }) ?? ""
+        .compactMap {
+            assistantCopyCandidate(
+                $0,
+                prompt: prompt,
+                observedAssistantText: observedAssistantText,
+                hasPostBaselineButtonEvidence: hasPostBaselineButtonEvidence,
+                baselineWasEmpty: baselineWasEmpty
+            )
+        }
+        .first ?? ""
+}
+
+func waitForCopiedClipboardString(
+    _ pasteboard: NSPasteboard,
+    sentinel: String,
+    sentinelChangeCount: Int,
+    timeoutMs: Double
+) -> (text: String, changeCount: Int) {
+    let deadline = Date().addingTimeInterval(max(1, timeoutMs) / 1000.0)
+    repeat {
+        let changeCount = pasteboard.changeCount
+        let raw = pasteboard.string(forType: .string) ?? ""
+        if changeCount != sentinelChangeCount && raw != sentinel {
+            return (raw, changeCount)
+        }
+        sleepMs(40)
+    } while Date() < deadline
+    return ("", pasteboard.changeCount)
 }
 
 func copyCurrentAssistantMessage(
     _ appElement: AXUIElement,
     afterBaselineCount: Int,
-    prompt: String
+    prompt: String,
+    observedAssistantText: String = ""
 ) -> String {
-    guard let window = try? chatWindow(appElement) else { return "" }
     _ = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-    _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
-    _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-    sleepMs(250)
-    let buttons = copyMessageRecords(window)
-    guard buttons.count > afterBaselineCount else { return "" }
+    guard let initialWindow = try? chatWindow(appElement) else { return "" }
+    _ = AXUIElementSetAttributeValue(initialWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+    _ = AXUIElementSetAttributeValue(initialWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    sleepMs(300)
+    let initialButtons = copyMessageRecords(initialWindow)
+    guard !initialButtons.isEmpty else { return "" }
+    let maxButtonsToTry = min(8, initialButtons.count)
     let pasteboard = NSPasteboard.general
-    var best = ""
-    for button in buttons.dropFirst(afterBaselineCount).suffix(6).reversed() {
-        let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
-        let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
-        pasteboard.clearContents()
-        pasteboard.setString(sentinel, forType: .string)
-        if button.position != nil && button.size != nil {
-            guard (try? click(button, "Copy message")) != nil else { continue }
-        } else {
-            guard (try? press(button, "Copy message")) != nil else { continue }
+    // Re-resolve the AX window and controls for every attempt. A successful or
+    // partially successful Electron Copy click changes the toolbar to "Copied",
+    // invalidating the remaining AX element handles from the prior traversal.
+    let methods: [(physical: Bool, waitMs: Double)] = [(true, 1_200), (false, 2_500)]
+    for method in methods {
+        for offsetFromEnd in 0..<maxButtonsToTry {
+            guard let window = try? chatWindow(appElement) else { continue }
+            _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            let buttons = copyMessageRecords(window)
+            guard offsetFromEnd < buttons.count else {
+                sleepMs(250)
+                continue
+            }
+            let index = buttons.count - 1 - offsetFromEnd
+            let button = buttons[index]
+            let hasPostBaselineEvidence = buttons.count > afterBaselineCount && index >= afterBaselineCount
+            let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
+            let sentinel = "PSST_COPY_SENTINEL_\(UUID().uuidString)"
+            pasteboard.clearContents()
+            pasteboard.setString(sentinel, forType: .string)
+            let sentinelChangeCount = pasteboard.changeCount
+            let acted: Bool
+            if method.physical && button.position != nil && button.size != nil {
+                acted = (try? click(button, "Copy message")) != nil
+            } else {
+                acted = (try? press(button, "Copy message")) != nil
+            }
+            let copiedResult = acted
+                ? waitForCopiedClipboardString(
+                    pasteboard,
+                    sentinel: sentinel,
+                    sentinelChangeCount: sentinelChangeCount,
+                    timeoutMs: method.waitMs
+                )
+                : (text: "", changeCount: pasteboard.changeCount)
+            let copied = copiedResult.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            restorePasteboardIfOwned(
+                pasteboardSnapshot,
+                pasteboard: pasteboard,
+                expectedChangeCount: copiedResult.changeCount
+            )
+            guard let candidate = assistantCopyCandidate(
+                copied,
+                prompt: prompt,
+                observedAssistantText: observedAssistantText,
+                hasPostBaselineButtonEvidence: hasPostBaselineEvidence,
+                baselineWasEmpty: afterBaselineCount == 0
+            ) else {
+                sleepMs(250)
+                continue
+            }
+            // Buttons are traversed newest-first. The first proven candidate is
+            // the current reply; scanning older buttons can select a longer old
+            // response that happens to contain the current rendered body.
+            return candidate
         }
-        let copiedChangeCount = pasteboard.changeCount
-        let raw = pasteboard.string(forType: .string) ?? ""
-        let copied = (raw == sentinel ? "" : raw)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        // The pressed button is itself bound to this turn by afterBaselineCount.
-        // Do not require AX-text overlap: Copy recovers when AX body text is absent.
-        restorePasteboardIfOwned(
-            pasteboardSnapshot,
-            pasteboard: pasteboard,
-            expectedChangeCount: copiedChangeCount
-        )
-        guard let candidate = assistantCopyCandidate(copied, prompt: prompt) else { continue }
-        if candidate.count > best.count { best = candidate }
     }
-    return best
+    return ""
 }
 
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
@@ -1419,22 +1538,99 @@ func run(_ input: Input) throws -> [String: Any] {
 
     if input.action == "selfcheckCopyPolicy" {
         let longPrompt = "Reply exactly with OK and nothing else. " + String(repeating: "prompt ", count: 80)
+        let observed = "The complete assistant body begins here and contains several distinct words for identity matching."
+        let fullObserved = observed + " " + String(repeating: "verified response segment ", count: 20)
+        let unrelated = "An older assistant response discusses a completely different topic and must never be selected."
         let cases: [[String: Any]] = [
             [
                 "name": "reject-exact-user-prompt",
-                "pass": assistantCopyCandidate(longPrompt, prompt: longPrompt) == nil,
+                "pass": assistantCopyCandidate(
+                    longPrompt,
+                    prompt: longPrompt,
+                    observedAssistantText: "",
+                    hasPostBaselineButtonEvidence: true,
+                    baselineWasEmpty: false
+                ) == nil,
             ],
             [
                 "name": "reject-line-ending-normalized-user-prompt",
-                "pass": assistantCopyCandidate("line one\r\nline two", prompt: "line one\nline two") == nil,
+                "pass": assistantCopyCandidate(
+                    "line one\r\nline two",
+                    prompt: "line one\nline two",
+                    observedAssistantText: "",
+                    hasPostBaselineButtonEvidence: true,
+                    baselineWasEmpty: false
+                ) == nil,
             ],
             [
                 "name": "accept-short-exact-reply-contained-in-prompt",
-                "pass": assistantCopyCandidate("OK", prompt: longPrompt) == "OK",
+                "pass": assistantCopyCandidate(
+                    "OK",
+                    prompt: longPrompt,
+                    observedAssistantText: "OK",
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == "OK",
             ],
             [
                 "name": "long-prompt-cannot-beat-short-assistant-reply",
-                "pass": bestAssistantCopyCandidate([longPrompt, "OK"], prompt: longPrompt) == "OK",
+                "pass": firstAssistantCopyCandidate(
+                    [longPrompt, "OK"],
+                    prompt: longPrompt,
+                    observedAssistantText: "OK",
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == "OK",
+            ],
+            [
+                "name": "newest-proven-copy-wins-over-older-longer-superset",
+                "pass": firstAssistantCopyCandidate(
+                    [observed, "Older prefix \(fullObserved) older suffix"],
+                    prompt: longPrompt,
+                    observedAssistantText: observed,
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == observed,
+            ],
+            [
+                "name": "virtualized-equal-count-accepts-current-body-match",
+                "pass": assistantCopyCandidate(
+                    fullObserved,
+                    prompt: longPrompt,
+                    observedAssistantText: observed,
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == fullObserved.trimmingCharacters(in: .whitespacesAndNewlines),
+            ],
+            [
+                "name": "virtualized-equal-count-rejects-old-response",
+                "pass": assistantCopyCandidate(
+                    unrelated,
+                    prompt: longPrompt,
+                    observedAssistantText: observed,
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == nil,
+            ],
+            [
+                "name": "no-body-equal-count-remains-unproven",
+                "pass": assistantCopyCandidate(
+                    unrelated,
+                    prompt: longPrompt,
+                    observedAssistantText: "",
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == nil,
+            ],
+            [
+                "name": "short-body-substring-does-not-select-old-response",
+                "pass": assistantCopyCandidate(
+                    "An older response says OK but is not the current answer.",
+                    prompt: longPrompt,
+                    observedAssistantText: "OK",
+                    hasPostBaselineButtonEvidence: false,
+                    baselineWasEmpty: false
+                ) == nil,
             ],
         ]
         return [
@@ -1463,7 +1659,8 @@ func run(_ input: Input) throws -> [String: Any] {
         let text = copyCurrentAssistantMessage(
             appElement,
             afterBaselineCount: max(0, input.baselineCopyMessageCount ?? 0),
-            prompt: input.prompt
+            prompt: input.prompt,
+            observedAssistantText: input.observedAssistantText ?? ""
         )
         return [
             "ok": !text.isEmpty,
@@ -1604,7 +1801,8 @@ func run(_ input: Input) throws -> [String: Any] {
             let copied = copyCurrentAssistantMessage(
                 appElement,
                 afterBaselineCount: baselineCopyButtonCount,
-                prompt: input.prompt
+                prompt: input.prompt,
+                observedAssistantText: captureState.assistantText
             )
             guard !copied.isEmpty else {
                 throw AxUploadError.coded(
