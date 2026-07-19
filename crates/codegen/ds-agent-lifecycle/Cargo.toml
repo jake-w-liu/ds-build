@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "ds-agent-lifecycle"
-version = "0.1.16"
+version = "0.1.17"
 
 [dependencies]
 async-trait = { workspace = true }
