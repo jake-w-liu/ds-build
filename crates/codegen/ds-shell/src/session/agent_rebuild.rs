@@ -102,7 +102,6 @@ pub(crate) struct AgentRebuildSpec {
     pub subagents_enabled: bool,
     pub subagent_toggle: HashMap<String, bool>,
     pub ask_user_question_enabled: bool,
-    pub persona_summaries: Vec<String>,
     pub prompt_audience: PromptAudience,
     pub role_instructions: Option<String>,
     pub persona_instructions: Option<String>,
@@ -198,7 +197,6 @@ impl AgentRebuildSpec {
             subagents_enabled,
             subagent_toggle,
             ask_user_question_enabled,
-            persona_summaries,
             prompt_audience,
             role_instructions,
             persona_instructions,
@@ -261,7 +259,6 @@ impl AgentRebuildSpec {
                 .collect::<Vec<_>>(),
         )
         .with_ask_user_question_enabled(*ask_user_question_enabled)
-        .with_persona_summaries(persona_summaries.clone())
         .with_prompt_audience(*prompt_audience)
         .with_role_instructions(role_instructions.clone())
         .with_persona_instructions(persona_instructions.clone())
@@ -400,7 +397,6 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         subagents_enabled: false,
         subagent_toggle: HashMap::new(),
         ask_user_question_enabled: true,
-        persona_summaries: vec![],
         prompt_audience: PromptAudience::Primary,
         role_instructions: None,
         persona_instructions: None,

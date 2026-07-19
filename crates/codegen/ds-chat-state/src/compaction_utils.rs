@@ -77,24 +77,34 @@ pub(crate) fn strip_images(conversation: Vec<ConversationItem>) -> Vec<Conversat
 /// results, flattens `tool_calls` into text annotations),
 /// `strip_reasoning_blocks`, and `strip_images`.
 ///
-/// The reasoning strip is required because the text mutation in the
-/// tool-message step would invalidate signed `thinking` blocks, which
-/// strict providers reject with a 400.
+/// The reasoning strip is required only for `ApiBackend::Messages` because
+/// text mutation would invalidate signed `thinking` blocks, which that
+/// strict provider rejects with a 400. Other backends keep reasoning verbatim.
 ///
 /// The image strip replaces `ContentPart::Image` with `"[image]"` so the
 /// summarizer doesn't receive megabytes of base64 data.
 pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
+    strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(
-        strip_tool_messages_for_conversation_item(conversation),
-    ))
+    let conversation = if strip_reasoning {
+        strip_reasoning_blocks(conversation)
+    } else {
+        conversation
+    };
+    strip_images(strip_tool_messages_for_conversation_item(conversation))
 }
-/// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
+/// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning (backend-conditional).
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
+    strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(conversation))
+    let conversation = if strip_reasoning {
+        strip_reasoning_blocks(conversation)
+    } else {
+        conversation
+    };
+    strip_images(conversation)
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -3052,7 +3062,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 reasoning_effort: None,
             }),
             ConversationItem::tool_result("tc1", "match found"),
-        ]);
+        ], true);
         assert_eq!(
             result.len(),
             3,
@@ -3094,7 +3104,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
-        ]);
+        ], true);
         assert_eq!(result.len(), 1);
         let ConversationItem::Assistant(a) = &result[0] else {
             panic!("expected assistant");
@@ -3149,7 +3159,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 model_fingerprint: None,
                 reasoning_effort: None,
             }),
-        ]);
+        ], true);
         assert_eq!(result.len(), 6);
         assert!(
             !result
@@ -3220,8 +3230,8 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             }),
             ConversationItem::tool_result("tc1", "files"),
         ];
-        let once = prepare_conversation_for_summarization(input.clone());
-        let twice = prepare_conversation_for_summarization(once.clone());
+        let once = prepare_conversation_for_summarization(input.clone(), true);
+        let twice = prepare_conversation_for_summarization(once.clone(), true);
         let once_json = serde_json::to_value(&once).unwrap();
         let twice_json = serde_json::to_value(&twice).unwrap();
         assert_eq!(once_json, twice_json, "second pass must be a no-op");
@@ -3267,7 +3277,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
             user,
             ConversationItem::assistant("ok"),
         ];
-        let result = prepare_conversation_for_summarization(input);
+        let result = prepare_conversation_for_summarization(input, true);
         match &result[1] {
             ConversationItem::User(u) => {
                 for part in &u.content {
@@ -3318,14 +3328,14 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
                 )
             })
         };
-        let seg = prepare_conversation_for_segment(conv.clone());
+        let seg = prepare_conversation_for_segment(conv.clone(), true);
         assert!(
             has_tool_calls(&seg),
             "segment view must keep structured tool calls"
         );
         assert!(has_tool_result(&seg), "segment view must keep tool results");
         assert!(!has_image(&seg), "segment view must strip base64 images");
-        let summ = prepare_conversation_for_summarization(conv);
+        let summ = prepare_conversation_for_summarization(conv, true);
         assert!(!has_tool_calls(&summ), "summary view flattens tool calls");
         assert!(!has_tool_result(&summ), "summary view drops tool results");
     }

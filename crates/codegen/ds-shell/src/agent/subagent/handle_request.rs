@@ -1172,7 +1172,6 @@ pub(crate) async fn handle_subagent_request(
             ctx.client_hooks.clone(),
             None,
             std::collections::HashMap::new(),
-            ctx.persona_io_summaries.clone(),
             ds_agent::prompt::context::PromptAudience::Subagent,
             effective_runtime.role_prompt.clone(),
             None,

@@ -29,14 +29,17 @@ impl SessionActor {
             .map_err(|e| format!("failed to prepare client: {e}"))?;
 
         // Full conversation snapshot including system prompt, tool calls, and results.
-        // Strip reasoning/thinking blocks from assistant items so we don't send
-        // `ContentBlock::Thinking` without a top-level `thinking` config. The
-        // Anthropic Messages API rejects requests that include thinking blocks in
-        // messages but omit the `thinking` parameter.
-        let mut items: Vec<ConversationItem> =
-            ds_chat_state::compaction_utils::strip_reasoning_blocks(
-                self.chat_state_handle.get_conversation().await,
-            );
+        // Strip reasoning ONLY on the Messages backend — it rejects ContentBlock::Thinking
+        // without a top-level `thinking` config. ChatCompletions and Responses backends fold
+        // Reasoning siblings into `reasoning_content` naturally and don't need the strip.
+        let conversation = self.chat_state_handle.get_conversation().await;
+        let strip_reasoning =
+            sampling_client.api_backend() == crate::sampling::ApiBackend::Messages;
+        let mut items: Vec<ConversationItem> = if strip_reasoning {
+            ds_chat_state::compaction_utils::strip_reasoning_blocks(conversation)
+        } else {
+            conversation
+        };
 
         // /btw fires mid-turn, so the snapshot may end with an assistant
         // message whose tool_calls have no matching ToolResult yet. The

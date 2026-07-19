@@ -829,7 +829,6 @@ pub struct MvpAgent {
     /// the first session-creating call via [`Self::ensure_plugin_registry`];
     /// this flag keeps that to a single discovery walk.
     plugin_registry_initialized: std::cell::Cell<bool>,
-    persona_io_summaries: Vec<String>,
     /// Single-flight guard for the proactive bundle sync background task.
     ///
     /// `maybe_sync_bundle_in_background` is invoked from each post-auth path

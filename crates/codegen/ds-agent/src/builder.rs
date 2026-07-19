@@ -59,8 +59,6 @@ pub struct AgentBuilder {
     /// The agent definition — set via from_definition() or built up
     /// via individual with_*() calls.
     definition: Option<AgentDefinition>,
-    /// Pre-rendered persona IO summaries for the task tool description.
-    persona_summaries: Vec<String>,
     /// Whether this builder produces a primary or subagent session prompt.
     prompt_audience: crate::prompt::context::PromptAudience,
     /// Role instructions to inject into the system prompt.
@@ -191,7 +189,6 @@ impl AgentBuilder {
             owner_session_id: None,
             parent_scheduler_handle: None,
             definition: None,
-            persona_summaries: Vec::new(),
             prompt_audience: crate::prompt::context::PromptAudience::Primary,
             role_instructions: None,
             persona_instructions: None,
@@ -266,11 +263,6 @@ impl AgentBuilder {
     /// Load from a pre-parsed AgentDefinition.
     pub fn from_definition(mut self, def: AgentDefinition) -> Self {
         self.definition = Some(def);
-        self
-    }
-    /// Set pre-rendered persona IO summaries for the task tool description.
-    pub fn with_persona_summaries(mut self, summaries: Vec<String>) -> Self {
-        self.persona_summaries = summaries;
         self
     }
     /// Set the prompt audience (Primary or Subagent).
@@ -1142,7 +1134,6 @@ impl AgentBuilder {
             prompt_body: definition.prompt_body.clone(),
             system_prompt: definition.system_prompt.clone(),
             agents_md_files,
-            persona_summaries: self.persona_summaries,
             build_timestamp_utc: now.to_rfc3339(),
             memory_enabled: self.memory_enabled,
             memory_global_path: self.memory_global_path,

@@ -243,9 +243,6 @@ pub(crate) struct SubagentSpawnContext {
     /// Subagent personas config for persona/SOUL layering.
     pub subagent_personas:
         std::collections::HashMap<String, ds_subagent_resolution::config::SubagentPersona>,
-    /// Pre-rendered persona IO summaries for the task tool description.
-    /// Threaded through to child sessions for recursive persona discovery.
-    pub persona_io_summaries: Vec<String>,
     /// Parent session's ChatStateHandle — used to read the actual live
     /// sampling config and credentials from the parent session actor (async).
     /// Cheap Clone (mpsc sender). `None` when parent SessionHandle not found.

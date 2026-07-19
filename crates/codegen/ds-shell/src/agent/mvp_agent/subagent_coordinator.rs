@@ -494,7 +494,6 @@ impl MvpAgent {
             subagent_toggle: self.subagent_toggle.clone(),
             subagent_roles: self.subagent_roles.clone(),
             subagent_personas: self.subagent_personas.clone(),
-            persona_io_summaries: self.persona_io_summaries.clone(),
             disable_web_search: self.cfg.borrow().disable_web_search,
             todo_gate: self.cfg.borrow().todo_gate,
             remote_settings: self.cfg.borrow().remote_settings.clone(),

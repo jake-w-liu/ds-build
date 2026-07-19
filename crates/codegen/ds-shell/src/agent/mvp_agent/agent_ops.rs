@@ -1480,11 +1480,6 @@ impl MvpAgent {
                 cfg.plugins.cli_plugin_dirs.clone(),
             ),
             plugin_registry_initialized: std::cell::Cell::new(false),
-            persona_io_summaries: cfg
-                .subagent_personas
-                .iter()
-                .map(|(name, p)| p.render_io_summary(name))
-                .collect(),
             models_manager,
             chat_modes: {
                 let chat_modes = crate::agent::chat_modes::ChatModesManager::new(
@@ -3571,7 +3566,6 @@ impl MvpAgent {
                     client_hooks,
                     prompt_display_cwd,
                     subagent_toggle,
-                    self.persona_io_summaries.clone(),
                     ds_agent::prompt::context::PromptAudience::Primary,
                     None,
                     None,

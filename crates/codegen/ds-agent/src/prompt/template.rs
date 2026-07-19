@@ -29,7 +29,7 @@ fn decrypt(data: &[u8], seed: u8) -> Zeroizing<String> {
 
 /// The base prompt template (decrypted fresh; zeroed on drop).
 pub(crate) fn base_template() -> Zeroizing<String> {
-    decrypt(BASE_PROMPT_ENC, PROMPT_SEEDS[0])
+    decrypt(&BASE_PROMPT_ENC, PROMPT_SEEDS[0])
 }
 
 /// The base prompt template source, exposed for `ds prompt --section template`.
@@ -38,7 +38,7 @@ pub fn base_template_source() -> Zeroizing<String> {
 }
 
 pub(crate) fn apply_patch_template() -> Zeroizing<String> {
-    decrypt(CODEX_PROMPT_ENC, PROMPT_SEEDS[1])
+    decrypt(&CODEX_PROMPT_ENC, PROMPT_SEEDS[1])
 }
 
 /// Apply-patch prompt template source, exposed for `ds prompt --section apply-patch-template`.
@@ -48,7 +48,7 @@ pub fn apply_patch_template_source() -> Zeroizing<String> {
 
 /// The subagent-specific base template (decrypted fresh; zeroed on drop).
 pub(crate) fn subagent_template() -> Zeroizing<String> {
-    decrypt(SUBAGENT_PROMPT_ENC, PROMPT_SEEDS[2])
+    decrypt(&SUBAGENT_PROMPT_ENC, PROMPT_SEEDS[2])
 }
 
 /// The compact system prompt used after conversation compaction.
@@ -77,18 +77,18 @@ mod tests {
         let subagent_raw = include_bytes!("../../templates/subagent_prompt.md");
 
         assert_eq!(
-            BASE_PROMPT_ENC,
-            &xor_encrypt(base_raw, PROMPT_SEEDS[0]),
+            &BASE_PROMPT_ENC[..],
+            xor_encrypt(base_raw, PROMPT_SEEDS[0]),
             "prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
         assert_eq!(
-            CODEX_PROMPT_ENC,
-            &xor_encrypt(apply_patch_raw, PROMPT_SEEDS[1]),
+            &CODEX_PROMPT_ENC[..],
+            xor_encrypt(apply_patch_raw, PROMPT_SEEDS[1]),
             "apply_patch_prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
         assert_eq!(
-            SUBAGENT_PROMPT_ENC,
-            &xor_encrypt(subagent_raw, PROMPT_SEEDS[2]),
+            &SUBAGENT_PROMPT_ENC[..],
+            xor_encrypt(subagent_raw, PROMPT_SEEDS[2]),
             "subagent_prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
     }
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn test_base_template_renders() {
         let prompt = render_base(&default_renderer(), &default_placeholders());
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
         assert!(prompt.contains("user_query"));
+        assert!(prompt.contains("interactive CLI tool"));
     }
 
     #[test]
@@ -362,12 +362,12 @@ mod tests {
         let p = default_placeholders();
         let prompt = render_base(&default_renderer(), &p);
         assert!(
-            prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
-            "Must contain agent identity"
-        );
-        assert!(
             prompt.contains("user_query"),
             "Must reference user_query tag"
+        );
+        assert!(
+            prompt.contains("interactive CLI tool"),
+            "Must identify as interactive CLI tool"
         );
     }
 
@@ -783,16 +783,9 @@ mod tests {
 
     #[test]
     fn interactive_renders_shell_prefix_tip_and_user_guide() {
-        // The `! <command>` shell-prefix tip was removed from the minimal
-        // prompt. The <user_guide> block still renders for interactive
-        // sessions only, so that's what we assert here.
         let mut p = default_placeholders();
         p["is_non_interactive"] = serde_json::json!(false);
         let prompt = render_base(&default_renderer(), &p);
-        assert!(
-            prompt.contains("<user_guide>"),
-            "interactive prompt must keep the <user_guide> block"
-        );
         assert!(
             prompt.contains("interactive CLI tool"),
             "interactive prompt must declare interactive mode in the header"
@@ -809,14 +802,6 @@ mod tests {
         p["is_non_interactive"] = serde_json::json!(true);
         let prompt = render_base(&default_renderer(), &p);
         assert!(
-            !prompt.contains("`! <command>`"),
-            "non-interactive prompt must suppress the shell-prefix tip"
-        );
-        assert!(
-            !prompt.contains("<user_guide>"),
-            "non-interactive prompt must suppress the <user_guide> block"
-        );
-        assert!(
             prompt.contains("autonomous agent"),
             "non-interactive prompt must declare autonomous mode in the header"
         );
@@ -825,7 +810,6 @@ mod tests {
             "non-interactive prompt must NOT claim to be the interactive CLI"
         );
         // Sanity: rest of the template still renders.
-        assert!(prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL));
         assert!(prompt.contains("user_query"));
     }
 

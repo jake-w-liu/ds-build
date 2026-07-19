@@ -1110,7 +1110,7 @@ mod tests {
     fn parse_model_and_effort() {
         let content = "---\nname: my-skill\ndescription: test\nmodel: ds-3\neffort: high\n---\n";
         let parsed = parse_skill_frontmatter(content, None).unwrap();
-        assert_eq!(parsed.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(parsed.model.as_deref(), Some("ds-3"));
         assert_eq!(parsed.effort.as_deref(), Some("high"));
     }
 
@@ -1263,7 +1263,7 @@ mod tests {
             Some(["bash".to_string(), "read_file".to_string()].as_slice())
         );
         assert_eq!(parsed.argument_hint.as_deref(), Some("file path"));
-        assert_eq!(parsed.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(parsed.model.as_deref(), Some("ds-3"));
         assert_eq!(parsed.effort.as_deref(), Some("high"));
         assert!(parsed.user_invocable);
         assert!(!parsed.disable_model_invocation);

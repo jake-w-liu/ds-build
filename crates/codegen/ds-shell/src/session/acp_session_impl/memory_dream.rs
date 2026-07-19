@@ -651,7 +651,7 @@ impl SessionActor {
             self.chat_state_handle.get_conversation(),
         );
         let chat_history = crate::sampling::conversation_to_chat_messages(
-            ds_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation),
+            ds_chat_state::compaction_utils::prepare_conversation_for_summarization(conversation, true),
         );
         MemoryFlushSnapshot {
             counts,

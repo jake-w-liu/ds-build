@@ -872,6 +872,7 @@ impl SessionActor {
         let segment_messages = if self.compaction.compaction_mode.writes_segments() {
             ds_chat_state::compaction_utils::prepare_conversation_for_segment(
                 full_conversation.clone(),
+                summary_strips_reasoning,
             )
         } else {
             Vec::new()
@@ -886,6 +887,7 @@ impl SessionActor {
         } else {
             ds_chat_state::compaction_utils::prepare_conversation_for_summarization(
                 full_conversation,
+                summary_strips_reasoning,
             )
         };
         if conv_len == 0 {
@@ -1104,6 +1106,7 @@ impl SessionActor {
                                     ds_chat_state::compaction_utils::fit_conversation_to_budget(
                                         ds_chat_state::compaction_utils::prepare_conversation_for_summarization(
                                             conv,
+                                            summary_strips_reasoning,
                                         ),
                                         lossy_budget,
                                     )

@@ -103,11 +103,6 @@ pub struct PromptContext {
     /// AGENTS.md files discovered during build, in precedence order
     /// (repo root → CWD; deeper files override).
     pub agents_md_files: Vec<AgentConfigFile>,
-    /// Pre-rendered persona summaries for system prompt injection.
-    /// Each entry is a formatted string like:
-    /// `- **reviewer** [user]: Writes structured review notes...`
-    #[serde(default)]
-    pub persona_summaries: Vec<String>,
     /// ISO-8601 UTC timestamp captured at build time.
     pub build_timestamp_utc: String,
     /// Whether the memory system is enabled for this session.
@@ -162,13 +157,12 @@ impl PromptContext {
     /// Normalize this context for persistence based on audience.
     ///
     /// For `Subagent` audience, applies the same suppression as the render
-    /// path: persona summaries are cleared. AGENTS.md is delivered in full,
+    /// path. AGENTS.md is delivered in full,
     /// identical to the primary agent.
     pub fn normalize_for_persistence(&mut self) {
         if self.audience != PromptAudience::Subagent {
             return;
         }
-        self.persona_summaries.clear();
     }
 }
 impl Default for PromptContext {
@@ -180,7 +174,6 @@ impl Default for PromptContext {
             prompt_body: None,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
-            persona_summaries: vec![],
             build_timestamp_utc: chrono::Utc::now().to_rfc3339(),
             memory_enabled: false,
             memory_global_path: None,
@@ -209,27 +202,6 @@ impl PromptContext {
     ///   verifier sees the same project instructions as the main agent.
     pub fn agents_md_user_reminder(&self) -> Option<String> {
         self.format_agents_md_section()
-    }
-    /// Personas content for injection as a prepended user message.
-    ///
-    /// Returns the `<system-reminder>` block to prepend as a user message,
-    /// wrapping the `<personas>` section.
-    ///
-    /// - Subagents never get personas (`task` itself is a parent-only tool).
-    pub fn personas_user_reminder(&self) -> Option<String> {
-        if self.audience == PromptAudience::Subagent {
-            return None;
-        }
-        let section = self.format_personas_section()?;
-        Some(format!("<system-reminder>\n{section}</system-reminder>"))
-    }
-    /// Format the personas section content.
-    ///
-    /// Always returns `None` — the `persona` parameter has been removed
-    /// from the task tool input, so persona summaries are no longer
-    /// injected into the conversation.
-    pub fn format_personas_section(&self) -> Option<String> {
-        None
     }
     /// Build the placeholder JSON for template rendering.
     ///
@@ -310,7 +282,6 @@ mod tests {
             prompt_body: None,
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
-            persona_summaries: vec![],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: false,
             memory_global_path: None,
@@ -542,20 +513,6 @@ mod tests {
         assert!(section.contains("# Instructions"));
         assert!(section.contains("<system-reminder>"));
     }
-    #[test]
-    fn test_format_personas_section_empty() {
-        let ctx = test_context();
-        assert!(ctx.format_personas_section().is_none());
-    }
-    #[test]
-    fn test_format_personas_section_always_none() {
-        let mut ctx = test_context();
-        ctx.persona_summaries = vec!["- **reviewer** [user]: Meticulous code reviewer".to_string()];
-        assert!(
-            ctx.format_personas_section().is_none(),
-            "persona section is disabled — persona param removed from task tool"
-        );
-    }
     /// AGENTS.md must reach the system prompt for the default template even
     /// AGENTS.md user reminder must be present for the default template
     /// when files are present.
@@ -574,15 +531,6 @@ mod tests {
         assert!(section.contains("<system-reminder>"));
         assert!(section.contains("XYZZY_AGENTS_MD_MARKER"));
     }
-    #[test]
-    fn personas_user_reminder_always_none() {
-        let mut ctx = test_context();
-        ctx.persona_summaries = vec!["- **reviewer** [user]: Meticulous code reviewer".to_string()];
-        assert!(
-            ctx.personas_user_reminder().is_none(),
-            "persona reminder is disabled — persona param removed from task tool"
-        );
-    }
     fn child_general_purpose_context() -> PromptContext {
         use crate::prompt::subagent_prompts;
         PromptContext {
@@ -592,10 +540,6 @@ mod tests {
             prompt_body: Some(subagent_prompts::GENERAL_PURPOSE_PROMPT.to_string()),
             system_prompt: TemplateOverride::None,
             agents_md_files: vec![],
-            persona_summaries: vec![
-                "- **reviewer** [user]: Code reviewer".to_string(),
-                "- **implementer** [user]: Code implementer".to_string(),
-            ],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: true,
             memory_global_path: None,
@@ -609,12 +553,6 @@ mod tests {
             is_non_interactive: false,
             system_prompt_label: default_system_prompt_label(),
         }
-    }
-    #[test]
-    fn child_prompt_excludes_persona_catalog() {
-        let ctx = child_general_purpose_context();
-        assert!(ctx.format_personas_section().is_none());
-        assert!(ctx.personas_user_reminder().is_none());
     }
     #[test]
     fn child_prompt_uses_subagent_audience() {
@@ -746,7 +684,6 @@ mod tests {
         let child = child_general_purpose_context();
         assert_eq!(parent.audience, super::PromptAudience::Primary);
         assert_eq!(child.audience, super::PromptAudience::Subagent);
-        assert!(!child.persona_summaries.is_empty());
         assert!(child.memory_enabled);
         assert!(child.prompt_body.is_some());
         assert!(parent.prompt_body.is_none());
@@ -1288,17 +1225,6 @@ mod tests {
         );
     }
     #[test]
-    fn normalize_clears_persona_summaries_for_subagent() {
-        let mut ctx = child_general_purpose_context();
-        ctx.persona_summaries = vec!["- **reviewer**: Reviews code".to_string()];
-        assert!(!ctx.persona_summaries.is_empty());
-        ctx.normalize_for_persistence();
-        assert!(
-            ctx.persona_summaries.is_empty(),
-            "persona summaries must be cleared for subagent"
-        );
-    }
-    #[test]
     fn normalize_preserves_full_agents_md_for_subagent() {
         let mut ctx = child_general_purpose_context();
         ctx.agents_md_files = vec![super::super::agents_md::AgentConfigFile {
@@ -1337,16 +1263,6 @@ mod tests {
         assert_eq!(
             ctx.persona_instructions.as_deref(),
             Some("You are a code reviewer")
-        );
-    }
-    #[test]
-    fn normalize_is_noop_for_primary() {
-        let mut ctx = test_context();
-        ctx.persona_summaries = vec!["- **reviewer**: Reviews code".to_string()];
-        ctx.normalize_for_persistence();
-        assert!(
-            !ctx.persona_summaries.is_empty(),
-            "primary must keep persona summaries"
         );
     }
 }

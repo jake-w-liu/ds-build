@@ -2048,7 +2048,7 @@ Agent body.
         assert_eq!(def.background, Some(true));
         assert_eq!(def.color, Some(AgentColor::Blue));
         assert_eq!(def.initial_prompt.as_deref(), Some("hello world"));
-        assert_eq!(def.model, ModelOverride::Override("deepseek-v4-flash".to_string()));
+        assert_eq!(def.model, ModelOverride::Override("ds-3".to_string()));
     }
     #[test]
     fn test_parse_minimal_definition() {
