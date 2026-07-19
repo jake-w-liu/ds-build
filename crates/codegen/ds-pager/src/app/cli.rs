@@ -372,13 +372,14 @@ impl ServeArgs {
     pub fn get_secret(&self) -> String {
         self.secret
             .clone()
-            .unwrap_or_else(|| generate_random_key(12))
+            .unwrap_or_else(|| generate_random_key(32))
     }
 }
-/// Generate a random alphanumeric key of the given length.
+/// Generate a random alphanumeric key of the requested length.
 fn generate_random_key(len: usize) -> String {
-    let raw = uuid::Uuid::new_v4().to_string().replace('-', "");
-    raw.chars().cycle().take(len).collect()
+    use rand::distr::{Alphanumeric, SampleString};
+
+    Alphanumeric.sample_string(&mut rand::rng(), len)
 }
 /// Arguments for the `agent leader` subcommand.
 #[derive(Debug, clap::Args, Clone)]
@@ -914,6 +915,26 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generated_agent_secret_has_requested_alphanumeric_shape() {
+        for len in [0, 1, 12, 32, 64] {
+            let secret = generate_random_key(len);
+            assert_eq!(secret.len(), len);
+            assert!(secret.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+        }
+    }
+
+    #[test]
+    fn explicit_agent_secret_is_preserved_exactly() {
+        let args = ServeArgs {
+            bind: "127.0.0.1:2419".parse().expect("valid loopback socket"),
+            secret: Some("operator-supplied secret".to_string()),
+            remote: None,
+            headless: HeadlessArgs::default(),
+        };
+        assert_eq!(args.get_secret(), "operator-supplied secret");
+    }
+
     #[test]
     fn version_flag_exits_zero() {
         let err = PagerArgs::try_parse_from(["ds", "--version"]).unwrap_err();
