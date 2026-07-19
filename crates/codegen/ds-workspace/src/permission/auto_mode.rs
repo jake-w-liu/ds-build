@@ -391,7 +391,7 @@ fn classify_bash(cmd: &str) -> ClassifierVerdict {
     // (or any `env` option) can change which binary runs / how code resolves.
     // Read from the PARSED, quote-stripped tree so `env "LD_PRELOAD=..."` can't
     // hide the key.
-    if sets_unsafe_env(tree.root_node(), cmd, &cmds) {
+    if script_sets_unsafe_env(tree.root_node(), cmd, &cmds) {
         return ClassifierVerdict::Block;
     }
     // A routine command can still write an arbitrary destination via a redirect
@@ -727,7 +727,7 @@ fn explicit_launch_target<'a>(head: &str, inner: &'a [String]) -> LaunchTarget<'
 /// whose KEY is not in [`SAFE_ENV_KEYS`], or passes an option to `env` (which can
 /// run a string, clear, or unset the environment). Reads the PARSED tree so
 /// quoting (`env "LD_PRELOAD=..."`) can't hide a key from the check.
-fn sets_unsafe_env(root: Node<'_>, src: &str, cmds: &[PlainCommand]) -> bool {
+pub(crate) fn script_sets_unsafe_env(root: Node<'_>, src: &str, cmds: &[PlainCommand]) -> bool {
     // (a) Inline `KEY=val cmd` assignments are `variable_assignment` nodes
     //     (stripped from PlainCommand words), so walk the tree for them.
     let mut stack = vec![root];

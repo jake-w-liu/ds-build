@@ -94,8 +94,10 @@ impl WebFetchClient {
             }
         }
 
-        // SSRF check.
-        ssrf::check_ssrf(&url).await?;
+        // SSRF check. allow_local defaults to false (conservative);
+        // can be enabled via `[toolset.web_fetch] allow_local` or
+        // `DS_WEB_FETCH_ALLOW_LOCAL=1` in a future config update.
+        ssrf::check_ssrf(&url, false).await?;
 
         // Make request and build output.
         let http = self.http.get_or_rebuild()?;

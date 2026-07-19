@@ -36,6 +36,7 @@ pub struct InstallResult {
     pub repo_path: PathBuf,
     pub plugins: Vec<DiscoveredPlugin>,
     pub commit: Option<String>,
+    pub kind: InstallKind,
 }
 
 /// A plugin discovered within an installed source.
@@ -123,6 +124,94 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     }
 }
 
+/// A full commit sha (40-hex SHA-1 or 64-hex SHA-256) — the only thing the
+/// pin policy accepts; branches, tags, and short prefixes are mutable or forgeable.
+pub fn is_full_commit_sha(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn validate_git_operand<'a>(value: &'a str, kind: &str) -> Result<&'a str, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("empty git {kind}"));
+    }
+    if value.contains('\0') {
+        return Err(format!("git {kind} contains NUL"));
+    }
+    if value.starts_with('-') {
+        return Err(format!("git {kind} may not begin with '-'"));
+    }
+    Ok(value)
+}
+
+/// Validate and trim a Git repository URL or path used as a CLI operand.
+pub fn validate_git_url(url: &str) -> Result<&str, String> {
+    validate_git_operand(url, "URL")
+}
+
+/// Validate and trim a Git ref used as a CLI operand.
+pub fn validate_git_ref(git_ref: &str) -> Result<&str, String> {
+    validate_git_operand(git_ref, "ref")
+}
+
+/// Validate and trim a full Git commit object ID.
+pub fn validate_git_sha(sha: &str) -> Result<&str, String> {
+    let sha = sha.trim();
+    if sha.contains('\0') {
+        return Err("git commit SHA contains NUL".into());
+    }
+    if sha.starts_with('-') {
+        return Err("git commit SHA may not begin with '-'".into());
+    }
+    if is_full_commit_sha(sha) {
+        Ok(sha)
+    } else {
+        Err("git commit SHA must be 40 or 64 hexadecimal characters".into())
+    }
+}
+
+/// The require-sha gate every remote plugin fetch goes through: policy on + no
+/// full-hex pin → typed refusal. Local-directory installs are exempt (the
+/// operator controls that disk; nothing is fetched).
+pub fn ensure_pinned(
+    require_sha: bool,
+    sha: Option<&str>,
+    plugin: &str,
+    url: &str,
+) -> Result<(), InstallError> {
+    if !require_sha {
+        return Ok(());
+    }
+    if sha.map(str::trim).is_some_and(is_full_commit_sha) {
+        return Ok(());
+    }
+    tracing::warn!(
+        plugin,
+        url,
+        "refusing unpinned remote plugin code (require_sha)"
+    );
+    Err(InstallError::UnpinnedRemoteRefused {
+        plugin: plugin.to_owned(),
+        url: url.to_owned(),
+    })
+}
+
+/// Prefer an explicit supplied SHA; if only `git_ref` is a full commit SHA,
+/// hoist it into the SHA slot so the verified clone path is used. Catalog pins
+/// published as `ref` still need this.
+pub fn hoist_pin_slots<'a>(
+    git_ref: Option<&'a str>,
+    git_sha: Option<&'a str>,
+) -> (Option<&'a str>, Option<&'a str>) {
+    match git_sha.map(str::trim) {
+        Some(s) => (git_ref, Some(s)),
+        None => match git_ref.map(str::trim).filter(|s| is_full_commit_sha(s)) {
+            Some(s) => (None, Some(s)),
+            None => (git_ref, None),
+        },
+    }
+}
+
 /// Check if a string looks like a GitHub `owner/repo` shorthand.
 ///
 /// Returns `true` for strings like `user/repo` or `user/repo@v1.0`
@@ -163,7 +252,24 @@ fn repo_source_id(source: &InstallSource) -> String {
 pub fn install_from_source(
     source: &InstallSource,
     registry: &InstallRegistry,
+    require_sha: bool,
 ) -> Result<InstallResult, InstallError> {
+    install_from_source_with_label(source, registry, require_sha, None)
+}
+
+/// Like [`install_from_source`]; when `plugin_label` is set it appears in
+/// pin-refusal errors instead of the git URL (marketplace catalog names).
+pub fn install_from_source_with_label(
+    source: &InstallSource,
+    registry: &InstallRegistry,
+    require_sha: bool,
+    plugin_label: Option<&str>,
+) -> Result<InstallResult, InstallError> {
+    let source = &normalize_install_source(source)?;
+    if let InstallSource::Git { url, git_sha, .. } = source {
+        let label = plugin_label.unwrap_or(url.as_str());
+        ensure_pinned(require_sha, git_sha.as_deref(), label, url)?;
+    }
     let source_id = repo_source_id(source);
     let repo_key = InstallRegistry::repo_key(&source_id);
 
@@ -180,7 +286,7 @@ pub fn install_from_source(
 
     let repo_path = install_dir.join(&repo_key);
 
-    let (_kind, commit) = match source {
+    let (kind, commit) = match source {
         InstallSource::Git {
             url,
             git_ref,
@@ -191,7 +297,7 @@ pub fn install_from_source(
             let commit = read_head_commit(&repo_path);
             let kind = InstallKind::Git {
                 url: url.clone(),
-                git_ref: git_ref.clone(),
+                git_ref: git_sha.clone().or_else(|| git_ref.clone()),
                 commit: commit.clone().unwrap_or_default(),
                 subdir: subdir.clone(),
             };
@@ -238,7 +344,56 @@ pub fn install_from_source(
         repo_path,
         plugins,
         commit,
+        kind,
     })
+}
+
+fn normalize_install_source(source: &InstallSource) -> Result<InstallSource, InstallError> {
+    match source {
+        InstallSource::Git {
+            url,
+            git_ref,
+            git_sha,
+            subdir,
+        } => {
+            let (git_ref, git_sha) = hoist_pin_slots(git_ref.as_deref(), git_sha.as_deref());
+            let (url, git_ref, git_sha) = clone_operands(url, git_ref, git_sha)?;
+            Ok(InstallSource::Git {
+                url: url.to_owned(),
+                git_ref: git_ref.map(str::to_owned),
+                git_sha: git_sha.map(str::to_owned),
+                subdir: subdir.clone(),
+            })
+        }
+        local @ InstallSource::Local { .. } => Ok(local.clone()),
+    }
+}
+
+fn clone_operands<'a>(
+    url: &'a str,
+    git_ref: Option<&'a str>,
+    git_sha: Option<&'a str>,
+) -> Result<(&'a str, Option<&'a str>, Option<&'a str>), InstallError> {
+    let url = validate_git_url(url)
+        .map_err(|msg| InstallError::InstallFailed { detail: msg })?;
+    let git_ref = git_ref
+        .map(|r| {
+            validate_git_ref(r)
+                .map_err(|msg| InstallError::InstallFailed { detail: msg })
+        })
+        .transpose()?;
+    let git_sha = git_sha
+        .map(|s| {
+            validate_git_sha(s)
+                .map_err(|msg| InstallError::InstallFailed { detail: msg })
+        })
+        .transpose()?;
+    Ok((url, git_ref, git_sha))
+}
+
+/// Argv for `git remote add` with options terminated before free operands.
+pub fn remote_add_args(url: &str) -> [&str; 5] {
+    ["remote", "add", "--", "origin", url]
 }
 
 /// Clone a git repo using the `git` CLI (supports shallow clone, SSH, etc.;
@@ -579,7 +734,7 @@ pub enum UpdateStatus {
 /// - Tag installs: pinned — no-op
 /// - Commit installs: pinned — no-op
 /// - Local installs: no-op (explicit update); [`super::local_refresh`] re-copies on session spawn / reload
-pub fn update_repo(repo_key: &str, repo: &InstalledRepo) -> Result<UpdateStatus, InstallError> {
+pub fn update_repo(repo_key: &str, repo: &InstalledRepo, _require_sha: bool) -> Result<UpdateStatus, InstallError> {
     match &repo.kind {
         InstallKind::Local { .. } => Ok(UpdateStatus::LiveLocal),
         InstallKind::Git {
@@ -1156,7 +1311,7 @@ mod tests {
             marketplace: None,
         };
 
-        match update_repo("acme-deadbeef", &repo).expect("update should succeed") {
+        match update_repo("acme-deadbeef", &repo, false).expect("update should succeed") {
             UpdateStatus::Updated(result) => {
                 assert_eq!(result.plugins.len(), 1);
                 assert_eq!(result.plugins[0].name, "acme");
@@ -1220,7 +1375,7 @@ mod tests {
             marketplace: None,
         };
 
-        match update_repo("acme-deadbeef", &repo) {
+        match update_repo("acme-deadbeef", &repo, false) {
             Err(InstallError::InstallFailed { .. }) => {}
             Err(e) => panic!("expected InstallFailed, got {e:?}"),
             Ok(_) => panic!("expected InstallFailed when stored subdir is missing, got Ok"),

@@ -18,6 +18,7 @@ use crate::permission::types::{
     AccessKind, ClientType, Decision, EditPolicy, PermissionCommand, PermissionEvent, PromptPolicy,
 };
 use ds_paths::AbsPathBuf;
+use ds_mcp::servers::parse_mcp_qualified_name;
 use ds_tools::implementations::ds_build::web_fetch::{
     DomainMatcher, domain::normalize_domain,
 };
@@ -93,17 +94,12 @@ pub enum PermissionHandle {
     AllowAll,
 }
 
-/// True iff `name` is an MCP tool whose server prefix (everything before the
-/// first `__`) is in `servers`. The empty-prefix guard rejects corrupt entries
-/// such as `{""}` or names like `"__tool"`.
+/// True iff `name` is a valid qualified MCP ID whose server is in `servers`.
+/// Malformed names fail closed, including `{""}` or names like `"__tool"`.
 fn mcp_server_prefix_allowed(name: &str, servers: &HashSet<String>) -> bool {
-    if servers.is_empty() {
-        return false;
-    }
-    let Some((server, _)) = name.split_once("__") else {
-        return false;
-    };
-    !server.is_empty() && servers.contains(server)
+    !servers.is_empty()
+        && parse_mcp_qualified_name(name)
+            .is_some_and(|(_, server, _)| servers.contains(server))
 }
 
 /// Pre-decision lookup for an MCP tool. Returns `Some(Decision::Allow)`

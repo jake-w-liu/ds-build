@@ -1044,15 +1044,31 @@ pub fn parse_mcp_meta_config(
 /// here so existing call sites continue to work.
 pub use ds_telemetry::enums::McpInitStrategy;
 
-/// Parse MCP tool name in format "server__tool"
-/// Returns (server_name, tool_name) if valid MCP tool, None otherwise
-pub fn parse_mcp_tool_name(name: &str) -> Option<(String, String)> {
-    let parts: Vec<&str> = name.splitn(2, MCP_TOOL_NAME_DELIMITER).collect();
-    if parts.len() == 2 {
-        Some((parts[0].to_string(), parts[1].to_string()))
-    } else {
-        None
+/// Parse a non-empty `server__tool` ID with one overlap-aware delimiter and
+/// valid [`ds_tool_protocol::ToolId`] syntax.
+pub fn parse_mcp_qualified_name(name: &str) -> Option<(ds_tool_protocol::ToolId, &str, &str)> {
+    let delimiter = MCP_TOOL_NAME_DELIMITER.as_bytes();
+    // Byte windows preserve both overlapping `__` boundaries in `___`.
+    let mut boundaries = name
+        .as_bytes()
+        .windows(delimiter.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == delimiter).then_some(index));
+    let boundary = boundaries.next()?;
+    if boundaries.next().is_some() {
+        return None;
     }
+    let (server, tool_with_delimiter) = name.split_at(boundary);
+    let tool = &tool_with_delimiter[MCP_TOOL_NAME_DELIMITER.len()..];
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((ds_tool_protocol::ToolId::new(name).ok()?, server, tool))
+}
+
+/// Parse an MCP tool name in `server__tool` format into owned segments.
+pub fn parse_mcp_tool_name(name: &str) -> Option<(String, String)> {
+    parse_mcp_qualified_name(name).map(|(_, server, tool)| (server.to_owned(), tool.to_owned()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1246,23 +1262,21 @@ impl McpTool {
     /// `"foo__bar"`, a tool like `"my__thing"`, or even a `"foo_"`/`"_bar"`
     /// pair (which concatenates to `"foo___bar"` — two valid `__`
     /// positions) would produce a qualified name that downstream
-    /// `split_once("__")` consumers would split at the wrong boundary.
-    /// The "exactly one delimiter" check covers all three cases with a
-    /// single rule.
+    /// Invalid or ambiguous qualified IDs and provider-invalid names are logged
+    /// and skipped; the upstream connector must provide non-empty `server` and
+    /// `tool` segments separated by exactly one `__` boundary.
     pub fn into_registration(self) -> Option<McpToolRegistration> {
-        // Qualify MCP tool name with server name: "server__tool"
         let qualified_name = format!(
             "{}{}{}",
             self.server_name, MCP_TOOL_NAME_DELIMITER, self.name
         );
 
-        // Reject ambiguous qualified names — see doc-comment above.
-        if qualified_name.matches(MCP_TOOL_NAME_DELIMITER).count() != 1 {
+        if parse_mcp_qualified_name(&qualified_name).is_none() {
             tracing::error!(
                 server = %self.server_name,
                 tool = %self.name,
                 qualified = %qualified_name,
-                "Skipping MCP tool: qualified name contains '{MCP_TOOL_NAME_DELIMITER}' more than once (server, tool, or their boundary collides with the reserved delimiter)"
+                "Skipping MCP tool with invalid or ambiguous qualified name"
             );
             return None;
         }

@@ -311,6 +311,7 @@ impl SessionActor {
                 match ds_agent::plugins::git_install::install_from_source(
                     &install_source,
                     &registry,
+                    false,
                 ) {
                     Ok(result) => {
                         let repo = ds_agent::plugins::git_install::build_installed_repo(
@@ -448,7 +449,7 @@ impl SessionActor {
                 let mut messages = Vec::new();
                 let mut any_updated = false;
                 for (key, repo) in &repos_to_update {
-                    match ds_agent::plugins::git_install::update_repo(key, repo) {
+                    match ds_agent::plugins::git_install::update_repo(key, repo, false) {
                         Ok(status) => {
                             use ds_agent::plugins::git_install::UpdateStatus;
                             match status {

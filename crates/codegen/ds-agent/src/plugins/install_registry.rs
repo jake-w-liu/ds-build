@@ -334,6 +334,9 @@ pub enum InstallError {
     #[error("SHA verification failed: expected {expected}, got {actual}")]
     ShaMismatch { expected: String, actual: String },
 
+    #[error("remote plugin install refused: {plugin} from {url} requires a pinned SHA when require_sha is enabled")]
+    UnpinnedRemoteRefused { plugin: String, url: String },
+
     #[error("install failed: {detail}")]
     InstallFailed { detail: String },
 }

@@ -62,7 +62,7 @@ pub fn install_from_marketplace(
         subdir: None,
     };
 
-    match git_install::install_from_source(&source, registry) {
+    match git_install::install_from_source(&source, registry, false) {
         Ok(result) => {
             let repo_key = result.repo_key.clone();
             let installed_path = registry.install_dir().join(&repo_key);
@@ -93,7 +93,7 @@ pub fn install_from_marketplace(
             registry.remove(&key);
             registry.save()?;
             // Retry — registry no longer has the key.
-            match git_install::install_from_source(&source, registry) {
+            match git_install::install_from_source(&source, registry, false) {
                 Ok(result) => {
                     let repo_key = result.repo_key.clone();
                     let installed_path = registry.install_dir().join(&repo_key);
@@ -153,7 +153,7 @@ pub fn install_from_remote_url(
         subdir,
     };
 
-    match git_install::install_from_source(&source, registry) {
+    match git_install::install_from_source(&source, registry, false) {
         Ok(result) => {
             let repo_key = result.repo_key.clone();
             let installed_path = registry.install_dir().join(&repo_key);
@@ -176,7 +176,7 @@ pub fn install_from_remote_url(
             let _ = std::fs::remove_file(&old_path);
             registry.remove(&key);
             registry.save()?;
-            match git_install::install_from_source(&source, registry) {
+            match git_install::install_from_source(&source, registry, false) {
                 Ok(result) => {
                     let repo_key = result.repo_key.clone();
                     let installed_path = registry.install_dir().join(&repo_key);
