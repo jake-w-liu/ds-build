@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-sandbox"
-version = "0.1.14"
+version = "0.1.15"
 edition.workspace = true
 description = "OS-level sandboxing for DS Build using kernel primitives (Landlock/Seatbelt) via nono"
 
