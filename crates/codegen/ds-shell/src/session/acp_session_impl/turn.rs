@@ -2458,8 +2458,8 @@ Scope: [files, modules, crates, or domains.
   you have not satisfied Stage 3.]
 
 Verification Method: [exact, runnable test or computation that proves substantive correctness.
-  Must be a concrete command or tool call, not a description. Not "review for errors."
-  Not "check boundary limits." The actual computation or test that produces evidence.]
+  Must be a concrete command or tool call, not a description. Not \"review for errors.\"
+  Not \"check boundary limits.\" The actual computation or test that produces evidence.]
 
 Original Prompt: {prompt}
 ```
