@@ -28,8 +28,8 @@ fn apply_auth_header(req: &mut Request, token: &str) {
             req.headers_mut()
                 .insert(reqwest::header::AUTHORIZATION, val);
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "auth retry: failed to build Authorization header");
+        Err(_e) => {
+            tracing::warn!("auth retry: failed to build Authorization header (token rejected by HeaderValue)");
         }
     }
 }

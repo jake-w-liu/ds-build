@@ -1904,7 +1904,9 @@ impl SessionActor {
                     req_id.to_owned(),
                 )
                 .await
-                .expect("chat state actor should be alive");
+                .ok_or_else(|| {
+                    acp::Error::internal_error().data("chat state actor is unavailable")
+                })?;
             ds_telemetry::unified_log::debug(
                 "shell.turn.build_request_done",
                 Some(self.session_info.id.0.as_ref()),

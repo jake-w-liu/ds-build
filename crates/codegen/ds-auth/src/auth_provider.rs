@@ -10,7 +10,7 @@ use crate::visibility::HttpAuth;
 /// Snapshot of the currently effective credentials. Used by callers
 /// that build their own header maps (the OTel OTLP exporter) or that
 /// need the bearer prefix for 401-attribution telemetry.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct CredentialSnapshot {
     /// Bearer token. `None` when no auth is configured (CI / `--api-key` headless).
     pub token: Option<String>,
@@ -28,6 +28,19 @@ pub struct CredentialSnapshot {
     pub api_key_id: Option<String>,
     /// Org id from the OIDC `organizationId` claim; `None` for personal / deployment-key auth.
     pub organization_id: Option<String>,
+}
+
+impl std::fmt::Debug for CredentialSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialSnapshot")
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("user_id", &self.user_id)
+            .field("team_id", &self.team_id)
+            .field("deployment_id", &self.deployment_id)
+            .field("api_key_id", &self.api_key_id)
+            .field("organization_id", &self.organization_id)
+            .finish()
+    }
 }
 
 /// Source of truth for outbound auth on data-collector requests.
