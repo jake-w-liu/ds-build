@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "ds-tools"
-version = "0.1.26"
+version = "0.1.27"
 description = "DS tools library"
 
 [dependencies]
@@ -43,7 +43,7 @@ minijinja = { version = "2", features = ["custom_syntax"] }
 parking_lot = { workspace = true }
 htmd = { workspace = true }
 scraper = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "json", "gzip", "brotli", "deflate"] }
+reqwest = { workspace = true, features = ["native-tls", "json", "gzip", "brotli", "deflate"] }
 pulldown-cmark = { workspace = true }
 regex = { workspace = true }
 schemars = { workspace = true }
@@ -107,7 +107,7 @@ wiremock = { workspace = true }
 ds-test-utils = { workspace = true }
 
 [build-dependencies]
-reqwest = { workspace = true, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, features = ["blocking", "native-tls"] }
 flate2 = { workspace = true }
 tar = { workspace = true }
 
