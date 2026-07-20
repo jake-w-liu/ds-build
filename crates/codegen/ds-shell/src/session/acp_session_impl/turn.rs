@@ -2409,58 +2409,71 @@ impl AuthRetrySchedule {
 fn structure_template(prompt: &str) -> String {
     format!(
         "\
-Preprocess the following informal prompt into a structured form, then execute it.
+This is a `/structure` directive. You MUST process the informal prompt below into a concrete execution plan that maps onto the system-prompt rules, then you MUST execute that plan. Nothing here is optional or conditional.
 
-## Step 1 — Classify
-Fill every section below. Infer from context; mark unknowns explicitly. Be conservative — do not fabricate scope or done criteria the user did not imply.
+---
 
-```markdown
-## Classification
-[question | task | plan-first]
+## Step 1 — Build the Structured Execution Plan
 
-## Done Criterion
-1-2 sentences: observable outcome + how to verify it.
-(If you cannot infer this, write: [NEEDS CLARIFICATION — <specific question>])
+Fill every section. Do not skip any. Infer from context; mark unknowns explicitly with [NEEDS CLARIFICATION] or [AUTO]. Be conservative — do not fabricate scope or criteria the user did not imply.
 
-## Scope
-Files, modules, crates, or domains in scope.
-(If unknown, write: [AUTO — will be determined during evidence gathering])
+```
+Classification: [question | task | plan-first]
 
-## CRC Applicable?
-[yes — writing/modifying code | no — question or research only]
+Done Criterion: [1-2 sentences: observable outcome + how to verify]
 
-## MPR Applicable?
-[yes — math/physics/research derivation | no]
+Scope: [files, modules, crates, or domains in scope]
 
-## Fable Triviality Gate
-[trivial — one file, ≤10 lines, no new behavior, path clear]
-[non-trivial — requires full Fable loop with evidence subagents and adversarial verify]
+CRC: [yes | no] — if yes, you MUST trace edge cases, handle realistic inputs, deliver production-grade code, never ship code you believe may be wrong.
 
-## Verification Method
-[command, test, reproduction, or check to confirm the done criterion]
+MPR: [yes | no] — if yes, you MUST derive from first principles, verify boundaries at limits, surface assumptions, reduce to known special cases.
 
-## Adversarial Review Required?
-[mandatory — security/correctness fix | skip — trivial/answer-only]
+Fable Gate: [trivial | non-trivial]
+  - trivial ONLY if: ≤1 file, ≤10 lines, no new behavior, path is clear.
+  - non-trivial: you MUST run the FULL Fable loop (Stages 1-4 below).
 
-## Original Prompt
-{prompt}
+Verification Method: [exact command, test, or check that proves the done criterion]
+
+Adversarial Review: [mandatory | skip]
+  - mandatory if: security fix, correctness fix, or any code change.
+  - skip ONLY for pure question/answer with zero code changes.
+
+Original Prompt: {prompt}
 ```
 
-## Step 2 — Present and execute
-Output the completed structured prompt above in a single message. Then immediately begin executing it in the SAME response — pair the structured output with the first evidence-gathering or tool calls.
+## Step 2 — Present the Plan AND Start Executing (SAME response, no gap)
 
-**Exception — plan-first**: If Classification is **plan-first** (ambiguous, irreversible, or a plan was requested), present the structure and STOP. Wait for the user to approve before any file edits or outward actions.
+You MUST output the completed plan above AND begin executing it IN THE SAME MESSAGE. Do not output the plan and then stop — pair it with the first tool calls or evidence-gathering actions.
 
-## Step 3 — Execute
-Treat the completed structured prompt as your working prompt. Follow every section:
-- If **CRC applicable**: trace edge cases, handle realistic inputs, deliver production-grade code. Never ship code you believe may be wrong.
-- If **MPR applicable**: derive from first principles, verify boundaries, surface assumptions, reduce to known special cases.
-- If **non-trivial Fable gate**: run the full Fable loop — evidence subagents → surgical execution → adversarial verify → outcome-first report.
-- **Verification gate**: never present a claim as correct unless verified by reading source, running code, or checking with a tool.
-- **Claim discipline**: any \"bug\" claim needs a decisive test; fail the test → label REFUTED.
+**PLAN-FIRST EXCEPTION**: If Classification is plan-first (ambiguous, irreversible, or a plan was explicitly requested), you MUST present the plan and STOP. Do NOT execute, do NOT edit files, do NOT take outward actions. Wait for the user to approve.
 
-## Step 4 — Report
-After execution, report outcome-first: what was done, what verification was performed, any remaining unverified risks.\
+## Step 3 — Orchestrate via Fable Method (MANDATORY for non-trivial)
+
+The Fable method is defined in your system prompt. For non-trivial tasks you MUST execute all four stages:
+
+**Stage 1 — PLAN**: Define done criterion → freeze scope → fan out parallel evidence subagents (read-only explore agents, max 4 per batch). Gather cited evidence with file:line references before deciding.
+
+**Stage 2 — EXECUTE**: Apply the SINGLE committed plan. Edit surgically in the main thread. Do not change scope mid-flight unless the done criterion is rewritten first.
+
+**Stage 3 — VERIFY**: Run the verification method named in the plan. For consequential changes, spawn 1-3 adversarial attacker subagents (each a distinct lens: diff incompleteness, runtime breakage, spec contradiction). Surviving findings → fix → re-verify. MAX 3 fix-verify cycles.
+
+**Stage 4 — REPORT**: Outcome-first. First sentence = what happened. Honest caveats. Self-refuted claims listed. No stage scaffolding in user-facing text.
+
+## Step 4 — Enforce System-Prompt Rules (MANDATORY, no exceptions)
+
+**CRC (when code is involved)**: Correctness first — bug-free logic, trace edge cases, never ship code you believe is wrong. Robustness second — handle realistic inputs and failure paths, no stubs or hacks. Completeness third — production-grade, real error handling, no silent TODOs.
+
+**MPR (when math/physics is involved)**: Derive from first principles. Self-verify at boundaries. Surface every unstated assumption. Reduce to known special cases.
+
+**Verification Gate (ALWAYS)**: Never present a claim, finding, answer, or piece of code as correct unless you have verified it by reading source, running code, or checking with a tool. Memory and inference are not verification. If unverified, label it explicitly.
+
+**Claim Discipline (ALWAYS)**: Any bug/impossibility/root-cause claim REQUIRES a decisive test. Run the test before stating the conclusion. Fail the test → label REFUTED. Do not ship fixes for refuted claims.
+
+**Adversarial Review (mandatory for code changes)**: After every code change, re-read your own diff with a hostile lens. Ask: what did I miss? What edge case breaks this? What does the spec actually require?
+
+## Step 5 — Report
+
+After execution, report outcome-first: what was done, what verification was performed, what adversarial review found, any remaining unverified risks. No stage labels in the report.\
         "
     )
 }
