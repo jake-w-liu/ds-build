@@ -283,6 +283,16 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             }
         },
     },
+    BuiltinCommand {
+        name: "structure",
+        description: "Preprocess an informal prompt into a structured form that enforces system-prompt discipline (CRC, MPR, Fable method, verification gate)",
+        argument_hint: Some("<your informal task or question>"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| BuiltinAction::Structure {
+            prompt: args.trim().to_string(),
+        },
+    },
 ];
 
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
@@ -733,6 +743,9 @@ pub(super) enum BuiltinAction {
     GoalPause,
     GoalResume,
     GoalClear,
+    Structure {
+        prompt: String,
+    },
 }
 
 impl BuiltinAction {
@@ -766,6 +779,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => "goal",
+            BuiltinAction::Structure { .. } => "structure",
         }
     }
 
@@ -799,6 +813,7 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => false,
+            BuiltinAction::Structure { prompt } => !prompt.is_empty(),
         }
     }
 }
@@ -1601,6 +1616,7 @@ mod tests {
                 "session-info",
                 "feedback",
                 "goal",
+                "structure",
                 "loop",
                 "commit",
                 "deploy",

@@ -830,6 +830,9 @@ impl SessionActor {
             BuiltinAction::GoalSet { .. } => {
                 unreachable!("GoalSet is intercepted in handle_prompt")
             }
+            BuiltinAction::Structure { .. } => {
+                unreachable!("Structure is intercepted in handle_prompt")
+            }
             BuiltinAction::GoalStatus => {
                 let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
                 let goal_tokens = self.goal_tokens_used(current_tokens);

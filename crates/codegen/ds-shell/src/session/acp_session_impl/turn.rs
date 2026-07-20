@@ -367,6 +367,11 @@ impl SessionActor {
                             }
                         }
                     }
+                    BuiltinAction::Structure { prompt } => {
+                        ds_telemetry::session_ctx::log_event(slash_used);
+                        let template = structure_template(&prompt);
+                        vec![text_block(template)]
+                    }
                     _ => return self.execute_builtin_slash_command(action).await,
                 }
             }
@@ -2399,6 +2404,67 @@ impl AuthRetrySchedule {
         *self = Self::new();
     }
 }
+
+/// Build the structured-prompt template for `/structure <prompt>`.
+fn structure_template(prompt: &str) -> String {
+    format!(
+        "\
+Preprocess the following informal prompt into a structured form, then execute it.
+
+## Step 1 — Classify
+Fill every section below. Infer from context; mark unknowns explicitly. Be conservative — do not fabricate scope or done criteria the user did not imply.
+
+```markdown
+## Classification
+[question | task | plan-first]
+
+## Done Criterion
+1-2 sentences: observable outcome + how to verify it.
+(If you cannot infer this, write: [NEEDS CLARIFICATION — <specific question>])
+
+## Scope
+Files, modules, crates, or domains in scope.
+(If unknown, write: [AUTO — will be determined during evidence gathering])
+
+## CRC Applicable?
+[yes — writing/modifying code | no — question or research only]
+
+## MPR Applicable?
+[yes — math/physics/research derivation | no]
+
+## Fable Triviality Gate
+[trivial — one file, ≤10 lines, no new behavior, path clear]
+[non-trivial — requires full Fable loop with evidence subagents and adversarial verify]
+
+## Verification Method
+[command, test, reproduction, or check to confirm the done criterion]
+
+## Adversarial Review Required?
+[mandatory — security/correctness fix | skip — trivial/answer-only]
+
+## Original Prompt
+{prompt}
+```
+
+## Step 2 — Present and execute
+Output the completed structured prompt above in a single message. Then immediately begin executing it in the SAME response — pair the structured output with the first evidence-gathering or tool calls.
+
+**Exception — plan-first**: If Classification is **plan-first** (ambiguous, irreversible, or a plan was requested), present the structure and STOP. Wait for the user to approve before any file edits or outward actions.
+
+## Step 3 — Execute
+Treat the completed structured prompt as your working prompt. Follow every section:
+- If **CRC applicable**: trace edge cases, handle realistic inputs, deliver production-grade code. Never ship code you believe may be wrong.
+- If **MPR applicable**: derive from first principles, verify boundaries, surface assumptions, reduce to known special cases.
+- If **non-trivial Fable gate**: run the full Fable loop — evidence subagents → surgical execution → adversarial verify → outcome-first report.
+- **Verification gate**: never present a claim as correct unless verified by reading source, running code, or checking with a tool.
+- **Claim discipline**: any \"bug\" claim needs a decisive test; fail the test → label REFUTED.
+
+## Step 4 — Report
+After execution, report outcome-first: what was done, what verification was performed, any remaining unverified risks.\
+        "
+    )
+}
+
 #[cfg(test)]
 mod auth_retry_schedule_tests {
     use super::AuthRetrySchedule;
