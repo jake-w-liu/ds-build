@@ -1,54 +1,40 @@
+//! Web search client — primary: Brave Search API (reliable REST API),
+//! fallback: DuckDuckGo Instant Answer API (no API key needed, limited data).
+//!
+//! To enable Brave Search (recommended):
+//!   export DS_BRAVE_API_KEY="BSA-..."   # free at https://api.search.brave.com/
+//!
+//! Without a Brave key, falls back to DDG Instant Answer API which works
+//! for factual queries but returns limited structured data.
+
 use super::types::WebSearchConfig;
 use crate::attribution::SharedAttributionCallback;
 use crate::types::SharedApiKeyProvider;
-use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
-use std::sync::LazyLock;
 
-/// DuckDuckGo HTML search endpoint (no API key, no JavaScript required).
-const DDG_SEARCH_URL: &str = "https://html.duckduckgo.com/html/";
+/// Brave Search API endpoint.
+const BRAVE_API_URL: &str = "https://api.search.brave.com/res/v1/web/search";
 
-/// Browser-like User-Agent to avoid CAPTCHAs.
-const DDG_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+/// DuckDuckGo Instant Answer API (fallback).
+const DDG_API_URL: &str = "https://api.duckduckgo.com/";
 
-/// Maximum number of search results to return.
+/// Maximum search results.
 const MAX_RESULTS: usize = 10;
 
-/// Regex to parse DuckDuckGo HTML result entries.
-/// Each result has: <a class="result__a" href="URL">Title</a> ... <a class="result__snippet">Snippet</a>
-/// (?s) enables dot-matches-newline so .*? spans across HTML line breaks.
-static DDG_RESULT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>"#,
-    )
-    .expect("failed to compile DDG result regex")
-});
-
-/// Simple regex to strip HTML tags from extracted text.
-static HTML_TAG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("failed to compile HTML tag regex"));
-
-/// HTTP client that performs real web searches via DuckDuckGo's HTML interface.
+/// HTTP client that performs web searches via Brave Search API (primary)
+/// or DuckDuckGo Instant Answer API (fallback).
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
+    brave_api_key: Option<String>,
 }
 
 impl WebSearchClient {
-    /// Create a new web search client.
-    ///
-    /// The config's `base_url` and `model` fields are not used for the
-    /// DuckDuckGo backend, but the `api_key` and `extra_headers` fields
-    /// are preserved for backward compatibility with the config schema.
     pub fn new(
         config: &WebSearchConfig,
         _api_key_provider: Option<SharedApiKeyProvider>,
     ) -> Result<Self, ds_tool_runtime::ToolError> {
-        let WebSearchConfig::Enabled {
-            extra_headers,
-            ..
-        } = config
-        else {
+        let WebSearchConfig::Enabled { extra_headers, .. } = config else {
             return Err(ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
                 "Cannot create WebSearchClient from disabled config".to_string(),
@@ -56,7 +42,7 @@ impl WebSearchClient {
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/x-www-form-urlencoded"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         for (key, value) in extra_headers {
             let header_name = HeaderName::from_bytes(key.as_bytes()).map_err(|e| {
                 ds_tool_runtime::ToolError::execution(
@@ -73,9 +59,12 @@ impl WebSearchClient {
             headers.insert(header_name, header_value);
         }
 
+        let brave_api_key = std::env::var("DS_BRAVE_API_KEY").ok()
+            .filter(|k| !k.is_empty());
+
         let http = reqwest::Client::builder()
             .default_headers(headers)
-            .user_agent(DDG_USER_AGENT)
+            .user_agent("ds-build/1.0")
             .build()
             .map_err(|e| {
                 ds_tool_runtime::ToolError::execution(
@@ -84,11 +73,9 @@ impl WebSearchClient {
                 )
             })?;
 
-        Ok(Self { http })
+        Ok(Self { http, brave_api_key })
     }
 
-    /// Wire a 401-attribution callback. No-op for DuckDuckGo backend
-    /// (no auth required), but kept for API compatibility.
     pub fn with_attribution_callback(
         self,
         _callback: Option<SharedAttributionCallback>,
@@ -96,210 +83,155 @@ impl WebSearchClient {
         self
     }
 
-    /// Perform a real web search via DuckDuckGo.
-    ///
-    /// Returns `(formatted_text, citations)` where formatted_text is a
-    /// human-readable summary of the search results and citations are
-    /// unique URLs found. When `allowed_domains` is provided, `site:`
-    /// operators are injected into the query so DDG returns results
-    /// from those domains directly.
+    /// Perform a web search. Uses Brave API if DS_BRAVE_API_KEY is set,
+    /// otherwise falls back to DuckDuckGo Instant Answer API.
     pub async fn search(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
-        let search_query = build_search_query(query, allowed_domains.as_deref());
-        let results = self.fetch_ddg_results(&search_query).await?;
-        let filtered: Vec<DdgResult> = if allowed_domains.is_some() {
-            results
-                .into_iter()
-                .filter(|r| {
-                    allowed_domains.as_ref().unwrap().iter().any(|d| {
-                        r.url.to_lowercase().contains(&d.to_lowercase())
-                    })
-                })
-                .collect()
+        let results = if let Some(ref key) = self.brave_api_key {
+            self.search_brave(query, allowed_domains.as_deref(), key).await?
         } else {
-            results
+            self.search_ddg_api(query).await?
         };
 
-        let citations: Vec<String> = filtered
-            .iter()
-            .map(|r| r.url.clone())
-            .collect();
-
-        let content = if filtered.is_empty() {
+        let citations: Vec<String> = results.iter().map(|r| r.url.clone()).collect();
+        let content = if results.is_empty() {
             format!("No search results found for query: {query}")
         } else {
-            format_search_results(&filtered)
+            format_results(&results)
         };
-
         Ok((content, citations))
     }
 
-    /// Same as [`Self::search`] but returns `(title, url)` pairs.
     pub async fn search_with_titles(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<(String, String)>), ds_tool_runtime::ToolError> {
-        let search_query = build_search_query(query, allowed_domains.as_deref());
-        let results = self.fetch_ddg_results(&search_query).await?;
-        let filtered: Vec<DdgResult> = if allowed_domains.is_some() {
-            results
-                .into_iter()
-                .filter(|r| {
-                    allowed_domains.as_ref().unwrap().iter().any(|d| {
-                        r.url.to_lowercase().contains(&d.to_lowercase())
-                    })
-                })
-                .collect()
+        let results = if let Some(ref key) = self.brave_api_key {
+            self.search_brave(query, allowed_domains.as_deref(), key).await?
         } else {
-            results
+            self.search_ddg_api(query).await?
         };
 
-        let pairs: Vec<(String, String)> = filtered
+        let pairs: Vec<(String, String)> = results
             .iter()
             .map(|r| (r.title.clone(), r.url.clone()))
             .collect();
-
-        let content = if filtered.is_empty() {
+        let content = if results.is_empty() {
             format!("No search results found for query: {query}")
         } else {
-            format_search_results(&filtered)
+            format_results(&results)
         };
-
         Ok((content, pairs))
     }
 
-    /// Fetch search results from DuckDuckGo's HTML interface.
-    async fn fetch_ddg_results(
+    /// Search via Brave Search API.
+    async fn search_brave(
         &self,
         query: &str,
-    ) -> Result<Vec<DdgResult>, ds_tool_runtime::ToolError> {
-        let response = self
-            .http
-            .post(DDG_SEARCH_URL)
-            .header("Origin", "https://html.duckduckgo.com")
-            .header("Referer", "https://html.duckduckgo.com/")
-            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            .form(&[("q", query)])
+        allowed_domains: Option<&[String]>,
+        api_key: &str,
+    ) -> Result<Vec<SearchResult>, ds_tool_runtime::ToolError> {
+        let mut url = format!("{}?q={}&count={}", BRAVE_API_URL, url_encode(query), MAX_RESULTS);
+        if let Some(domains) = allowed_domains {
+            for d in domains {
+                url.push_str(&format!("&site={}", d.trim()));
+            }
+        }
+
+        let response = self.http
+            .get(&url)
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "gzip")
+            .header("X-Subscription-Token", api_key)
             .send()
             .await
             .map_err(|e| {
                 ds_tool_runtime::ToolError::execution(
                     ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                    format!("Search request failed: {e}"),
+                    format!("Brave Search request failed: {e}"),
                 )
             })?;
 
         let status = response.status();
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Failed to read error body".to_string());
+            let body = response.text().await.unwrap_or_default();
             return Err(ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Search returned HTTP {status}: {body}"),
+                format!("Brave Search returned HTTP {status}: {body}"),
             ));
         }
 
-        let html = response.text().await.map_err(|e| {
+        let body: serde_json::Value = response.json().await.map_err(|e| {
             ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                format!("Failed to read search response: {e}"),
+                format!("Failed to parse Brave Search response: {e}"),
             )
         })?;
 
-        if html.contains("anomaly") || html.contains("g-recaptcha") {
-            return Err(ds_tool_runtime::ToolError::execution(
-                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
-                "Search engine returned a CAPTCHA — please try again later.".to_string(),
-            ));
+        let mut results = Vec::new();
+        if let Some(web) = body.get("web").and_then(|v| v.get("results")).and_then(|v| v.as_array()) {
+            for item in web.iter().take(MAX_RESULTS) {
+                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let snippet = item.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !url.is_empty() && !title.is_empty() {
+                    results.push(SearchResult { title, url, snippet });
+                }
+            }
         }
 
-        let results = parse_ddg_html(&html);
         Ok(results)
+    }
+
+    /// Fallback: DuckDuckGo Instant Answer API.
+    async fn search_ddg_api(
+        &self,
+        query: &str,
+    ) -> Result<Vec<SearchResult>, ds_tool_runtime::ToolError> {
+        let url = format!("{}?q={}&format=json&no_html=1&no_redirect=1", DDG_API_URL, url_encode(query));
+        let response = self.http
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| {
+                ds_tool_runtime::ToolError::execution(
+                    ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+                    format!("DDG API request failed: {e}"),
+                )
+            })?;
+
+        let body: serde_json::Value = response.json().await.map_err(|e| {
+            ds_tool_runtime::ToolError::execution(
+                ds_tool_protocol::ToolId::new("web_search").expect("valid"),
+                format!("Failed to parse DDG API response: {e}"),
+            )
+        })?;
+
+        Ok(parse_ddg_api(&body))
     }
 }
 
-/// A single search result from DuckDuckGo.
 #[derive(Debug, Clone)]
-struct DdgResult {
+struct SearchResult {
     title: String,
     url: String,
     snippet: String,
 }
 
-/// Parse DuckDuckGo HTML response into structured results.
-fn parse_ddg_html(html: &str) -> Vec<DdgResult> {
-    let mut results = Vec::new();
-    let mut seen_urls = std::collections::HashSet::new();
-
-    for caps in DDG_RESULT_RE.captures_iter(html) {
-        let url = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let title_raw = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-        let snippet_raw = caps.get(3).map(|m| m.as_str()).unwrap_or("");
-
-        // Decode common HTML entities
-        let url = decode_html_entities(&url);
-        let title = decode_html_entities(&strip_html(title_raw).trim());
-        let snippet = decode_html_entities(&strip_html(snippet_raw).trim());
-
-        if url.is_empty() || title.is_empty() {
-            continue;
-        }
-        if !seen_urls.insert(url.clone()) {
-            continue; // deduplicate
-        }
-
-        results.push(DdgResult {
-            title,
-            url,
-            snippet,
-        });
-
-        if results.len() >= MAX_RESULTS {
-            break;
-        }
-    }
-
-    results
+fn url_encode(s: &str) -> String {
+    s.replace(' ', "+")
+        .replace('&', "%26")
+        .replace('=', "%3D")
+        .replace('#', "%23")
+        .replace('?', "%3F")
 }
 
-/// Strip HTML tags from a string.
-fn strip_html(input: &str) -> String {
-    HTML_TAG_RE.replace_all(input, "").to_string()
-}
-
-/// Decode common HTML entities.
-fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-}
-
-/// Build the search query, injecting `site:` operators for allowed domains.
-fn build_search_query(base_query: &str, allowed_domains: Option<&[String]>) -> String {
-    match allowed_domains {
-        Some(domains) if !domains.is_empty() => {
-            let site_clauses: Vec<String> = domains
-                .iter()
-                .map(|d| format!("site:{}", d.trim()))
-                .collect();
-            format!("{} {}", base_query, site_clauses.join(" OR "))
-        }
-        _ => base_query.to_string(),
-    }
-}
-
-/// Format search results as a readable text block.
-fn format_search_results(results: &[DdgResult]) -> String {
+fn format_results(results: &[SearchResult]) -> String {
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {
         out.push_str(&format!("{}. {}\n", i + 1, r.title));
@@ -312,150 +244,104 @@ fn format_search_results(results: &[DdgResult]) -> String {
     out.trim_end().to_string()
 }
 
+fn parse_ddg_api(body: &serde_json::Value) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let (Some(text), Some(url), Some(source)) = (
+        body.get("AbstractText").and_then(|v| v.as_str()).filter(|s| !s.is_empty()),
+        body.get("AbstractURL").and_then(|v| v.as_str()),
+        body.get("AbstractSource").and_then(|v| v.as_str()),
+    ) {
+        let title = body.get("Heading").and_then(|v| v.as_str()).unwrap_or(source);
+        if seen.insert(url.to_string()) {
+            results.push(SearchResult {
+                title: format!("{} ({})", title, source),
+                url: url.to_string(),
+                snippet: text.to_string(),
+            });
+        }
+    }
+
+    if let Some(topics) = body.get("RelatedTopics").and_then(|v| v.as_array()) {
+        for topic in topics {
+            if let (Some(text), Some(url)) = (
+                topic.get("Text").and_then(|v| v.as_str()),
+                topic.get("FirstURL").and_then(|v| v.as_str()),
+            ) {
+                if seen.insert(url.to_string()) {
+                    results.push(SearchResult {
+                        title: text.to_string(),
+                        url: url.to_string(),
+                        snippet: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    results.truncate(MAX_RESULTS);
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_ddg_html_extracts_results() {
-        let html = r#"
-        <html><body>
-        <a class="result__a" href="https://www.rust-lang.org/">Rust Programming Language</a>
-        some stuff in between
-        <a class="result__snippet">A language empowering everyone to build reliable and efficient software.</a>
-
-        <a class="result__a" href="https://docs.rs/">Docs.rs</a>
-        <a class="result__snippet">Documentation for the Rust programming language.</a>
-        </body></html>
-        "#;
-        let results = parse_ddg_html(html);
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].title, "Rust Programming Language");
-        assert_eq!(results[0].url, "https://www.rust-lang.org/");
-        assert!(results[0].snippet.contains("reliable and efficient"));
-        assert_eq!(results[1].title, "Docs.rs");
-        assert_eq!(results[1].url, "https://docs.rs/");
+    fn test_url_encode() {
+        assert_eq!(url_encode("hello world"), "hello+world");
+        assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
+        assert_eq!(url_encode("test#frag?x=1"), "test%23frag%3Fx%3D1");
     }
 
     #[test]
-    fn test_parse_ddg_html_deduplicates() {
-        let html = r#"
-        <a class="result__a" href="https://example.com/">Example</a>
-        <a class="result__snippet">First appearance.</a>
-        <a class="result__a" href="https://example.com/">Example Again</a>
-        <a class="result__snippet">Duplicate.</a>
-        "#;
-        let results = parse_ddg_html(html);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].url, "https://example.com/");
-    }
-
-    #[test]
-    fn test_parse_ddg_html_empty() {
-        let results = parse_ddg_html("<html><body>No results here</body></html>");
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_decode_html_entities() {
-        assert_eq!(decode_html_entities("Hello &amp; World"), "Hello & World");
-        assert_eq!(decode_html_entities("a &lt; b &gt; c"), "a < b > c");
-        assert_eq!(decode_html_entities("&quot;quoted&quot;"), "\"quoted\"");
-    }
-
-    #[test]
-    fn test_strip_html() {
-        assert_eq!(strip_html("<b>bold</b> text"), "bold text");
-        assert_eq!(strip_html("<a href='x'>link</a>"), "link");
-        assert_eq!(strip_html("no tags"), "no tags");
-    }
-
-    #[test]
-    fn test_build_search_query() {
-        // No domains
-        assert_eq!(build_search_query("rust lang", None), "rust lang");
-        assert_eq!(build_search_query("rust lang", Some(&[])), "rust lang");
-        // Single domain
-        assert_eq!(
-            build_search_query("rust lang", Some(&["github.com".into()])),
-            "rust lang site:github.com"
-        );
-        // Multiple domains
-        assert_eq!(
-            build_search_query("rust lang", Some(&["github.com".into(), "docs.rs".into()])),
-            "rust lang site:github.com OR site:docs.rs"
-        );
-    }
-
-    #[test]
-    fn test_format_search_results() {
+    fn test_format_results() {
         let results = vec![
-            DdgResult {
+            SearchResult {
                 title: "Rust".into(),
                 url: "https://rust-lang.org".into(),
                 snippet: "A systems language.".into(),
             },
-            DdgResult {
-                title: "Go".into(),
-                url: "https://go.dev".into(),
-                snippet: "A concurrent language.".into(),
-            },
         ];
-        let formatted = format_search_results(&results);
+        let formatted = format_results(&results);
         assert!(formatted.contains("1. Rust"));
         assert!(formatted.contains("URL: https://rust-lang.org"));
         assert!(formatted.contains("A systems language."));
-        assert!(formatted.contains("2. Go"));
-        assert!(formatted.contains("URL: https://go.dev"));
     }
 
     #[test]
-    fn test_parse_ddg_html_trims_and_decodes() {
-        let html = r#"
-        <a class="result__a" href="https://example.com/page?a=1&amp;b=2">
-          <b>Example &amp; Title</b>
-        </a>
-        <a class="result__snippet">This &lt;contains&gt; HTML &amp; entities.</a>
-        "#;
-        let results = parse_ddg_html(html);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Example & Title");
-        assert_eq!(results[0].url, "https://example.com/page?a=1&b=2");
-        // After decode, &lt; becomes < and &gt; becomes >
-        assert!(results[0].snippet.contains("<contains>"));
-        // After decode, &amp; becomes &
-        assert!(results[0].snippet.contains("& entities"));
-        // HTML <b> tags are stripped
-        assert!(!results[0].title.contains("<b>"));
+    fn test_parse_ddg_api_empty() {
+        let body = serde_json::json!({});
+        let results = parse_ddg_api(&body);
+        assert!(results.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_search_mocks_ddg() {
-        use wiremock::matchers::{body_string, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/html/"))
-            .and(body_string("q=test+query"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"<a class="result__a" href="https://example.com">Example Site</a>
-                   <a class="result__snippet">An example website for testing.</a>"#,
-            ))
-            .mount(&server)
-            .await;
-
-        // We need to override DDG_SEARCH_URL for testing.
-        // The client uses a constant, so we test parse + format directly.
-        let html = r#"<a class="result__a" href="https://example.com">Example Site</a>
-                       <a class="result__snippet">An example website for testing.</a>"#;
-        let results = parse_ddg_html(html);
+    #[test]
+    fn test_parse_ddg_api_with_abstract() {
+        let body = serde_json::json!({
+            "Heading": "Rust",
+            "AbstractSource": "Wikipedia",
+            "AbstractURL": "https://en.wikipedia.org/wiki/Rust",
+            "AbstractText": "Rust is a programming language."
+        });
+        let results = parse_ddg_api(&body);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].title, "Example Site");
-        assert_eq!(results[0].url, "https://example.com");
+        assert!(results[0].title.contains("Wikipedia"));
+        assert_eq!(results[0].url, "https://en.wikipedia.org/wiki/Rust");
+    }
 
-        let formatted = format_search_results(&results);
-        assert!(formatted.contains("Example Site"));
-        assert!(formatted.contains("https://example.com"));
+    #[test]
+    fn test_parse_ddg_api_with_topics() {
+        let body = serde_json::json!({
+            "RelatedTopics": [
+                {"Text": "Topic One", "FirstURL": "https://example.com/1"},
+                {"Text": "Topic Two", "FirstURL": "https://example.com/2"}
+            ]
+        });
+        let results = parse_ddg_api(&body);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "Topic One");
+        assert_eq!(results[1].url, "https://example.com/2");
     }
 }
