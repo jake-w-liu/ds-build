@@ -2464,11 +2464,28 @@ PLAN-FIRST RULE: If Classification is plan-first, present the plan and STOP. Do 
 
 **Stage 2 — EXECUTE**: Apply the committed plan. Edit surgically. Scope is frozen.
 
-**Stage 3 — VERIFY**: Spawn 1-3 parallel adversarial attacker subagents, each with a distinct lens:
-  - Attacker 1: diff incompleteness (what was missed?)
-  - Attacker 2: runtime breakage (what edge case crashes?)
-  - Attacker 3: spec contradiction (what requirement is violated?)
-Surviving findings → fix → re-verify. MAX 3 cycles.
+**Stage 3 — VERIFY**: Spawn 1-3 adversarial attacker subagents that independently verify the SUBSTANCE of your work. Structural checks (formatting, compilation, markers, IDs) are INSUFFICIENT — the attackers must verify CORRECTNESS of claims, not their presentation.
+
+Task-type-specific attacker lenses:
+
+FOR MATH/PHYSICS tasks:
+  - Attacker 1: independently COMPUTE answers (run actual calculations, not the prose you wrote). Compare with yours. Flag every mismatch.
+  - Attacker 2: verify DERIVATIONS from first principles. Check boundary limits (→0, →∞, symmetry). Every unverified step is a finding.
+  - Attacker 3: find COUNTEREXAMPLES or edge cases that break your claims. Try degenerate parameters. Test special cases.
+
+FOR CODE tasks:
+  - Attacker 1: diff incompleteness (what logic was missed? what path is untested?)
+  - Attacker 2: runtime breakage (what input crashes it? null/empty/boundary?)
+  - Attacker 3: spec contradiction (what requirement is violated? what does the spec actually say?)
+
+FOR RESEARCH/QUESTION tasks:
+  - Attacker 1: independently verify every cited fact or formula against primary sources.
+  - Attacker 2: surface every UNSTATED assumption and test whether the conclusion survives without it.
+  - Attacker 3: find contradictory evidence or alternative explanations you did not address.
+
+FABRICATED VERIFICATION IS A VIOLATION: \"Verified with np.linalg.eigvals\" when you never ran it is a lie. \"Checked boundary limits\" without computing them is a lie. Every verification claim in your output MUST be backed by an actual tool execution — a run, a computation, a source read. If you cannot verify something, do not claim you did.
+
+Surviving findings → fix → re-verify. MAX 3 cycles. The adversarial review must find REAL issues — if all three attackers find nothing, you did not look hard enough.
 
 **Stage 4 — REPORT**: Outcome-first. What was done. What verification found. Honest caveats. Self-refuted claims listed.
 
@@ -2478,7 +2495,7 @@ CRC: bug-free logic, trace edge cases, handle realistic inputs, production-grade
 
 MPR: derive from first principles, verify boundaries, surface assumptions, reduce to known cases.
 
-Verification Gate: never present a claim as correct without verifying by reading source, running code, or checking with a tool.
+Verification Gate: never present a claim as correct without verifying by reading source, running code, or checking with a tool. \"I checked\" is not verification — show the check.
 
 Claim Discipline: any bug/root-cause claim REQUIRES a decisive test. Run it first. Fail → REFUTED.
 
