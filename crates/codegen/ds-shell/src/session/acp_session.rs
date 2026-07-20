@@ -1075,6 +1075,13 @@ pub(crate) struct SessionActor {
     /// session spawn; concurrent appends rely on `O_APPEND`'s atomic
     /// guarantee for writes under `PIPE_BUF` (JSONL lines fit).
     pub(crate) laziness_debug_log: Option<std::sync::Arc<std::path::Path>>,
+    /// /structure enforcement: set true when a Structure builtin is intercepted.
+    /// Checked at the start of the next turn to verify Fable compliance.
+    pub(crate) structure_active: std::cell::Cell<bool>,
+    /// Set true when spawn_subagent is dispatched during a structure turn.
+    pub(crate) structure_subagents_spawned: std::cell::Cell<bool>,
+    /// Set true when write_file or search_replace is dispatched during a structure turn.
+    pub(crate) structure_code_written: std::cell::Cell<bool>,
 }
 /// Template for building trace configs on synthetic auto-wake turns.
 ///

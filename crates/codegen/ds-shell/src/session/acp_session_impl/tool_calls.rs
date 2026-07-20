@@ -406,6 +406,17 @@ impl SessionActor {
         let workspace_ops = self.workspace_ops.clone();
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
+        // /structure enforcement: track subagent spawns and code writes
+        if self.structure_active.get() {
+            for prepared in &approved {
+                if prepared.tool_name == "spawn_subagent" {
+                    self.structure_subagents_spawned.set(true);
+                }
+                if prepared.tool_name == "write_file" || prepared.tool_name == "search_replace" {
+                    self.structure_code_written.set(true);
+                }
+            }
+        }
         let dispatch_futures: Vec<_> = approved
             .iter()
             .enumerate()

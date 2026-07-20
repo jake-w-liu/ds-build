@@ -248,6 +248,30 @@ impl SessionActor {
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
+        // ── /structure enforcement gate ────────────────────────────────────
+        // If the previous turn was a /structure turn that produced code changes
+        // without spawning subagents, prepend a violation message.
+        let mut prompt_blocks = prompt_blocks;
+        if self.structure_active.get()
+            && self.structure_code_written.get()
+            && !self.structure_subagents_spawned.get()
+        {
+            self.structure_active.set(false);
+            let enforcement = acp::ContentBlock::Text(acp::TextContent::new(
+                "FABLE ENFORCEMENT VIOLATION: You used /structure in the previous \
+                 turn and wrote code, but you did NOT spawn any subagents. The Fable \
+                 method REQUIRES evidence subagents (Stage 1) and attacker subagents \
+                 (Stage 3). Your previous response is REJECTED.\n\n\
+                 REDO the task with full orchestration:\n\
+                 1. Spawn evidence subagents (read-only explore) to gather context.\n\
+                 2. Execute your plan.\n\
+                 3. Spawn attacker subagents (distinct adversarial lenses) to verify.\n\
+                 4. Report outcome-first.\n\n\
+                 Do not write any code until you have spawned subagents.".to_string(),
+            ));
+            prompt_blocks.insert(0, enforcement);
+        }
+        self.structure_active.set(false);
         let turn_start_input = ds_agent_lifecycle::TurnStartInput::new(
             super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
         );
@@ -369,6 +393,9 @@ impl SessionActor {
                     }
                     BuiltinAction::Structure { prompt } => {
                         ds_telemetry::session_ctx::log_event(slash_used);
+                        self.structure_active.set(true);
+                        self.structure_subagents_spawned.set(false);
+                        self.structure_code_written.set(false);
                         let template = structure_template(&prompt);
                         vec![text_block(template)]
                     }
@@ -2409,71 +2436,61 @@ impl AuthRetrySchedule {
 fn structure_template(prompt: &str) -> String {
     format!(
         "\
-This is a `/structure` directive. You MUST process the informal prompt below into a concrete execution plan that maps onto the system-prompt rules, then you MUST execute that plan. Nothing here is optional or conditional.
+/structure ACTIVE. The Fable method and full orchestration are ENFORCED for the task below. You WILL execute every stage. None are optional. Do not evaluate whether to apply them — you MUST apply them all.
 
 ---
 
-## Step 1 — Build the Structured Execution Plan
+## Step 1 — Build the Execution Plan
 
-Fill every section. Do not skip any. Infer from context; mark unknowns explicitly with [NEEDS CLARIFICATION] or [AUTO]. Be conservative — do not fabricate scope or criteria the user did not imply.
+Fill every section. Infer from context. Mark unknowns with [NEEDS CLARIFICATION] or [AUTO].
 
 ```
 Classification: [question | task | plan-first]
 
 Done Criterion: [1-2 sentences: observable outcome + how to verify]
 
-Scope: [files, modules, crates, or domains in scope]
+Scope: [files, modules, crates, or domains]
 
-CRC: [yes | no] — if yes, you MUST trace edge cases, handle realistic inputs, deliver production-grade code, never ship code you believe may be wrong.
-
-MPR: [yes | no] — if yes, you MUST derive from first principles, verify boundaries at limits, surface assumptions, reduce to known special cases.
-
-Fable Gate: [trivial | non-trivial]
-  - trivial ONLY if: ≤1 file, ≤10 lines, no new behavior, path is clear.
-  - non-trivial: you MUST run the FULL Fable loop (Stages 1-4 below).
-
-Verification Method: [exact command, test, or check that proves the done criterion]
-
-Adversarial Review: [mandatory | skip]
-  - mandatory if: security fix, correctness fix, or any code change.
-  - skip ONLY for pure question/answer with zero code changes.
+Verification Method: [exact command or test that proves the done criterion]
 
 Original Prompt: {prompt}
 ```
 
-## Step 2 — Present the Plan AND Start Executing (SAME response, no gap)
+PLAN-FIRST RULE: If Classification is plan-first, present the plan and STOP. Do not execute. Wait for approval.
 
-You MUST output the completed plan above AND begin executing it IN THE SAME MESSAGE. Do not output the plan and then stop — pair it with the first tool calls or evidence-gathering actions.
+## Step 2 — Fable Method Stages (ENFORCED — you WILL execute ALL four)
 
-**PLAN-FIRST EXCEPTION**: If Classification is plan-first (ambiguous, irreversible, or a plan was explicitly requested), you MUST present the plan and STOP. Do NOT execute, do NOT edit files, do NOT take outward actions. Wait for the user to approve.
+**Stage 1 — PLAN**: Fan out parallel evidence subagents (read-only explore agents, max 4 per batch). Gather cited evidence with file:line references. Freeze scope. Produce a committed plan.
 
-## Step 3 — Orchestrate via Fable Method (MANDATORY for non-trivial)
+**Stage 2 — EXECUTE**: Apply the committed plan. Edit surgically. Scope is frozen.
 
-The Fable method is defined in your system prompt. For non-trivial tasks you MUST execute all four stages:
+**Stage 3 — VERIFY**: Spawn 1-3 parallel adversarial attacker subagents, each with a distinct lens:
+  - Attacker 1: diff incompleteness (what was missed?)
+  - Attacker 2: runtime breakage (what edge case crashes?)
+  - Attacker 3: spec contradiction (what requirement is violated?)
+Surviving findings → fix → re-verify. MAX 3 cycles.
 
-**Stage 1 — PLAN**: Define done criterion → freeze scope → fan out parallel evidence subagents (read-only explore agents, max 4 per batch). Gather cited evidence with file:line references before deciding.
+**Stage 4 — REPORT**: Outcome-first. What was done. What verification found. Honest caveats. Self-refuted claims listed.
 
-**Stage 2 — EXECUTE**: Apply the SINGLE committed plan. Edit surgically in the main thread. Do not change scope mid-flight unless the done criterion is rewritten first.
+## Step 3 — System-Prompt Rules (ENFORCED)
 
-**Stage 3 — VERIFY**: Run the verification method named in the plan. For consequential changes, spawn 1-3 adversarial attacker subagents (each a distinct lens: diff incompleteness, runtime breakage, spec contradiction). Surviving findings → fix → re-verify. MAX 3 fix-verify cycles.
+CRC: bug-free logic, trace edge cases, handle realistic inputs, production-grade, never ship wrong code.
 
-**Stage 4 — REPORT**: Outcome-first. First sentence = what happened. Honest caveats. Self-refuted claims listed. No stage scaffolding in user-facing text.
+MPR: derive from first principles, verify boundaries, surface assumptions, reduce to known cases.
 
-## Step 4 — Enforce System-Prompt Rules (MANDATORY, no exceptions)
+Verification Gate: never present a claim as correct without verifying by reading source, running code, or checking with a tool.
 
-**CRC (when code is involved)**: Correctness first — bug-free logic, trace edge cases, never ship code you believe is wrong. Robustness second — handle realistic inputs and failure paths, no stubs or hacks. Completeness third — production-grade, real error handling, no silent TODOs.
+Claim Discipline: any bug/root-cause claim REQUIRES a decisive test. Run it first. Fail → REFUTED.
 
-**MPR (when math/physics is involved)**: Derive from first principles. Self-verify at boundaries. Surface every unstated assumption. Reduce to known special cases.
+Adversarial Review: re-read your diff with a hostile lens. What did you miss?
 
-**Verification Gate (ALWAYS)**: Never present a claim, finding, answer, or piece of code as correct unless you have verified it by reading source, running code, or checking with a tool. Memory and inference are not verification. If unverified, label it explicitly.
+## BOUNDS OVERRIDE
 
-**Claim Discipline (ALWAYS)**: Any bug/impossibility/root-cause claim REQUIRES a decisive test. Run the test before stating the conclusion. Fail the test → label REFUTED. Do not ship fixes for refuted claims.
+The Fable method's BOUNDS section says \"SOLO when: single-area OR tools faster than agents.\" This override DOES NOT APPLY under /structure. /structure REQUIRES subagents for evidence gathering AND adversarial verification. 
 
-**Adversarial Review (mandatory for code changes)**: After every code change, re-read your own diff with a hostile lens. Ask: what did I miss? What edge case breaks this? What does the spec actually require?
+## COMPLIANCE CHECK
 
-## Step 5 — Report
-
-After execution, report outcome-first: what was done, what verification was performed, what adversarial review found, any remaining unverified risks. No stage labels in the report.\
+After you finish, the shell will verify that you spawned evidence and attacker subagents. If you wrote code without spawning subagents, your turn will be REJECTED and you will be forced to redo it with proper orchestration.\
         "
     )
 }
