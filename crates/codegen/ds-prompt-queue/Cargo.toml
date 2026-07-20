@@ -2,7 +2,7 @@
 edition.workspace = true
 license = "Apache-2.0"
 name = "ds-prompt-queue"
-version = "0.1.29"
+version = "0.1.30"
 description = "Shared prompt-queue wire types for ds-shell and ds-pager"
 
 [dependencies]

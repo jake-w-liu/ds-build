@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "ds-secrets"
-version = "0.1.29"
+version = "0.1.30"
 description = "Regex sanitizer for DS Build outbound data (Sentry / Mixpanel / product-event scrubbing)"
 
 [dependencies]

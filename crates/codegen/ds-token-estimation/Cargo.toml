@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "ds-token-estimation"
-version = "0.1.29"
+version = "0.1.30"
 edition.workspace = true
 description = "Pure shared token-estimation primitives."
 
