@@ -1,6 +1,6 @@
 [package]
 name = "ds-tty-utils"
-version = "0.1.34"
+version = "0.1.35"
 edition.workspace = true
 license = "Apache-2.0"
 description = "Lightweight process-spawning utilities for TTY safety — detach from controlling terminal, suppress interactive pagers, process-group lifecycle"
