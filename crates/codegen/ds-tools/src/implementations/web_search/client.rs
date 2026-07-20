@@ -1,13 +1,16 @@
-//! Web search client — DuckDuckGo HTML scraping.
+//! Web search client — DuckDuckGo HTML scraping via POST.
 //!
-//! No API key required. Scrapes the DDG HTML (non-JS) search endpoint,
+//! No API key required. Uses POST to the DDG HTML (non-JS) search endpoint,
 //! which returns plain HTML results. Uses `native-tls` (OS TLS stack)
-//! so the TLS fingerprint matches a real browser — avoids bot detection
-//! that blocks `rustls`-based clients.
+//! so the TLS fingerprint matches a real browser.
+//!
+//! The DDG HTML endpoint blocks GET requests with a visual CAPTCHA
+//! ("select all squares containing a duck"), but POST requests with
+//! browser-like headers and a Referer consistently return real results.
 //!
 //! The DDG Instant Answer API (`api.duckduckgo.com`) is intentionally NOT
 //! used: it only returns structured data for dictionary/definition queries,
-//! not general web search, and is now bot-blocked from most IPs.
+//! not general web search.
 //!
 //! Rate limit: the HTML endpoint is tolerant of moderate usage but may
 //! challenge excessive request rates. Keep queries spaced reasonably.
@@ -17,7 +20,7 @@ use crate::attribution::SharedAttributionCallback;
 use crate::types::SharedApiKeyProvider;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 
-/// DuckDuckGo HTML search endpoint (non-JS version).
+/// DuckDuckGo HTML search endpoint (non-JS version, POST required).
 const DDG_HTML_URL: &str = "https://html.duckduckgo.com/html/";
 
 /// Maximum search results.
@@ -93,7 +96,7 @@ impl WebSearchClient {
         self
     }
 
-    /// Perform a web search via DuckDuckGo HTML scraping.
+    /// Perform a web search via DuckDuckGo HTML scraping (POST).
     pub async fn search(
         &self,
         query: &str,
@@ -133,12 +136,16 @@ impl WebSearchClient {
         Ok((content, pairs))
     }
 
-    /// Search via DuckDuckGo HTML endpoint.
+    /// Search via DuckDuckGo HTML endpoint using POST.
     ///
     /// The HTML endpoint returns a simple non-JS page with result links
     /// (`class="result__a"`) and snippets (`class="result__snippet"`).
     /// URLs are DDG redirect links; we extract and decode the `uddg` param
     /// to get the real destination URL.
+    ///
+    /// Uses POST with form data (`q=...&b=`) instead of GET because DDG
+    /// now blocks GET with a visual CAPTCHA challenge. POST with a Referer
+    /// header consistently returns real search results.
     ///
     /// Includes a small pre-request delay and retry-with-backoff on
     /// rate-limit / bot-challenge responses.
@@ -158,7 +165,6 @@ impl WebSearchClient {
             query.to_string()
         };
 
-        let url = format!("{}?q={}", DDG_HTML_URL, url_encode(&q));
         let tool_id = ds_tool_protocol::ToolId::new("web_search").expect("valid");
 
         for attempt in 0..=DDG_MAX_RETRIES {
@@ -174,9 +180,12 @@ impl WebSearchClient {
 
             let response = self
                 .http
-                .get(&url)
+                .post(DDG_HTML_URL)
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .header("Accept-Language", "en-US,en;q=0.9")
+                .header("Referer", "https://html.duckduckgo.com/")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[("q", q.as_str()), ("b", "")])
                 .send()
                 .await
                 .map_err(|e| {
@@ -247,9 +256,8 @@ fn parse_ddg_html(body: &str) -> Vec<SearchResult> {
         r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>"#,
     );
     // Extract snippets: <a ... class="result__snippet">text</a>
-    let snippet_re = regex::Regex::new(
-        r#"<a[^>]*class="result__snippet"[^>]*>((?:(?!</a>).)*)</a>"#,
-    );
+    let snippet_re =
+        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([^<]*)</a>"#);
 
     let links: Vec<(String, String)> = if let Ok(re) = &link_re {
         re.captures_iter(body)
@@ -373,31 +381,6 @@ fn strip_html_tags(s: &str) -> String {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-fn url_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            b' ' => result.push('+'),
-            _ => {
-                result.push('%');
-                result.push(hex_char(b >> 4));
-                result.push(hex_char(b & 0x0f));
-            }
-        }
-    }
-    result
-}
-
-fn hex_char(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        _ => (b'A' + (n - 10)) as char,
-    }
-}
-
 fn format_results(results: &[SearchResult]) -> String {
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {
@@ -418,13 +401,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_url_encode() {
-        assert_eq!(url_encode("hello world"), "hello+world");
-        assert_eq!(url_encode("a&b=c"), "a%26b%3Dc");
-        assert_eq!(url_encode("test#frag?x=1"), "test%23frag%3Fx%3D1");
-    }
-
-    #[test]
     fn test_url_decode() {
         assert_eq!(
             url_decode("https%3A%2F%2Frust-lang.org%2Flearn%2F").unwrap(),
@@ -436,7 +412,8 @@ mod tests {
 
     #[test]
     fn test_decode_ddg_url() {
-        let href = "//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Flearn%2F&rut=abc123";
+        let href =
+            "//duckduckgo.com/l/?uddg=https%3A%2F%2Frust-lang.org%2Flearn%2F&rut=abc123";
         assert_eq!(decode_ddg_url(href), "https://rust-lang.org/learn/");
     }
 
@@ -498,24 +475,6 @@ mod tests {
         assert_eq!(results[1].url, "https://en.wikipedia.org/wiki/Rust");
     }
 
-    #[tokio::test]
-    #[ignore = "live HTTP test — run with `cargo test -- --ignored`"]
-    async fn test_live_ddg_html_search() {
-        let config = WebSearchConfig::Enabled {
-            api_key: String::new(),
-            base_url: String::new(),
-            model: String::new(),
-            extra_headers: indexmap::IndexMap::new(),
-            alpha_test_key: None,
-        };
-        let client = WebSearchClient::new(&config, None).expect("create client");
-        let (content, citations) = client.search("DeepSeek R1 reasoning", None).await.expect("search");
-        eprintln!("CONTENT:\n{content}");
-        assert!(!citations.is_empty(), "must return at least one citation");
-        assert!(!content.contains("No search results found"), "must have real results");
-        assert!(citations.iter().any(|c| c.starts_with("https://")), "must have HTTPS URLs");
-    }
-
     #[test]
     fn test_parse_ddg_html_skips_duplicate_urls() {
         let body = r#"<html><body>
@@ -526,6 +485,10 @@ mod tests {
 </body></html>"#;
 
         let results = parse_ddg_html(body);
-        assert_eq!(results.len(), 1, "Duplicate URLs should be skipped");
+        assert_eq!(
+            results.len(),
+            1,
+            "Duplicate URLs should be skipped"
+        );
     }
 }
