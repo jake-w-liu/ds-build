@@ -1,111 +1,158 @@
-//! Completion gate — mechanical enforcement that completion claims
-//! must be backed by observable evidence.
+//! Mandatory completion gate.
 //!
-//! When the assistant claims a task is "done," "complete," "fixed," etc.,
-//! this gate checks that the message also contains verifiable evidence:
-//! pasted tool output, file:line citations, terminal command output,
-//! or explicit verification blocks.
+//! When a message claims task completion, it MUST include a structured
+//! verification block with observable evidence. Narrative claims
+//! ("done," "fixed," "works now") without evidence are mechanically
+//! rejected — the model cannot end a turn with an unsubstantiated claim.
 //!
-//! A completion claim without evidence is rejected.
+//! Required format for completion claims:
+//!
+//!   CRITERION: [what does "done" mean — from task definition]
+//!   OBSERVED:  [pasted tool output, terminal logs, test results]
+//!
+//! The OBSERVED field must contain machine-verifiable output (URLs,
+//! exit codes, test counts, build output, file:line refs) — not
+//! narrative prose like "it worked" or "everything passes."
 
 use regex::Regex;
 use std::sync::LazyLock;
 
 /// Patterns that indicate a completion claim.
-static COMPLETION_CLAIMS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+static CLAIM: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
         re(r"(?i)\b(done|completed|finished|fixed|resolved|implemented)\b"),
-        re(r"(?i)\b(task|issue|bug|feature) (is|has been) (done|complete|fixed|resolved|implemented)\b"),
-        re(r"(?i)\b(all|everything) (is|works|working|done|complete)\b"),
-        re(r"(?i)\bthis (should|will|does) (fix|resolve|address|complete)\b"),
-        re(r"(?i)\bready (to|for) (merge|ship|review|deploy|push)\b"),
         re(r"(?i)\b(✓|✅|✔)\s*(done|complete|fixed|ready|finished)\b"),
+        re(r"(?i)\bready (to|for) (merge|ship|review|deploy|push)\b"),
+        re(r"(?i)\b(all|everything) (is|works|working|done|complete)\b"),
     ]
 });
 
-/// Patterns that constitute verifiable evidence.
-static EVIDENCE_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+/// Required verification block markers.
+static CRITERION_RE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?im)^\s*CRITERION\s*:"));
+static OBSERVED_RE: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?im)^\s*OBSERVED\s*:"));
+
+/// An OBSERVED field must contain at least one of these to be valid.
+static OBSERVED_EVIDENCE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        // Pasted command output (contains pid, exit code, or typical bash output)
-        re(r"(?i)\b(exit code|exit status):\s*\d+"),
-        re(r"(?i)\b(PID|process)\s*\d+"),
-        // File:line references
-        re(r"[^\s]+\.[a-zA-Z]+:\d+"),
-        // Pasted terminal output (contains common CLI patterns)
-        re(r"(?i)(running|tests? (passed|failed|run)|compiling|building|installing|pushing)"),
-        re(r"\b\d+\s+(passed|failed|ignored|measured|filtered out)\b"),
-        // Explicit verification block
-        re(r"(?i)VERIFICATION"),
-        re(r"(?i)DONE CRITERION"),
-        re(r"(?i)OBSERVED:"),
-        // Observable output from tools
-        re(r"```"),
-        re(r"(?i)(stdout|stderr|output):"),
-        // Git operations (commit, push)
-        re(r"(?i)\[main\s+\w+\]\s+"),
-        re(r"(?i)(committed|pushed|merged)\s+(to|into)\s+"),
-        // Install/version output
-        re(r"(?i)(installed|installing)\s+(to|in)\s+"),
-        re(r"(?i)--version:\s+"),
-        // URL citations from real search
-        re(r"https?://[^\s]+"),
-        // Build output
-        re(r"(?i)(Finished|Compiling)\s+\S+\s+profile"),
+        re(r"https?://[^\s]+"),                        // URL
+        re(r"\b\d+\s+(passed|failed|ignored)\b"),       // test counts
+        re(r"(?i)(exit code|exit status):\s*\d+"),      // exit codes
+        re(r"[^\s]+\.[a-zA-Z]+:\d+"),                    // file:line
+        re(r"```"),                                      // code/output block
+        re(r"(?i)(Finished|Compiling)\s+\S+\s+profile"), // build output
+        re(r"(?i)--version:\s+"),                         // version output
+        re(r"(?i)\[main\s+\w+\]\s+"),                    // git commit
+        re(r"(?i)(committed|pushed|installed)\s+(to|in)\s+"),
     ]
 });
 
 fn re(pattern: &str) -> Regex {
-    Regex::new(pattern).expect("failed to compile completion gate pattern")
+    Regex::new(pattern).expect("invalid completion gate pattern")
 }
 
-/// Result of checking a message for completion claims.
-#[derive(Debug, Clone)]
-pub struct CompletionGateResult {
-    /// Whether a completion claim was detected.
-    pub claims_completion: bool,
-    /// Whether evidence was found alongside the claim.
-    pub has_evidence: bool,
-    /// The completion phrases that matched (if any).
-    pub matched_claims: Vec<String>,
-    /// The evidence phrases that matched (if any).
-    pub matched_evidence: Vec<String>,
-}
-
-/// Check a message for completion claims without evidence.
+/// Check a message for completion claims without mandatory evidence.
 ///
-/// Returns `Ok(())` if no completion claim is made, or if claims are
-/// backed by evidence. Returns `Err(reason)` if a completion claim
-/// is detected without accompanying evidence.
-pub fn check_completion(message: &str) -> Result<CompletionGateResult, String> {
-    let matched_claims: Vec<String> = COMPLETION_CLAIMS
+/// Returns `Ok(())` if:
+///   - No completion claim is made, OR
+///   - Claim is backed by a VERIFICATION block with CRITERION + OBSERVED
+///
+/// Returns `Err(reason)` if a completion claim lacks the required block
+/// or the OBSERVED field contains no machine-verifiable output.
+pub fn check_completion(message: &str) -> Result<(), String> {
+    // 1. Detect completion claim
+    let has_claim = CLAIM.iter().any(|re| re.is_match(message));
+    if !has_claim {
+        return Ok(());
+    }
+
+    // 2. Require CRITERION field
+    if !CRITERION_RE.is_match(message) {
+        return Err(format!(
+            "COMPLETION GATE: message claims completion but is missing a \
+             CRITERION field. Every completion claim must include:\n\
+             \n  CRITERION: [what \"done\" means — from the task definition]\n  OBSERVED:  [pasted tool output, terminal logs, or test results]\n\
+             \nAdd both fields with verifiable evidence and retry."
+        ));
+    }
+
+    // 3. Require OBSERVED field
+    if !OBSERVED_RE.is_match(message) {
+        return Err(format!(
+            "COMPLETION GATE: message claims completion but is missing an \
+             OBSERVED field. Every completion claim must include:\n\
+             \n  CRITERION: [what \"done\" means]\n  OBSERVED:  [pasted tool output, terminal logs, or test results]\n\
+             \nAdd the OBSERVED field with verifiable evidence and retry."
+        ));
+    }
+
+    // 4. Extract OBSERVED content and check it contains real evidence
+    let observed_content = extract_observed_field(message);
+    if observed_content.is_empty() {
+        return Err(
+            "COMPLETION GATE: OBSERVED field is empty. \
+             It must contain pasted tool output, terminal logs, \
+             test results, or URLs — not narrative prose.".to_string()
+        );
+    }
+
+    let has_evidence = OBSERVED_EVIDENCE
         .iter()
-        .filter_map(|re| re.find(message))
-        .map(|m| m.as_str().to_string())
-        .collect();
+        .any(|re| re.is_match(&observed_content));
 
-    let matched_evidence: Vec<String> = EVIDENCE_PATTERNS
-        .iter()
-        .filter_map(|re| re.find(message))
-        .map(|m| m.as_str().to_string())
-        .collect();
+    if !has_evidence {
+        return Err(format!(
+            "COMPLETION GATE: OBSERVED field contains no verifiable evidence. \
+             Found: \"{}\" — this looks like narrative prose, not actual output. \
+             Paste the actual tool output, terminal log, or test result.",
+            truncate(&observed_content, 100)
+        ));
+    }
 
-    let result = CompletionGateResult {
-        claims_completion: !matched_claims.is_empty(),
-        has_evidence: !matched_evidence.is_empty(),
-        matched_claims,
-        matched_evidence,
-    };
+    Ok(())
+}
 
-    if result.claims_completion && !result.has_evidence {
-        Err(format!(
-            "COMPLETION GATE: message claims task completion (matched: {:?}) \
-             but contains no verifiable evidence. A completion claim must be \
-             accompanied by pasted tool output, terminal logs, file:line \
-             citations, or an explicit VERIFICATION block with OBSERVED output.",
-            result.matched_claims.first().map(|s| s.as_str()).unwrap_or("?")
-        ))
+/// Extract the text after OBSERVED: up to the next section marker or end.
+fn extract_observed_field(text: &str) -> String {
+    let mut lines = text.lines();
+    let mut capturing = false;
+    let mut content = String::new();
+
+    while let Some(line) = lines.next() {
+        if OBSERVED_RE.is_match(line) {
+            capturing = true;
+            // Get text after the OBSERVED: marker
+            if let Some(pos) = line.to_lowercase().find("observed:") {
+                let after = line[pos + 9..].trim();
+                if !after.is_empty() {
+                    content.push_str(after);
+                    content.push('\n');
+                }
+            }
+            continue;
+        }
+        if capturing {
+            // Stop at next section marker or blank+marker line
+            if line.trim().is_empty() {
+                // Check if next line is a new section
+                continue;
+            }
+            if CRITERION_RE.is_match(line) || line.trim().starts_with("---") {
+                break;
+            }
+            content.push_str(line);
+            content.push('\n');
+        }
+    }
+    content.trim().to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
     } else {
-        Ok(result)
+        format!("{}…", &s[..max])
     }
 }
 
@@ -115,80 +162,118 @@ mod tests {
 
     #[test]
     fn test_no_claim_passes() {
-        let result = check_completion("Let me look at that file.");
-        assert!(result.is_ok());
-        let gate = result.unwrap();
-        assert!(!gate.claims_completion);
+        assert!(check_completion("Let me look at that file.").is_ok());
     }
 
     #[test]
-    fn test_claim_with_evidence_passes() {
-        let msg = "Done. The fix compiles clean.\n\
-                   ```\n\
-                   Finished dev profile in 13.15s\n\
-                   ```\n\
-                   tests passed: 9 passed; 0 failed";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "Should pass: {:?}", result.err());
-        let gate = result.unwrap();
-        assert!(gate.claims_completion);
-        assert!(gate.has_evidence);
+    fn test_claim_without_criterion_fails() {
+        let msg = "Done. The bug is fixed.\nOBSERVED: compiled fine";
+        let err = check_completion(msg).unwrap_err();
+        assert!(err.contains("CRITERION"));
     }
 
     #[test]
-    fn test_claim_without_evidence_fails() {
-        let msg = "Done. The bug is fixed. Everything works now.";
-        let result = check_completion(msg);
-        assert!(result.is_err(), "Should fail: no evidence");
-        assert!(result.unwrap_err().contains("COMPLETION GATE"));
+    fn test_claim_without_observed_fails() {
+        let msg = "Done.\nCRITERION: the tool returns real data";
+        let err = check_completion(msg).unwrap_err();
+        assert!(err.contains("OBSERVED"));
     }
 
     #[test]
-    fn test_claim_with_file_line_passes() {
-        let msg = "Fixed the bug in client.rs:136.\n\
-                   The root cause was the wrong endpoint URL.";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "file:line should count as evidence");
+    fn test_claim_with_both_fields_passes() {
+        let msg = "Done.\n\
+                   CRITERION: web_search returns real internet data\n\
+                   OBSERVED: go1.26.5 from https://pkg.go.dev/";
+        assert!(check_completion(msg).is_ok());
     }
 
     #[test]
-    fn test_claim_with_url_passes() {
-        let msg = "Done. Results from https://releases.rs/ show the latest version.";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "URL should count as evidence");
+    fn test_observed_without_real_evidence_fails() {
+        let msg = "Done.\n\
+                   CRITERION: the fix works\n\
+                   OBSERVED: it works correctly now";
+        let err = check_completion(msg).unwrap_err();
+        assert!(err.contains("no verifiable evidence"));
     }
 
     #[test]
-    fn test_claim_with_test_output_passes() {
-        let msg = "Fixed. Tests: 10 passed; 0 failed; 0 ignored.";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "test output should count as evidence: {:?}", result.err());
+    fn test_observed_with_url_passes() {
+        let msg = "Fixed.\n\
+                   CRITERION: endpoint returns 200\n\
+                   OBSERVED: curl returned https://api.example.com/v1 with status 200";
+        assert!(check_completion(msg).is_ok());
     }
 
     #[test]
-    fn test_claim_with_verification_block_passes() {
-        let msg = "Done.\n---VERIFICATION---\nOBSERVED: compiled and tested\n---";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "VERIFICATION block should count as evidence");
+    fn test_observed_with_test_counts_passes() {
+        let msg = "Done.\n\
+                   CRITERION: all tests pass\n\
+                   OBSERVED: test result: ok. 9 passed; 0 failed; 0 ignored";
+        assert!(check_completion(msg).is_ok());
     }
 
     #[test]
-    fn test_claim_with_git_commit_passes() {
-        let msg = "Fixed and pushed.\n[main a5bd4d3] fix: the bug";
-        let result = check_completion(msg);
-        assert!(result.is_ok(), "git commit should count as evidence");
+    fn test_observed_with_file_line_passes() {
+        let msg = "Fixed.\n\
+                   CRITERION: bug in client.rs resolved\n\
+                   OBSERVED: changed endpoint in client.rs:136 from /responses to /chat/completions";
+        assert!(check_completion(msg).is_ok());
     }
 
     #[test]
-    fn test_fake_claim_fails() {
-        // This is what I did — claimed "done" but only showed compile output,
-        // not actual verification
-        let msg = "Done. It compiles and all tests pass. \
-                   The web_search tool now returns real results. \
-                   Everything is working correctly.";
-        // Note: "compiles" and "tests pass" are narrative claims, not evidence.
-        // The gate should catch this.
-        let result = check_completion(msg);
-        assert!(result.is_err(), "Narrative claims without pasted output should fail");
+    fn test_observed_with_git_commit_passes() {
+        let msg = "Done.\n\
+                   CRITERION: committed and pushed\n\
+                   OBSERVED: [main a5bd4d3] fix: the bug";
+        assert!(check_completion(msg).is_ok());
+    }
+
+    #[test]
+    fn test_observed_with_build_output_passes() {
+        let msg = "Done.\n\
+                   CRITERION: compiles clean\n\
+                   OBSERVED:\n\
+                   Compiling ds-tools v0.1.24\n\
+                   Finished dev profile in 13.15s";
+        assert!(check_completion(msg).is_ok());
+    }
+
+    #[test]
+    fn test_extract_observed_field() {
+        let msg = "Done.\n\
+                   CRITERION: real search\n\
+                   OBSERVED: go1.26.5 from pkg.go.dev\n\
+                   Some other text after.";
+        let observed = extract_observed_field(msg);
+        assert!(observed.contains("go1.26.5 from pkg.go.dev"));
+    }
+
+    #[test]
+    fn test_extract_observed_multiline() {
+        let msg = "Done.\n\
+                   CRITERION: tests pass\n\
+                   OBSERVED:\n\
+                   line one\n\
+                   line two\n\
+                   \n\
+                   ---VERIFICATION---";
+        let observed = extract_observed_field(msg);
+        assert_eq!(observed, "line one\nline two");
+    }
+
+    #[test]
+    fn test_observed_empty_fails() {
+        let msg = "Done.\n\
+                   CRITERION: it works\n\
+                   OBSERVED:";
+        let err = check_completion(msg).unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn test_checkmark_claim_triggers_gate() {
+        let msg = "✅ Done — the fix compiles and all tests pass. Everything is working correctly.";
+        let err = check_completion(msg).unwrap_err();
+        assert!(err.contains("CRITERION"));
     }
 }
