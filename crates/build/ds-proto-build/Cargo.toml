@@ -3,7 +3,7 @@ license = "Apache-2.0"
 description = "Build protobuf"
 edition.workspace = true
 name = "ds-proto-build"
-version = "0.1.31"
+version = "0.1.32"
 
 [lints]
 workspace = true
