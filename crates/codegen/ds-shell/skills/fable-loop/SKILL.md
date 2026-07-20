@@ -21,63 +21,9 @@ adversarial attackers.
 it, one obvious check, two-sentence report. No stages, no subagents.
 Everything else runs the four stages **in order**.
 
-## Resource bounds (hard)
+## How it works
 
-- Prefer `explore` for research; `general-purpose` only when edits are required.
-- Max **4** evidence subagents per batch; max **3** attackers; max **8** live at once.
-- One evidence batch + one follow-up; a third needs a stated reason.
-- Subagents return **distilled** findings with `file:line` cites — no raw dumps.
-- Cancel workers you no longer need; do not design deep nested spawn trees.
-- Solo when single-area or a direct tool call is faster than an agent.
-
-## Stage 1 — PLAN
-
-1. Method Steps 0–3: classify, define done + named verification, state assumptions.
-   - **Scope freeze:** name files/modules/presets in scope. Expanding scope
-     requires rewriting done + verification first.
-   - **Claim discipline:** a "bug" needs a decisive check (path/test/repro).
-     Fail the check → label **REFUTED** yourself; do not plan a fix for it.
-2. **Evidence fan-out** — spawn gatherers as **parallel** subagents in **one**
-   message (never sequential when independent), within bounds above:
-   - codebase: `explore` per distinct area;
-   - libraries/facts: research / web_search-oriented work;
-   - distilled findings only (file:line); forbid raw multi-KB dumps.
-   - If a result is Headroom-compressed, retrieve with **query** for the one
-     fact you need — do not reload full bodies by default.
-3. **Plan artifact:** classification; done + verification; **in-scope list**;
-   evidence (cited); ONE approach (alternatives dismissed in one line each);
-   risks/assumptions; execution checklist.
-4. **Decision gate:** task-shaped + reversible → Stage 2 without asking.
-   Plan-first / irreversible / outward-facing → present plan and STOP for approval.
-
-## Stage 2 — EXECUTE
-
-1. Work the checklist in the **main** thread (task tools if available). Deciding
-   and editing stay main-thread; only search/verify fan out.
-2. Every edit: method Step 4 (intent gate, smallest change, never destroy blind).
-3. Independent mechanical multi-file work may fan out in one message with
-   isolation if files could collide.
-4. Surprises re-route: say them, update plan or return to Stage 1.
-
-## Stage 3 — VERIFY (adversarial)
-
-1. Run named verification yourself: done criterion **observed**; surrounding
-   build/tests healthy.
-2. **Consequential changes:** spawn **1–3 parallel attacker** subagents, each
-   a distinct lens, e.g.:
-   - "Read this diff and prove it is wrong or incomplete"
-   - "Exercise the changed behavior and find a breaking input"
-   - "Check claims against spec/docs and find a contradiction"
-3. Surviving findings → Stage 2. Hard bound: 3 failed fix-verify cycles on the
-   same issue, or blockers outside control → stop and hand back with hypothesis.
-
-## Stage 4 — AUDIT and REPORT
-
-1. Self-audit method steps: followed / skipped / faked; fix what one pass can.
-2. Outcome-first report (method Step 6). **No stage names or step numbers** in
-   user-facing text. Honest caveats. List self-refuted claims in one line each
-   when you considered and dropped them. Follow-ups only if they emerged from
-   the work.
+The orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT), resource bounds (max subagents, model preferences, file:line citation rules), and attacker spawning directives are defined in the system prompt's `<fable_method>` block. This skill activates them for the current task.
 
 ## When NOT to use
 

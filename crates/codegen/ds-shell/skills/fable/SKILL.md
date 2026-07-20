@@ -29,20 +29,9 @@ skill re-affirms, routes sub-commands, or temporarily deactivates.
 | `/fable judge [work]` | Adversarial verdict: VERIFIED / WITH CAVEATS / REFUTED |
 | `/fable-loop <task>` | Dedicated orchestration skill (parallel evidence + attackers) |
 
-## The loop (concise method)
+## The method loop
 
-**Triviality gate:** one file, ~≤10 lines, no new behavior → do, check, two-sentence report.
-
-0. **Classify** — question / task / plan-first (plan-first wins ties).
-1. **Define done** — observable criterion + verification method.
-2. **Gather evidence** — orient first; primary sources; parallelize; establish intent.
-3. **Decide** — one recommendation; ask for irreversible outward actions.
-4. **Act surgically** — intent gate; smallest correct change; no silent destroy.
-5. **Verify by observation** — criterion observed; nearby checks green; ≤3 retry cycles.
-6. **Report outcome-first** — no step narration; honest caveats; hostile reread.
-
-Never invent APIs/paths. Authority: user statement > spec > tests > current code.
-If code/check/spec disagree, surface that — do not silently make one match another.
+The full method loop (Steps 0–6: Classify → Define → Gather → Decide → Act → Verify → Report) and orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT) are defined in the system prompt's `<fable_method>` block. This skill only handles toggles and subcommand routing.
 
 ## Sub-command routing
 
