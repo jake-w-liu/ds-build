@@ -2453,7 +2453,7 @@ Done Criterion: [1-2 sentences describing the SUBSTANTIVE correct outcome and ho
 
 Scope: [files, modules, crates, or domains.
   You may NOT mark correctness auditing as a non-goal.
-  You may NOT claim any verification "requires human review."
+  You may NOT claim any verification \"requires human review.\"
   Stage 3 IS the correctness audit. If you cannot automatically verify correctness,
   you have not satisfied Stage 3.]
 
