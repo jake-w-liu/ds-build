@@ -17,13 +17,23 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Patterns that indicate a completion claim.
+/// Patterns that indicate a TASK-LEVEL completion claim.
+///
+/// Deliberately narrow: sub-step progress ("Build finished", "step done",
+/// checkmarks in status tables) does NOT trigger the gate. Only phrases
+/// that unambiguously claim the WHOLE task/request is complete.
 static CLAIM: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        re(r"(?i)\b(done|completed|finished|fixed|resolved|implemented)\b"),
-        re(r"(?i)\b(✓|✅|✔)\s*(done|complete|fixed|ready|finished)\b"),
+        // Only match "done/completed/finished" when it appears as a
+        // standalone sentence-start or after a section break — not buried
+        // in sub-step updates like "Build finished in 8m56s."
+        re(r"(?im)^\s*(Done|Completed|Finished|Fixed|Resolved|All done)\b[.!]?\s*$"),
+        re(r"(?im)^\s*(✓|✅|✔)\s*(Done|Complete|Fixed|Ready|Finished)\s*$"),
+        // Explicit task-completion claims
+        re(r"(?i)\b(task|request|issue|everything|all steps)\s+(is|are)\s+(done|complete|finished|resolved)\b"),
         re(r"(?i)\bready (to|for) (merge|ship|review|deploy|push)\b"),
-        re(r"(?i)\b(all|everything) (is|works|working|done|complete)\b"),
+        // "That should do it", "This completes the task" style
+        re(r"(?im)^\s*(That|This)\s+(should|will|completes|finishes)\s+(do\s+it|the\s+(task|fix|change))\b"),
     ]
 });
 

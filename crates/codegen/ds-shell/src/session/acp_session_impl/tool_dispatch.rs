@@ -61,12 +61,18 @@ fn verify_tool_output(
         }
     }
 
-    // Completion gate: check for unsubstantiated completion claims
-    if let Err(reason) = ds_tools::verification::completion::check_completion(prompt_text) {
-        return Err(ds_tool_runtime::ToolError::execution(
-            ds_tool_protocol::ToolId::new("completion_gate").expect("valid"),
-            reason,
-        ));
+    // Completion gate: check tool output for unsubstantiated claims.
+    // Only applies to tools that produce natural-language output that
+    // could contain fabricated completion claims (subagent responses,
+    // task completions). Skipped for data tools (read, grep, bash, etc.).
+    let completion_gated = ["task"];
+    if completion_gated.contains(&tool_name) {
+        if let Err(reason) = ds_tools::verification::completion::check_completion(prompt_text) {
+            return Err(ds_tool_runtime::ToolError::execution(
+                ds_tool_protocol::ToolId::new("completion_gate").expect("valid"),
+                reason,
+            ));
+        }
     }
 
     Ok(())
