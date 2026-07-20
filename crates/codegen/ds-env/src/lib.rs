@@ -179,9 +179,13 @@ mod tests {
         );
     }
     /// Guards against conflating the relay and gateway endpoints (a relay
-    /// loop mistakenly connecting to `wss://api.deepseek.com/ws`).
+    /// loop mistakenly connecting to the gateway endpoint). Sets a distinct
+    /// gateway override so the resolution path is exercised even when the
+    /// compiled production defaults coincide.
     #[test]
     fn relay_and_gateway_urls_are_distinct() {
+        let _gateway_guard =
+            EnvVarGuard::set("DS_PRODUCTION_GATEWAY_WS_URL", "wss://gateway.example.com/ws");
         assert_ne!(
             DsBuildEnvironment::Production.relay_ws_url(),
             DsBuildEnvironment::Production.gateway_ws_url(),
