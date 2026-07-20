@@ -256,7 +256,6 @@ impl SessionActor {
             && self.structure_code_written.get()
             && !self.structure_subagents_spawned.get()
         {
-            self.structure_active.set(false);
             let enforcement = acp::ContentBlock::Text(acp::TextContent::new(
                 "FABLE ENFORCEMENT VIOLATION: You used /structure in the previous \
                  turn and wrote code, but you did NOT spawn any subagents. The Fable \
@@ -2447,14 +2446,25 @@ Fill every section. Infer from context. Mark unknowns with [NEEDS CLARIFICATION]
 ```
 Classification: [question | task | plan-first]
 
-Done Criterion: [1-2 sentences: observable outcome + how to verify]
+Done Criterion: [1-2 sentences describing the SUBSTANTIVE correct outcome and how to prove it.
+  The criterion must test whether the answer is RIGHT, not whether it is COMPLETE.
+  Structural completeness (all sections filled, all markers present) is not a done criterion —
+  it is a prerequisite. Correctness is the criterion.]
 
-Scope: [files, modules, crates, or domains]
+Scope: [files, modules, crates, or domains.
+  You may NOT mark correctness auditing as a non-goal.
+  You may NOT claim any verification "requires human review."
+  Stage 3 IS the correctness audit. If you cannot automatically verify correctness,
+  you have not satisfied Stage 3.]
 
-Verification Method: [exact command or test that proves the done criterion]
+Verification Method: [exact, runnable test or computation that proves substantive correctness.
+  Must be a concrete command or tool call, not a description. Not "review for errors."
+  Not "check boundary limits." The actual computation or test that produces evidence.]
 
 Original Prompt: {prompt}
 ```
+
+PLAN AUDIT (before executing): Re-read your plan. Does the Done Criterion describe correctness or just completeness? Does the Scope exclude correctness? Does the Verification Method name an actual runnable test? If any answer is wrong, rewrite the plan.
 
 PLAN-FIRST RULE: If Classification is plan-first, present the plan and STOP. Do not execute. Wait for approval.
 
@@ -2483,7 +2493,7 @@ FOR RESEARCH/QUESTION tasks:
   - Attacker 2: surface every UNSTATED assumption and test whether the conclusion survives without it.
   - Attacker 3: find contradictory evidence or alternative explanations you did not address.
 
-FABRICATED VERIFICATION IS A VIOLATION: \"Verified with np.linalg.eigvals\" when you never ran it is a lie. \"Checked boundary limits\" without computing them is a lie. Every verification claim in your output MUST be backed by an actual tool execution — a run, a computation, a source read. If you cannot verify something, do not claim you did.
+FABRICATED VERIFICATION IS A VIOLATION: Claiming you ran a computation when you did not is a lie. Claiming you checked a boundary limit without computing it is a lie. Every verification claim in your output MUST be backed by an actual tool execution — a numerical run, a symbolic computation, a source file read, a test execution. If you cannot verify something, do not claim you did. Label it as unverified.
 
 Surviving findings → fix → re-verify. MAX 3 cycles. The adversarial review must find REAL issues — if all three attackers find nothing, you did not look hard enough.
 
