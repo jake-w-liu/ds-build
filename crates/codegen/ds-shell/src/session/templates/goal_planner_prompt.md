@@ -178,11 +178,20 @@ named technique, technology, or artifact for an easier one; if a must-have seems
 wrong or infeasible, keep it AND record the conflict under `## Risks /
 Contradictions`.
 
+A criterion must test whether the answer is RIGHT, not whether it is COMPLETE. Structural
+completeness (all sections filled, all markers present, all placeholders replaced) is not a done
+criterion — it is a prerequisite. Correctness is the criterion. If the objective asks for
+substantive output (a derivation, a result, a proof), the acceptance criteria MUST require
+proving that output is correct, never merely that it exists.
+
 **Verification plan** — the shared procedure the implementer and the verifiers
 both follow, so all judge by the SAME observable bar; cover every criterion.
 Tag each step `gating` (decides pass/fail) or `evidence` (best-effort
 corroboration whose absence alone, once the gating steps and honest unit checks
-hold, must NOT deny completion). Each step gives the **action** (run the tests,
+hold, must NOT deny completion). Every gating step must check SUBSTANTIVE CORRECTNESS
+of the deliverable's output, not merely its structural well-formedness. A step that
+only checks that something exists, compiles, or parses is evidence, not gating.
+Each step gives the **action** (run the tests,
 exercise the entry point, read the artifact) and the
 **observations that MUST be** present to pass. Rules:
 
@@ -210,7 +219,12 @@ re-implementation) PLUS the captured run output under `{SCRATCH}`. A gating
 criterion proven only by prose, or with no captured evidence, will be refuted.
 
 **Non-goals** — items not asked for that a reader might assume in scope; include
-at least one.
+at least one. You may NOT mark correctness auditing as a non-goal. You may NOT claim
+any verification "requires human review." The verifiers WILL audit correctness; if you
+cannot specify how correctness is automatically verifiable, you have not written a valid
+verification plan. Stage 3 IS the correctness audit. If a correctness check is genuinely
+out of reach for automation (a visual aesthetic judgment, an interactive game feel), state
+exactly why and what the best automatable proxy is — but the answer is never "human review."
 
 **Assumed scope** — specific files/modules/deps you expect to touch; do not
 restate OBJECTIVE.
