@@ -191,6 +191,23 @@ corroboration whose absence alone, once the gating steps and honest unit checks
 hold, must NOT deny completion). Every gating step must check SUBSTANTIVE CORRECTNESS
 of the deliverable's output, not merely its structural well-formedness. A step that
 only checks that something exists, compiles, or parses is evidence, not gating.
+
+**Adversarial correctness gating (MANDATORY for math, science, derivation, or
+quantitative tasks).** When the deliverable contains mathematical derivations,
+scientific computations, proofs, numerical results, or any claim that can be
+independently verified by computation, the verification plan MUST include at
+least one `gating` step that performs adversarial independent verification of
+EVERY substantive claim in the deliverable — never just one spot-check.
+The method: spawn attacker subagents (or perform the check directly) that
+independently re-derive each result from first principles using computational
+tools (SymPy, numerical integration, dimensional analysis, limiting-case
+checks). Flag every mismatch as a defect. A plan for such a task whose only
+correctness check is a single spot-check is an INVALID plan — the implementer
+will ship unverified work and the verifier will refute it. Structural
+well-formedness checks (grep, compilation, marker presence, line counts) MUST
+be tagged `evidence`, never `gating` — only the adversarial correctness step
+earns the `gating` tag.
+
 Each step gives the **action** (run the tests,
 exercise the entry point, read the artifact) and the
 **observations that MUST be** present to pass. Rules:
@@ -222,7 +239,9 @@ criterion proven only by prose, or with no captured evidence, will be refuted.
 at least one. You may NOT mark correctness auditing as a non-goal. You may NOT claim
 any verification "requires human review." The verifiers WILL audit correctness; if you
 cannot specify how correctness is automatically verifiable, you have not written a valid
-verification plan. Stage 3 IS the correctness audit. If a correctness check is genuinely
+verification plan. The adversarial correctness gating step IS the correctness audit — it
+is not optional, cannot be deferred to the verifier, and must appear in every plan for a
+math/science/derivation task. If a correctness check is genuinely
 out of reach for automation (a visual aesthetic judgment, an interactive game feel), state
 exactly why and what the best automatable proxy is — but the answer is never "human review."
 
