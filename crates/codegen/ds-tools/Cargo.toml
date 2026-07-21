@@ -2,7 +2,7 @@
 license = "Apache-2.0"
 edition.workspace = true
 name = "ds-tools"
-version = "0.1.36"
+version = "0.1.37"
 description = "DS tools library"
 
 [dependencies]
