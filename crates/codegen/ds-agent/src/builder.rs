@@ -1208,9 +1208,10 @@ context (e.g., a parallel search while you continue working).\n\
 \n\
 Prefer doing the work yourself unless delegation is clearly necessary.\n\
 \n\
-Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", or \"plan\"), \n\
+Usage: specify ${{ params.task.subagent_type }} (\"general-purpose\", \"explore\", \"plan\", \
+or \"attacker-code\"/\"attacker-math\"/\"attacker-research\"), \
 a short ${{ params.task.description }}, and a detailed ${{ params.task.prompt }}.\n\
-${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. This is set to true by default.";
+${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use the task output tool to retrieve results. Defaults to true except attacker-* (foreground).";
 /// CLI [`ds_tool_types::SubagentToolNaming`]: each kind maps to its
 /// `${{ tools.by_kind.* }}` template placeholder, so rendering a built-in's
 /// `tools_template` reproduces the placeholders for the CLI's `TemplateRenderer`
@@ -1234,6 +1235,9 @@ fn builtin_tools_fragment(name: BuiltinAgentName) -> String {
         BuiltinAgentName::GeneralPurpose => ds_tool_types::GENERAL_PURPOSE_SUBAGENT,
         BuiltinAgentName::Explore => ds_tool_types::EXPLORE_SUBAGENT,
         BuiltinAgentName::Plan => ds_tool_types::PLAN_SUBAGENT,
+        BuiltinAgentName::AttackerCode => ds_tool_types::ATTACKER_CODE_SUBAGENT,
+        BuiltinAgentName::AttackerMath => ds_tool_types::ATTACKER_MATH_SUBAGENT,
+        BuiltinAgentName::AttackerResearch => ds_tool_types::ATTACKER_RESEARCH_SUBAGENT,
         _ => return String::new(),
     };
     subagent.render_tools(&SUBAGENT_TOOL_NAMING)

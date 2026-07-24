@@ -23,4 +23,7 @@
 //!   Bash       → `${{ tools.by_kind.execute }}`
 //!   WebSearch  → `${{ tools.by_kind.web_search }}`
 
-pub use ds_tool_types::{EXPLORE_PROMPT, GENERAL_PURPOSE_PROMPT, PLAN_PROMPT};
+pub use ds_tool_types::{
+    ATTACKER_CODE_PROMPT, ATTACKER_MATH_PROMPT, ATTACKER_RESEARCH_PROMPT, EXPLORE_PROMPT,
+    GENERAL_PURPOSE_PROMPT, PLAN_PROMPT,
+};

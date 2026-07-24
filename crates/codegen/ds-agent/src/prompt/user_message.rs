@@ -57,9 +57,7 @@ fn normalize_git_status(status: &str) -> Option<String> {
 }
 /// Selects the first-user-message rendering strategy for an agent.
 ///
-/// Built-in variants decrypt the underlying XOR-obfuscated template on demand
-/// (obfuscation, not security). Decrypted bytes are zeroed on drop via
-/// `Zeroizing`.
+/// First-user-message rendering strategy for an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum UserMessageTemplate {

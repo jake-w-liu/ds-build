@@ -297,10 +297,14 @@ impl SubagentCoordinator {
     /// Bounds memory if many short-lived workers complete in a long session.
     pub(crate) const MAX_COMPLETED_RETAINED: usize = 64;
 
-    /// Platform hard cap on concurrent pending+active subagents (above the
-    /// soft prompt bound of 8). Prevents runaway fan-out from exhausting RAM
-    /// and process slots; callers should cancel finished workers and retry.
-    pub(crate) const MAX_LIVE_SUBAGENTS: usize = 16;
+    /// Hard cap on concurrent pending+active subagents. Matches the Fable
+    /// orchestration bound ("MAX 8 live at once") so the platform enforces
+    /// what the system prompt asks the model to respect.
+    pub(crate) const MAX_LIVE_SUBAGENTS: usize = 8;
+
+    /// Max concurrent acceptance-critical attacker subagents for one parent
+    /// prompt (Fable Stage 3: "MAX 3 attacker subagents").
+    pub(crate) const MAX_ATTACKERS_PER_PROMPT: usize = 3;
 
     /// Cap on undrained between-turn completion summaries. Each holds an
     /// `Arc` of the full output; without a drain path (or if Completions
@@ -319,6 +323,21 @@ impl SubagentCoordinator {
     /// Whether a new spawn would exceed [`Self::MAX_LIVE_SUBAGENTS`].
     pub(crate) fn at_live_capacity(&self) -> bool {
         self.live_count() >= Self::MAX_LIVE_SUBAGENTS
+    }
+
+    /// Live attacker subagents for an optional parent prompt id.
+    ///
+    /// When `parent_prompt_id` is `None`, counts all live attackers (global).
+    pub(crate) fn attacker_live_count(&self, parent_prompt_id: Option<&str>) -> usize {
+        let pending = self.pending.values().filter(|p| {
+            is_attacker_subagent_type(&p.subagent_type)
+                && parent_prompt_matches(parent_prompt_id, p.parent_prompt_id.as_deref())
+        });
+        let active = self.active.values().filter(|t| {
+            is_attacker_subagent_type(&t.subagent_type)
+                && parent_prompt_matches(parent_prompt_id, t.parent_prompt_id.as_deref())
+        });
+        pending.count() + active.count()
     }
 
     /// TTL cleanup: remove completed entries older than [`Self::COMPLETED_TTL`],

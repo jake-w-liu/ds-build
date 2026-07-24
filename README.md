@@ -214,12 +214,9 @@ cargo clippy -p <crate>
 cargo fmt --all
 ```
 
-After changing system prompt templates under
-`crates/codegen/ds-agent/templates/`, regenerate the encrypted blob:
-
-```sh
-cd crates/codegen/ds-agent && python3 scripts/encrypt_templates.py
-```
+System prompt templates live as plain Markdown under
+`crates/codegen/ds-agent/templates/` and are compiled in with `include_str!`.
+Edit the `.md` files directly; no codegen step is required.
 
 ---
 

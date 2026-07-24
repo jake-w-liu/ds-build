@@ -92,18 +92,36 @@ pub(crate) async fn handle_subagent_request(
         }
         _ => {}
     }
-    let run_in_background = request.run_in_background
-        || definition.background.unwrap_or(false);
+    // Agent definition wins for background policy: critics/validators set
+    // `background: false` and must finish in the foreground before completion.
+    // Previously `request.run_in_background || definition.background` ignored
+    // an agent-forced foreground when the model left the default `true`.
+    let run_in_background = match definition.background {
+        Some(forced) => forced,
+        None => request.run_in_background,
+    };
     let cancel_token = CancellationToken::new();
     // Hard platform cap on concurrent live subagents (pending + active).
-    // Soft prompt bounds (evidence/attacker fan-out) sit below this; this is
-    // the last line of defense against runaway spawn thrash / RAM growth.
     {
         let live = coordinator.borrow().live_count();
         if live >= SubagentCoordinator::MAX_LIVE_SUBAGENTS {
             let msg = format!(
                 "Live subagent limit reached ({live}/{}). Wait for some to finish or cancel unused workers, then retry.",
                 SubagentCoordinator::MAX_LIVE_SUBAGENTS
+            );
+            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
+            return;
+        }
+    }
+    // Fable Stage 3: at most 3 attacker subagents live for one parent prompt.
+    if is_attacker_subagent_type(&request.subagent_type) {
+        let parent_prompt = request.parent_prompt_id.as_deref();
+        let attackers_live = coordinator.borrow().attacker_live_count(parent_prompt);
+        if attackers_live >= SubagentCoordinator::MAX_ATTACKERS_PER_PROMPT {
+            let msg = format!(
+                "Attacker subagent limit reached ({attackers_live}/{} for this turn). \
+                 Wait for attackers to finish or cancel unused ones, then retry.",
+                SubagentCoordinator::MAX_ATTACKERS_PER_PROMPT
             );
             send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
             return;

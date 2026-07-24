@@ -1039,6 +1039,7 @@ fn at_live_capacity_tracks_pending_and_active() {
     let mut coordinator = SubagentCoordinator::new();
     assert!(!coordinator.at_live_capacity());
     assert_eq!(coordinator.live_count(), 0);
+    assert_eq!(SubagentCoordinator::MAX_LIVE_SUBAGENTS, 8);
     for i in 0..SubagentCoordinator::MAX_LIVE_SUBAGENTS {
         coordinator.insert_pending(PendingSubagent {
             subagent_id: format!("p-{i}"),
@@ -1059,6 +1060,38 @@ fn at_live_capacity_tracks_pending_and_active() {
         SubagentCoordinator::MAX_LIVE_SUBAGENTS
     );
     assert!(coordinator.at_live_capacity());
+}
+
+#[test]
+fn attacker_live_count_scopes_by_parent_prompt() {
+    let mut coordinator = SubagentCoordinator::new();
+    assert_eq!(coordinator.attacker_live_count(Some("turn-a")), 0);
+    for (id, prompt, ty) in [
+        ("a1", "turn-a", "attacker-code"),
+        ("a2", "turn-a", "attacker-math"),
+        ("a3", "turn-b", "attacker-research"),
+        ("e1", "turn-a", "explore"),
+    ] {
+        coordinator.insert_pending(PendingSubagent {
+            subagent_id: id.into(),
+            subagent_type: ty.into(),
+            description: "crit".into(),
+            persona: None,
+            parent_prompt_id: Some(prompt.into()),
+            parent_session_id: "parent".into(),
+            started_at: std::time::Instant::now(),
+            run_in_background: false,
+            surface_completion: true,
+            color: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        });
+    }
+    assert_eq!(coordinator.attacker_live_count(Some("turn-a")), 2);
+    assert_eq!(coordinator.attacker_live_count(Some("turn-b")), 1);
+    assert_eq!(coordinator.attacker_live_count(None), 3);
+    assert!(is_attacker_subagent_type("attacker-code"));
+    assert!(is_attacker_subagent_type("attacker-custom"));
+    assert!(!is_attacker_subagent_type("explore"));
 }
 
 #[test]
@@ -2393,9 +2426,16 @@ fn validate_subagent_type_returns_unknown_for_invented_type() {
     let outcome = validate_subagent_type("totally-invented-agent-name", &ctx);
     match outcome {
         SubagentValidateTypeOutcome::Unknown { available } => {
-            for expected in ["general-purpose", "explore", "plan"] {
+            for expected in [
+                "general-purpose",
+                "explore",
+                "plan",
+                "attacker-code",
+                "attacker-math",
+                "attacker-research",
+            ] {
                 assert!(
-                    available.iter().any(| n | n == expected),
+                    available.iter().any(|n| n == expected),
                     "available list must include built-in {expected:?}: {available:?}",
                 );
             }

@@ -23,7 +23,9 @@ pub struct TaskToolInput {
     /// Name of the subagent type to launch. Built-in types: "general-purpose",
     /// "explore", "plan". Additional user-defined types may also be available.
     #[schemars(
-        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\", \"explore\", \"plan\". Additional user-defined types may also be available."
+        description = "Name of the subagent type to launch. Built-in types: \"general-purpose\", \
+            \"explore\", \"plan\", \"attacker-code\", \"attacker-math\", \"attacker-research\". \
+            Additional user-defined types may also be available."
     )]
     #[serde(default = "default_subagent_type")]
     pub subagent_type: String,
@@ -803,9 +805,120 @@ pub const PLAN_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: PLAN_PROMPT,
 };
 
+/// Shared attacker output contract (structured findings for the parent).
+/// Inlined via `concat!` into each attacker prompt (const-only composition).
+macro_rules! attacker_output_contract {
+    () => {
+        "## Required output format\n\n\
+         Return **only** distilled findings. No raw dumps, no stage narration.\n\n\
+         For each finding use:\n\
+         ```\n\
+         - [severity: critical|high|medium|low] path/or/claim:location — defect\n\
+           evidence: <one-line proof or missing check>\n\
+           fix_hint: <optional one-line remediation>\n\
+         ```\n\n\
+         If nothing survives review, reply exactly:\n\
+         `NO FINDINGS — acceptance criteria hold under this lens.`\n\n\
+         Always cite `file:line` (or problem-id / equation label) when the claim is location-bound."
+    };
+}
+
+/// Prompt for **attacker-code** — adversarial code review lens.
+pub const ATTACKER_CODE_PROMPT: &str = concat!(
+    "You are an adversarial code reviewer. Find defects that would block acceptance.\n\n",
+    "=== READ-ONLY MODE ===\n",
+    "You have NO file editing tools. Do not create, modify, or delete files.\n\n",
+    "Lenses (apply all that fit the task):\n",
+    "- Diff incompleteness: missing call sites, half-migrated APIs, dead flags\n",
+    "- Runtime breakage: panics, error paths, concurrency, resource leaks\n",
+    "- Spec contradiction: behavior vs stated requirements/tests\n",
+    "- Test gaps: untested edge cases that should be covered for the done criterion\n\n",
+    "Guidelines:\n",
+    "- Prefer ${{ tools.by_kind.search }}/${{ tools.by_kind.read }}/${{ tools.by_kind.list }}\n",
+    "- Be hostile but precise; only report confirmed or high-probability defects with evidence\n",
+    "- Maximize parallel reads when gathering evidence\n\n",
+    attacker_output_contract!(),
+);
+
+/// Prompt for **attacker-math** — adversarial math/physics review lens.
+pub const ATTACKER_MATH_PROMPT: &str = concat!(
+    "You are an adversarial math/physics critic. Attack the derivation, not the presentation.\n\n",
+    "=== READ-ONLY MODE ===\n",
+    "You have NO file editing tools. Do not create, modify, or delete files.\n\n",
+    "Lenses (apply all that fit):\n",
+    "- Independent recomputation of critical steps and the final claim\n",
+    "- Domain / threshold / equality: test -/0/+, below/at/above critical values\n",
+    "- Admissibility: domains, regularity, normalization, square-integrability, positivity, BC/IC, units\n",
+    "- Residuals / special cases / conservation / sign and branch errors\n",
+    "- Convention switches (silent redefinition of dimensionless numbers)\n\n",
+    "Guidelines:\n",
+    "- Prefer ${{ tools.by_kind.search }}/${{ tools.by_kind.read }}/${{ tools.by_kind.list }}\n",
+    "- Cite equation labels, problem IDs, or file:line for artifact-backed work\n",
+    "- Do not accept a remembered formula without checking hypotheses\n",
+    "- Tool claims require successful tool evidence in the current task trace\n\n",
+    attacker_output_contract!(),
+);
+
+/// Prompt for **attacker-research** — adversarial research review lens.
+pub const ATTACKER_RESEARCH_PROMPT: &str = concat!(
+    "You are an adversarial research critic. Challenge sources, assumptions, and alternatives.\n\n",
+    "=== READ-ONLY MODE ===\n",
+    "You have NO file editing tools. Do not create, modify, or delete files.\n\n",
+    "Lenses (apply all that fit):\n",
+    "- Source verification: claims vs primary sources or cited artifacts\n",
+    "- Hidden assumptions and unstated domain restrictions\n",
+    "- Counterevidence and alternative explanations\n",
+    "- Confidence calibration: overclaimed certainty without independent support\n\n",
+    "Guidelines:\n",
+    "- Prefer ${{ tools.by_kind.search }}/${{ tools.by_kind.read }}/${{ tools.by_kind.list }}\n",
+    "- Prefer primary sources over memory\n",
+    "- Mark unverified claims explicitly\n",
+    "- Cite file:line or URL/title when referencing evidence\n\n",
+    attacker_output_contract!(),
+);
+
+/// Built-in **attacker-code** subagent (read-only adversarial code review).
+pub const ATTACKER_CODE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "attacker-code",
+    description: "Adversarial code critic: incompleteness, runtime breakage, spec contradiction \
+         (read-only; runs in the foreground).",
+    tools_template: "Read-only \u{2014} has access to: \
+         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, \
+         ${{ tools.by_kind.search }}.",
+    prompt_template: ATTACKER_CODE_PROMPT,
+};
+
+/// Built-in **attacker-math** subagent (read-only adversarial math/physics).
+pub const ATTACKER_MATH_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "attacker-math",
+    description: "Adversarial math/physics critic: residuals, thresholds, admissibility \
+         (read-only; runs in the foreground).",
+    tools_template: "Read-only \u{2014} has access to: \
+         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, \
+         ${{ tools.by_kind.search }}.",
+    prompt_template: ATTACKER_MATH_PROMPT,
+};
+
+/// Built-in **attacker-research** subagent (read-only adversarial research).
+pub const ATTACKER_RESEARCH_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
+    name: "attacker-research",
+    description: "Adversarial research critic: sources, hidden assumptions, counterevidence \
+         (read-only; runs in the foreground).",
+    tools_template: "Read-only \u{2014} has access to: \
+         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, \
+         ${{ tools.by_kind.search }}.",
+    prompt_template: ATTACKER_RESEARCH_PROMPT,
+};
+
 /// The built-in subagent types advertised to the model, in display order.
-pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 3] =
-    [GENERAL_PURPOSE_SUBAGENT, EXPLORE_SUBAGENT, PLAN_SUBAGENT];
+pub const BUILTIN_SUBAGENTS: [BuiltinSubagent; 6] = [
+    GENERAL_PURPOSE_SUBAGENT,
+    EXPLORE_SUBAGENT,
+    PLAN_SUBAGENT,
+    ATTACKER_CODE_SUBAGENT,
+    ATTACKER_MATH_SUBAGENT,
+    ATTACKER_RESEARCH_SUBAGENT,
+];
 
 /// Look up a built-in subagent by its `subagent_type` name
 /// (e.g. `"explore"`), or `None` for user-defined / unknown types.
@@ -864,9 +977,16 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          {agent_lines}\n\n\
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
+         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. Defaults to true for most agents; attacker-* critics force foreground (must finish before the turn completes).\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
+         ## Orchestration bounds (hard platform limits)\n\
+         - MAX 8 live subagents at once (pending+running); wait or cancel before spawning more.\n\
+         - MAX 3 attacker-* subagents live per turn (Stage 3 adversarial review).\n\
+         - Prefer explore for read-only evidence; general-purpose when edits are required.\n\
+         - Prefer background only for non-gating evidence. Use attacker-code / attacker-math / attacker-research for acceptance-critical review (foreground).\n\
+         - No nested subagent trees (children cannot spawn further subagents).\n\
+         - Subagents must return distilled findings with file:line (or equation/problem labels) — no raw dumps.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
          - The resumed agent must use the same subagent_type as the source.\n\n\
@@ -1147,7 +1267,7 @@ mod tests {
         );
         assert_eq!(
             sanitize_optional_arg(Some("  ds-3  ".into())).as_deref(),
-            Some("deepseek-v4-flash")
+            Some("ds-3")
         );
         assert!(sanitize_optional_arg(Some("null".into())).is_none());
         assert!(sanitize_optional_arg(Some("  NULL  ".into())).is_none());
@@ -1178,8 +1298,11 @@ mod tests {
         assert!(desc.contains("- **code-reviewer**: Reviews code."));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. This is set to true by default."
+            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. Defaults to true for most agents; attacker-* critics force foreground"
         ));
+        assert!(desc.contains("## Orchestration bounds (hard platform limits)"));
+        assert!(desc.contains("MAX 8 live subagents"));
+        assert!(desc.contains("MAX 3 attacker-*"));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
     }
@@ -1207,7 +1330,14 @@ mod tests {
     fn builtin_subagent_catalog_names_and_descriptor_conversion() {
         assert_eq!(
             BUILTIN_SUBAGENTS.map(|b| b.name),
-            ["general-purpose", "explore", "plan"]
+            [
+                "general-purpose",
+                "explore",
+                "plan",
+                "attacker-code",
+                "attacker-math",
+                "attacker-research",
+            ]
         );
 
         let desc = EXPLORE_SUBAGENT.to_descriptor(&plain_tool_naming());
@@ -1259,6 +1389,9 @@ mod tests {
         // Read-only profiles carry the read-only banner; general-purpose doesn't.
         assert!(EXPLORE_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(PLAN_PROMPT.contains("=== READ-ONLY MODE ==="));
+        assert!(ATTACKER_CODE_PROMPT.contains("=== READ-ONLY MODE ==="));
+        assert!(ATTACKER_MATH_PROMPT.contains("NO FINDINGS"));
+        assert!(ATTACKER_RESEARCH_PROMPT.contains("NO FINDINGS"));
         assert!(!GENERAL_PURPOSE_PROMPT.contains("READ-ONLY"));
     }
 
@@ -1367,9 +1500,10 @@ mod tests {
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
+            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. Defaults to true for most agents; attacker-* critics force foreground"
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
+        assert!(desc.contains("## Orchestration bounds (hard platform limits)"));
     }
 
     // ── Lifecycle tool descriptions ──────────────────────────────────────

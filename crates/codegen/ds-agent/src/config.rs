@@ -660,9 +660,9 @@ where
 /// are defined in exactly one place. The enum covers all built-in
 /// agents for centralized name management and `by_name()` dispatch.
 ///
-/// `subagent_variants()` returns only the 3 that are exposed to the LLM
-/// via the `TaskTool` description. The remaining 6 are top-level agent
-/// profiles resolvable by name but not advertised as subagent types.
+/// `subagent_variants()` returns the types exposed to the LLM via the
+/// `TaskTool` description. Remaining variants are top-level agent profiles
+/// resolvable by name but not advertised as subagent types.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Display, EnumString, EnumIter, AsRefStr, IntoStaticStr,
 )]
@@ -678,6 +678,9 @@ pub enum BuiltinAgentName {
     GeneralPurpose,
     Explore,
     Plan,
+    AttackerCode,
+    AttackerMath,
+    AttackerResearch,
     BrowserUse,
     #[strum(serialize = "ds-build-orchestrator")]
     DsBuildOrchestrator,
@@ -707,13 +710,23 @@ impl BuiltinAgentName {
             Self::GeneralPurpose => AgentDefinition::general_purpose(),
             Self::Explore => AgentDefinition::explore(),
             Self::Plan => AgentDefinition::plan(),
+            Self::AttackerCode => AgentDefinition::attacker_code(),
+            Self::AttackerMath => AgentDefinition::attacker_math(),
+            Self::AttackerResearch => AgentDefinition::attacker_research(),
             Self::BrowserUse => AgentDefinition::browser_use(),
             Self::DsBuildOrchestrator => AgentDefinition::ds_build_orchestrator(),
         }
     }
     /// Built-in agents available as subagents via the Task tool.
     pub fn subagent_variants() -> &'static [Self] {
-        &[Self::GeneralPurpose, Self::Explore, Self::Plan]
+        &[
+            Self::GeneralPurpose,
+            Self::Explore,
+            Self::Plan,
+            Self::AttackerCode,
+            Self::AttackerMath,
+            Self::AttackerResearch,
+        ]
     }
 }
 /// Portable agent identity — parsed from .ds/agents/*.md.
@@ -1565,6 +1578,47 @@ impl AgentDefinition {
             ..Self::base(BuiltinAgentName::Plan, "")
         }
     }
+    /// Adversarial code critic (Fable Stage 3) — read-only, foreground.
+    pub fn attacker_code() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: ds_tool_types::ATTACKER_CODE_SUBAGENT.description.to_string(),
+            tool_config: explore_toolset(),
+            permission_mode: PermissionMode::Plan,
+            prompt_body: Some(subagent_prompts::ATTACKER_CODE_PROMPT.to_string()),
+            inherit_skills: false,
+            background: Some(false),
+            ..Self::base(BuiltinAgentName::AttackerCode, "")
+        }
+    }
+    /// Adversarial math/physics critic (Fable Stage 3) — read-only, foreground.
+    pub fn attacker_math() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: ds_tool_types::ATTACKER_MATH_SUBAGENT.description.to_string(),
+            tool_config: explore_toolset(),
+            permission_mode: PermissionMode::Plan,
+            prompt_body: Some(subagent_prompts::ATTACKER_MATH_PROMPT.to_string()),
+            inherit_skills: false,
+            background: Some(false),
+            ..Self::base(BuiltinAgentName::AttackerMath, "")
+        }
+    }
+    /// Adversarial research critic (Fable Stage 3) — read-only, foreground.
+    pub fn attacker_research() -> Self {
+        use crate::prompt::subagent_prompts;
+        Self {
+            description: ds_tool_types::ATTACKER_RESEARCH_SUBAGENT
+                .description
+                .to_string(),
+            tool_config: explore_toolset(),
+            permission_mode: PermissionMode::Plan,
+            prompt_body: Some(subagent_prompts::ATTACKER_RESEARCH_PROMPT.to_string()),
+            inherit_skills: false,
+            background: Some(false),
+            ..Self::base(BuiltinAgentName::AttackerResearch, "")
+        }
+    }
     /// Browser Use agent definition.
     pub fn browser_use() -> Self {
         Self {
@@ -1821,6 +1875,9 @@ mod tests {
             | BuiltinAgentName::GeneralPurpose
             | BuiltinAgentName::Explore
             | BuiltinAgentName::Plan
+            | BuiltinAgentName::AttackerCode
+            | BuiltinAgentName::AttackerMath
+            | BuiltinAgentName::AttackerResearch
             | BuiltinAgentName::Opencode
             | BuiltinAgentName::BrowserUse => false,
         }
@@ -2463,6 +2520,9 @@ description: Test default tool config
             ("general-purpose", BuiltinAgentName::GeneralPurpose),
             ("explore", BuiltinAgentName::Explore),
             ("plan", BuiltinAgentName::Plan),
+            ("attacker-code", BuiltinAgentName::AttackerCode),
+            ("attacker-math", BuiltinAgentName::AttackerMath),
+            ("attacker-research", BuiltinAgentName::AttackerResearch),
             ("browser-use", BuiltinAgentName::BrowserUse),
         ] {
             let parsed = BuiltinAgentName::from_str(s).unwrap();
@@ -2492,10 +2552,31 @@ description: Test default tool config
     #[test]
     fn test_builtin_agent_name_subagent_variants() {
         let variants = BuiltinAgentName::subagent_variants();
-        assert_eq!(variants.len(), 3);
+        assert_eq!(variants.len(), 6);
         assert!(variants.contains(&BuiltinAgentName::GeneralPurpose));
         assert!(variants.contains(&BuiltinAgentName::Explore));
         assert!(variants.contains(&BuiltinAgentName::Plan));
+        assert!(variants.contains(&BuiltinAgentName::AttackerCode));
+        assert!(variants.contains(&BuiltinAgentName::AttackerMath));
+        assert!(variants.contains(&BuiltinAgentName::AttackerResearch));
+    }
+    #[test]
+    fn attacker_subagents_force_foreground_and_readonly() {
+        for def in [
+            AgentDefinition::attacker_code(),
+            AgentDefinition::attacker_math(),
+            AgentDefinition::attacker_research(),
+        ] {
+            assert_eq!(def.background, Some(false), "{} must force FG", def.name);
+            assert_eq!(def.permission_mode, PermissionMode::Plan);
+            assert!(
+                def.prompt_body
+                    .as_deref()
+                    .is_some_and(|p| p.contains("NO FINDINGS")),
+                "{} prompt must require structured findings",
+                def.name
+            );
+        }
     }
     #[test]
     fn test_all_builtins_have_inherit_model() {

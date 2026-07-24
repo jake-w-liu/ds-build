@@ -14,7 +14,7 @@ use serde::de;
 use serde::{Deserialize, Serialize};
 /// Selects which base template to use for `Extend` mode rendering.
 ///
-/// Built-in variants decrypt the template on demand and never store
+/// Built-in variants load the Markdown template on demand and never store
 /// the plaintext persistently, ensuring it is zeroed after use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -22,7 +22,7 @@ pub enum TemplateOverride {
     /// Use the standard base template (or subagent template based on audience).
     #[default]
     None,
-    /// Use the apply-patch profile prompt template (decrypted on demand).
+    /// Use the apply-patch profile prompt template (loaded on demand).
     Codex,
     /// A caller-provided custom template string.
     Custom(String),
@@ -96,7 +96,7 @@ pub struct PromptContext {
     pub prompt_body: Option<String>,
     /// Which base template to use for `Extend` mode.
     /// `TemplateOverride::None` = standard base/subagent template.
-    /// `TemplateOverride::Codex` = apply-patch profile template (decrypted on demand).
+    /// `TemplateOverride::Codex` = apply-patch profile template (loaded on demand).
     /// `TemplateOverride::Custom` = caller-provided template string.
     #[serde(default, skip_serializing_if = "is_template_override_none")]
     pub system_prompt: TemplateOverride,
@@ -234,20 +234,20 @@ impl PromptContext {
         let placeholders = self.placeholders();
         let prompt = match self.prompt_mode {
             PromptMode::Extend => {
-                let decrypted;
+                let owned;
                 let base = match &self.system_prompt {
                     TemplateOverride::Custom(s) => s.as_str(),
                     TemplateOverride::Codex => {
-                        decrypted = apply_patch_template();
-                        &decrypted
+                        owned = apply_patch_template();
+                        &owned
                     }
                     TemplateOverride::None => {
-                        decrypted = if self.audience == PromptAudience::Subagent {
+                        owned = if self.audience == PromptAudience::Subagent {
                             subagent_template()
                         } else {
                             base_template()
                         };
-                        &decrypted
+                        &owned
                     }
                 };
                 let mut p = tool_bridge.render_prompt(base, &placeholders).await?;
