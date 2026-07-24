@@ -43,12 +43,22 @@ pub(crate) enum SamplerTurnOutcome {
 pub(crate) enum TurnOutcome {
     /// The model finished responding (no more tool calls).
     /// Carries the turn-end signals snapshot for trace metadata enrichment,
-    /// the set of tool names invoked during this turn (for completion
-    /// requirement tracking), and the schema-validated `--json-schema` output
-    /// (`None` without a schema; `Some(Err)` on parse/validation failure).
+    /// final real-tool-batch evidence for completion-requirement enforcement,
+    /// and the schema-validated `--json-schema` output.
+    /// `structured_output` is `None` without a schema and `Some(Ok(_))` when
+    /// validation succeeds; schema and output validation failures return a
+    /// turn-level error instead of a normal `Completed` outcome.
     Completed {
         snapshot: Box<Option<TurnDeltaSnapshot>>,
-        tools_called: Vec<String>,
+        /// Names from the most recent batch of real (non-synthetic) tool calls.
+        /// Completion requirements use this to require the completion tool to
+        /// run alone after all artifact-mutating tools.
+        last_real_tool_call_batch: Vec<String>,
+        /// Whether the sole tool in `last_real_tool_call_batch` produced one
+        /// recorded execution and no recorded failure in that batch. This is
+        /// measured from signal-counter deltas around the actual dispatch, so
+        /// a name-only, denied, malformed, or failed call cannot pass.
+        last_real_tool_call_batch_succeeded: bool,
         structured_output: Option<Result<serde_json::Value, String>>,
         /// Terminal response was a content-filter refusal; maps the prompt's
         /// ACP stop reason to `Refusal` instead of `EndTurn`.

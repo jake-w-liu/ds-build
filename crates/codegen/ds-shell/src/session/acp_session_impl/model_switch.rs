@@ -1,6 +1,17 @@
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use ds_chat_state::conversation_util::replace_or_insert_system_head;
+
+/// A full-mode agent owns its complete system prompt. Model switching must not
+/// replace that prompt with the generic concise prompt, even when the selected
+/// model normally requests concise mode.
+fn should_use_compact_prompt(
+    use_concise: bool,
+    prompt_mode: &ds_agent::config::PromptMode,
+) -> bool {
+    use_concise && prompt_mode != &ds_agent::config::PromptMode::Full
+}
+
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         &self,
@@ -78,17 +89,18 @@ impl SessionActor {
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
         if apply_prompt_override && !skip_prompt_rewrite {
+            let replacement_prompt = {
+                let agent = self.agent.borrow();
+                if should_use_compact_prompt(use_concise, &agent.definition().prompt_mode) {
+                    ds_agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_string()
+                } else {
+                    agent.system_prompt().to_string()
+                }
+            };
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
-                    if use_concise {
-                        sys.content = std::sync::Arc::<str>::from(
-                            ds_agent::prompt::template::COMPACT_SYSTEM_PROMPT,
-                        );
-                    } else {
-                        sys.content =
-                            std::sync::Arc::<str>::from(self.agent.borrow().system_prompt());
-                    }
+                    sys.content = std::sync::Arc::<str>::from(replacement_prompt.as_str());
                     break;
                 }
             }
@@ -193,9 +205,9 @@ impl SessionActor {
             let snapshot = self.tool_metadata_snapshot.clone();
             let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
             bridge
-                .update_resource(ds_tools::types::tool_index::ToolIndex(
-                    std::sync::Arc::new(tool_index),
-                ))
+                .update_resource(ds_tools::types::tool_index::ToolIndex(std::sync::Arc::new(
+                    tool_index,
+                )))
                 .await;
             if let Some(client) = self.rebuild_spec.managed_gateway_tool_client.clone() {
                 bridge.update_resource(client).await;
@@ -313,5 +325,23 @@ impl SessionActor {
                 "handle_replace_system_prompt: head already matches, no-op"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod compact_prompt_selection_tests {
+    use super::should_use_compact_prompt;
+    use ds_agent::config::PromptMode;
+
+    #[test]
+    fn extend_mode_can_use_compact_prompt() {
+        assert!(should_use_compact_prompt(true, &PromptMode::Extend));
+        assert!(!should_use_compact_prompt(false, &PromptMode::Extend));
+    }
+
+    #[test]
+    fn full_mode_never_loses_its_custom_system_prompt() {
+        assert!(!should_use_compact_prompt(true, &PromptMode::Full));
+        assert!(!should_use_compact_prompt(false, &PromptMode::Full));
     }
 }

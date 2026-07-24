@@ -204,7 +204,8 @@ impl CpuProfileManager {
         Self::default()
     }
 
-    #[cfg(test)]
+    /// Test-only: force unsupported profiling regardless of platform.
+    /// Available to dependent crates' test targets (not only this crate's).
     pub fn force_unsupported_for_test(&mut self) {
         self.force_unsupported = true;
     }
@@ -517,8 +518,8 @@ fn now_timestamp() -> String {
 }
 
 // Module-level (not inside `mod tests`) so downstream crates' test targets
-// can reach it in test-only builds.
-#[cfg(test)]
+// can reach it. Note: `#[cfg(test)]` does *not* propagate to dependents, so
+// this must remain available in normal library builds.
 impl CpuProfileManager {
     pub fn start_with_engine_for_test(
         &mut self,

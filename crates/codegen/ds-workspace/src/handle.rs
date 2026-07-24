@@ -1,4 +1,7 @@
 //! [`WorkspaceHandle`] -- public handle to a workspace instance.
+use ds_hunk_tracker::{HunkTrackerActor, HunkTrackerHandle, TrackingMode};
+use ds_tool_protocol::ToolServerStatusPayload;
+use ds_tool_protocol::turn_hook::TurnHookOutcome;
 use fastrace::future::FutureExt as _;
 use fastrace::local::LocalSpan;
 use prometheus::{
@@ -7,9 +10,6 @@ use prometheus::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use ds_hunk_tracker::{HunkTrackerActor, HunkTrackerHandle, TrackingMode};
-use ds_tool_protocol::ToolServerStatusPayload;
-use ds_tool_protocol::turn_hook::TurnHookOutcome;
 /// Default SIGTERM drain budget (ms); override via
 /// `DS_WORKSPACE_TERMINATION_GRACE_MS`. 45s fits under the K8s grace period.
 const DEFAULT_TERMINATION_GRACE_MS: u64 = 45_000;
@@ -527,25 +527,21 @@ impl WorkspaceHandle {
             (registry, errors)
         };
         let lsp: Option<Arc<dyn ds_tools::implementations::lsp::LspBackend>> = {
-            let sourced =
-                ds_tools::implementations::lsp::config::load_servers_with_plugins_sourced(
-                    &config.root_cwd,
-                    &[],
-                    &[],
-                    &[],
-                    &[],
-                );
-            let servers =
-                ds_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(
-                    sourced,
-                    config.project_lsp_trusted,
-                );
+            let sourced = ds_tools::implementations::lsp::config::load_servers_with_plugins_sourced(
+                &config.root_cwd,
+                &[],
+                &[],
+                &[],
+                &[],
+            );
+            let servers = ds_tools::implementations::lsp::config::filter_project_lsp_when_untrusted(
+                sourced,
+                config.project_lsp_trusted,
+            );
             if servers.is_empty() {
                 None
             } else {
-                use ds_tools::implementations::lsp::{
-                    LspBackend, LspBackendAdapter, LspManager,
-                };
+                use ds_tools::implementations::lsp::{LspBackend, LspBackendAdapter, LspManager};
                 let mgr = Arc::new(tokio::sync::Mutex::new(LspManager::new(
                     servers,
                     config.root_cwd.clone(),
@@ -2511,27 +2507,26 @@ impl WorkspaceHandle {
         let session_id_owned = session_id.to_owned();
         let event_writer = self.shared.session_event_writer(session_id);
         let rt_handle = tokio::runtime::Handle::current();
-        let mcp_results: Vec<
-            Result<ds_mcp::servers::McpClient, ds_mcp::servers::McpError>,
-        > = tokio::task::spawn_blocking(move || {
-            use std::collections::HashMap;
-            use ds_mcp::oauth_config::McpOAuthConfigMap;
-            use ds_mcp::servers::{McpClientTimeoutOverrides, McpMetaConfigMap};
-            let overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
-            let meta_config_map = McpMetaConfigMap::new();
-            let oauth_config_map = McpOAuthConfigMap::new();
-            rt_handle.block_on(ds_mcp::servers::start_mcp_servers(
-                configs,
-                Some(&session_id_owned),
-                &overrides_map,
-                &meta_config_map,
-                &oauth_config_map,
-                &event_writer,
-                ds_mcp::servers::OauthInteractivity::Interactive,
-            ))
-        })
-        .await
-        .map_err(|e| WorkspaceError::JoinError(e.to_string()))?;
+        let mcp_results: Vec<Result<ds_mcp::servers::McpClient, ds_mcp::servers::McpError>> =
+            tokio::task::spawn_blocking(move || {
+                use ds_mcp::oauth_config::McpOAuthConfigMap;
+                use ds_mcp::servers::{McpClientTimeoutOverrides, McpMetaConfigMap};
+                use std::collections::HashMap;
+                let overrides_map: HashMap<String, McpClientTimeoutOverrides> = HashMap::new();
+                let meta_config_map = McpMetaConfigMap::new();
+                let oauth_config_map = McpOAuthConfigMap::new();
+                rt_handle.block_on(ds_mcp::servers::start_mcp_servers(
+                    configs,
+                    Some(&session_id_owned),
+                    &overrides_map,
+                    &meta_config_map,
+                    &oauth_config_map,
+                    &event_writer,
+                    ds_mcp::servers::OauthInteractivity::Interactive,
+                ))
+            })
+            .await
+            .map_err(|e| WorkspaceError::JoinError(e.to_string()))?;
         let mcp_state = session.mcp_state.clone();
         let mut started = Vec::new();
         let mut failed = Vec::new();
@@ -2625,12 +2620,12 @@ impl WorkspaceHandle {
             "session MCP servers initialized"
         );
         if !started.is_empty() {
-            let _ =
-                self.shared
-                    .events
-                    .send(ds_workspace_types::WorkspaceEvent::ToolsChanged {
-                        session_id: session_id.to_owned(),
-                    });
+            let _ = self
+                .shared
+                .events
+                .send(ds_workspace_types::WorkspaceEvent::ToolsChanged {
+                    session_id: session_id.to_owned(),
+                });
         }
         Ok(McpStartResult { started, failed })
     }
@@ -3232,10 +3227,8 @@ impl WorkspaceHandle {
                         let payload =
                             serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
                         let frame = ds_tool_protocol::ToolNotificationFrame::custom(
-                            ds_tool_protocol::ToolId::new(
-                                crate::hub_ids::WORKSPACE_EVENTS_TOOL_ID,
-                            )
-                            .expect("constant tool id"),
+                            ds_tool_protocol::ToolId::new(crate::hub_ids::WORKSPACE_EVENTS_TOOL_ID)
+                                .expect("constant tool id"),
                             "workspace_event",
                             payload,
                         );
@@ -3505,9 +3498,7 @@ pub(crate) fn apply_background_task_notification(
 /// notifications aren't misattributed across sessions.
 pub(crate) async fn run_activity_feed(
     tracker: Arc<crate::activity::ActivityTracker>,
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<
-        ds_tools::notification::types::ToolNotification,
-    >,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<ds_tools::notification::types::ToolNotification>,
 ) {
     while let Some(notification) = rx.recv().await {
         apply_background_task_notification(&tracker, &notification);
@@ -4298,7 +4289,6 @@ impl WorkspaceHandle {
         )
     }
 }
-#[cfg(test)]
 impl WorkspaceHandle {
     fn test_config(
         root_cwd: std::path::PathBuf,
@@ -4329,6 +4319,9 @@ impl WorkspaceHandle {
         }
     }
     /// Test handle backed by a temp dir. Zero sessions; `TempDir` kept alive via `Arc`.
+    ///
+    /// Available outside this crate's unit tests so dependents (e.g. `ds-shell`)
+    /// can construct isolated handles in their own test targets.
     pub fn for_test() -> Self {
         use crate::session::tool_config::test_support::TestSessionContextFactory;
         let factory = std::sync::Arc::new(TestSessionContextFactory::new());
@@ -4354,10 +4347,10 @@ pub(crate) mod tests {
     use crate::session::tool_config::test_support::{
         TestSessionContextFactory, baseline_config, tc,
     };
-    use std::sync::Arc;
     use ds_tools::registry::types::ToolServerConfig;
     use ds_tools::types::tool::ToolKind;
     use ds_workspace_types::WorkspaceEvent;
+    use std::sync::Arc;
     /// Create a test workspace handle with a "main" session pre-created.
     pub(crate) fn make_handle() -> WorkspaceHandle {
         make_handle_with_rewind_all_outcomes(false)
@@ -4462,16 +4455,14 @@ pub(crate) mod tests {
             &self,
             _ctx: ds_tool_runtime::ToolCallContext,
             _input: serde_json::Value,
-        ) -> Result<ds_tools::types::output::ToolOutput, ds_tool_runtime::ToolError>
-        {
+        ) -> Result<ds_tools::types::output::ToolOutput, ds_tool_runtime::ToolError> {
             let output = BASH_CCO_STUB_STDOUT.as_bytes();
             Ok(ds_tools::types::output::ToolOutput::Bash(
                 ds_tools::types::output::BashOutput {
                     output: output.to_vec(),
-                    output_for_prompt:
-                        ds_tools::types::output::BashOutput::make_output_for_prompt(
-                            BASH_CCO_STUB_STDOUT,
-                        ),
+                    output_for_prompt: ds_tools::types::output::BashOutput::make_output_for_prompt(
+                        BASH_CCO_STUB_STDOUT,
+                    ),
                     exit_code: 0,
                     command: format!("echo {BASH_CCO_STUB_STDOUT}"),
                     truncated: false,
@@ -4517,8 +4508,8 @@ pub(crate) mod tests {
             Item = ds_tool_runtime::ToolStreamItem<ds_tool_runtime::TypedToolOutput>,
         > + Unpin,
     ) -> ds_tool_runtime::TypedToolOutput {
-        use futures::StreamExt;
         use ds_tool_runtime::ToolStreamItem;
+        use futures::StreamExt;
         while let Some(item) = stream.next().await {
             match item {
                 ToolStreamItem::Terminal(Ok(t)) => return t,

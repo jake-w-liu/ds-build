@@ -2,10 +2,10 @@ use super::support::*;
 use super::*;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
-use tokio::sync::mpsc;
 use ds_paths::AbsPathBuf;
 use ds_workspace::file_system::MockFs;
 use ds_workspace::permission::PermissionHandle;
+use tokio::sync::mpsc;
 #[derive(Debug)]
 struct DummyTerminal;
 #[async_trait::async_trait]
@@ -241,6 +241,9 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: ds_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),
+        structure_active: std::cell::Cell::new(false),
+        structure_subagents_spawned: std::cell::Cell::new(false),
+        structure_code_written: std::cell::Cell::new(false),
     };
     ReplaySendUpdateFixture {
         actor,
@@ -824,11 +827,10 @@ async fn observe_only_confident_completion_stays_warn_only() {
     local
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
-            fixture.actor.doom_loop_recovery =
-                Some(ds_sampling_types::DoomLoopRecoveryPolicy {
-                    max_threshold: 8,
-                    max_retries: 0,
-                });
+            fixture.actor.doom_loop_recovery = Some(ds_sampling_types::DoomLoopRecoveryPolicy {
+                max_threshold: 8,
+                max_retries: 0,
+            });
             let actor = Arc::new(fixture.actor);
             *actor
                 .current_prompt_id

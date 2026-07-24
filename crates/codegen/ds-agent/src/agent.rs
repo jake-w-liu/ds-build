@@ -7,7 +7,7 @@ use ds_tools::bridge::ToolBridge;
 use ds_tools::types::definition::ToolDefinition;
 
 use crate::compaction::CompactionPolicy;
-use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode};
+use crate::config::{AgentDefinition, CompletionRequirement, PermissionMode, PromptMode};
 use crate::prompt::context::PromptContext;
 use crate::system_reminder::ReminderPolicy;
 
@@ -111,11 +111,17 @@ impl Agent {
         &self.system_prompt
     }
 
-    /// Compact system prompt for post-compaction use.
+    /// System prompt to use when a caller requests concise post-compaction
+    /// behavior.
     ///
-    /// Returns a static string — the compact prompt never changes at runtime.
+    /// Full-mode agents own their complete prompt contract and must never be
+    /// silently replaced by the generic compact prompt.
     pub fn compact_system_prompt(&self) -> &str {
-        crate::prompt::template::COMPACT_SYSTEM_PROMPT
+        if self.definition.prompt_mode == PromptMode::Full {
+            self.system_prompt()
+        } else {
+            crate::prompt::template::COMPACT_SYSTEM_PROMPT
+        }
     }
 
     /// The tool bridge for this agent.

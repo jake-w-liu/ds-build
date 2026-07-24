@@ -147,9 +147,7 @@ pub(crate) async fn create_test_actor_ex(
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
     let cwd = ds_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
-    let fs = Arc::new(ds_workspace::file_system::MockFs::new(
-        cwd.to_path_buf(),
-    ));
+    let fs = Arc::new(ds_workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_tracker_handle = ds_hunk_tracker::HunkTrackerActor::spawn(
@@ -357,6 +355,9 @@ pub(crate) async fn create_test_actor_ex(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: ds_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),
+        structure_active: std::cell::Cell::new(false),
+        structure_subagents_spawned: std::cell::Cell::new(false),
+        structure_code_written: std::cell::Cell::new(false),
     };
     (actor, event_rx)
 }

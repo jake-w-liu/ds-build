@@ -74,7 +74,9 @@ impl MemoryStorage {
     }
 
     /// Create a `MemoryStorage` with explicit paths (for testing).
-    #[cfg(test)]
+    ///
+    /// Available outside this crate's unit tests so dependents (e.g. `ds-shell`)
+    /// can construct isolated storage in their own test targets.
     pub fn with_paths(global_dir: PathBuf, workspace_dir: PathBuf) -> Self {
         Self {
             global_dir,

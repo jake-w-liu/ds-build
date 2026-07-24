@@ -1,5 +1,6 @@
 use super::*;
 use crate::session::events::ToolOutcome;
+use agent_client_protocol as acp;
 use ds_tool_protocol::session_event::ToolCallOutcome;
 use ds_tool_protocol::turn_hook::TurnHookOutcome;
 #[test]
@@ -37,7 +38,8 @@ fn map_tool_outcome_cancellations() {
 fn turn_result_completed() {
     let result: Result<TurnOutcome, acp::Error> = Ok(TurnOutcome::Completed {
         snapshot: Box::new(None),
-        tools_called: vec![],
+        last_real_tool_call_batch: vec![],
+        last_real_tool_call_batch_succeeded: false,
         structured_output: None,
         refusal: false,
     });

@@ -159,6 +159,17 @@ You are a worker agent in an orchestrated multi-agent workflow.
 You MUST call `complete_task` before ending your response.
 ```
 
+Completion requirements are fail-closed:
+
+- The required tool must execute successfully; emitting its name is not sufficient.
+- It must be the only real tool in the final tool-call batch. Perform all edits before validation.
+- The final solo invocation must record one executed call and no failure. Earlier failed attempts may be repaired, but do not satisfy the gate by themselves.
+- Omitting `recovery` means zero recovery retries, not disabled enforcement.
+- Exhausting recovery returns `completion_requirement_unsatisfied` rather than a normal completed turn.
+- JSON-schema constraints are retained on recovery attempts, and invalid structured output fails the turn.
+
+For artifact validators, make the validator return a tool error on validation failure and include the validated artifact hash in its successful result. Do not modify the artifact after validation.
+
 ## Frontmatter Schema Reference
 
 All frontmatter keys use **camelCase**.
@@ -180,10 +191,10 @@ All frontmatter keys use **camelCase**.
 | `bash.cmdPrefix` | `string` | No | `null` | Command prefix |
 | `toolNameOverrides` | `map<string,string>` | No | `{}` | Canonical → model-facing name map |
 | `paramNameOverrides` | `map<string,map>` | No | `{}` | Per-tool param name map |
-| `completionRequirement` | `object` | No | `null` | Tool that must be called before turn ends |
-| `completionRequirement.tool` | `string` | Yes* | — | Canonical tool name |
-| `completionRequirement.reminder` | `string` | Yes* | — | Reminder text when not called |
-| `completionRequirement.recovery` | `object` | No | `null` | Recovery policy for the harness |
+| `completionRequirement` | `object` | No | `null` | Final successful solo-tool acceptance gate |
+| `completionRequirement.tool` | `string` | Yes* | — | Client-facing tool name that must execute successfully; use the exposed override when configured |
+| `completionRequirement.reminder` | `string` | Yes* | — | Recovery instruction when the gate is unsatisfied |
+| `completionRequirement.recovery` | `object` | No | `null` | Optional recovery retries; `null` means zero retries, enforcement remains active |
 | `toolConfig` | `map<string,object>` | No | `{}` | Per-tool execution config |
 | `toolConfig.*.retry` | `object` | No | `null` | Retry config for a tool |
 

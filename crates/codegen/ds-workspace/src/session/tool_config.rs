@@ -9,13 +9,13 @@
 use crate::capability::{CapabilityMode, kind_allowed};
 use crate::config::SessionContextFactory;
 use crate::error::{WorkspaceError, WorkspaceResult};
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use ds_tools::registry::types::{
     FinalizedToolset, ToolConfig, ToolRegistryBuilder, ToolServerConfig,
 };
 use ds_tools::types::tool::ToolKind;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 /// Create-shaped entry of the resolution pipeline: run
 /// [`resolve_session_toolset_rebuild`] around a FRESH factory-built
 /// session-lifetime terminal backend, and return that backend so the caller
@@ -492,10 +492,7 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
 fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
     let mut headers = indexmap::IndexMap::new();
     let version = ds_version::VERSION;
-    headers.insert(
-        "user-agent".to_string(),
-        format!("ds-workspace/{version}"),
-    );
+    headers.insert("user-agent".to_string(), format!("ds-workspace/{version}"));
     headers.insert("x-ds-client-version".to_string(), version.to_string());
     if base_url.contains("cli-chat-proxy") || base_url.contains("chat-proxy") {
         headers.insert("X-DS-Token-Auth".to_string(), "ds-cli".to_string());
@@ -508,8 +505,7 @@ fn build_proxy_headers(base_url: &str) -> indexmap::IndexMap<String, String> {
 }
 /// Build web fetch config. Enabled with default params unless
 /// `DS_DISABLE_WEB_FETCH=1` is set.
-fn build_web_fetch_config() -> ds_tools::implementations::ds_build::web_fetch::WebFetchConfig
-{
+fn build_web_fetch_config() -> ds_tools::implementations::ds_build::web_fetch::WebFetchConfig {
     use ds_tools::implementations::ds_build::web_fetch::{WebFetchConfig, WebFetchParams};
     if std::env::var("DS_DISABLE_WEB_FETCH").is_ok_and(|v| v == "1" || v == "true") {
         return WebFetchConfig::Disabled;
@@ -523,19 +519,22 @@ fn build_web_fetch_config() -> ds_tools::implementations::ds_build::web_fetch::W
 fn default_web_search_model() -> String {
     std::env::var("DS_WEB_SEARCH_MODEL").unwrap_or_else(|_| "deepseek-v4-pro".to_string())
 }
-#[cfg(test)]
+/// Test helpers for constructing session factories and baseline tool configs.
+///
+/// Available outside this crate's unit tests so dependents (e.g. `ds-shell`)
+/// can build isolated workspace handles in their own test targets.
 pub mod test_support {
     use crate::config::SessionContextFactory;
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tempfile::TempDir;
     use ds_tools::computer::local::{LocalFs, LocalTerminalBackend};
     use ds_tools::notification::ToolNotificationHandle;
     use ds_tools::registry::types::{
         SessionContext, ToolConfig, ToolRegistryBuilder, ToolServerConfig,
     };
     use ds_tools::types::tool::ToolKind;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
     /// Test factory: builds a `SessionContext` rooted at a per-test temp dir.
     pub struct TestSessionContextFactory {
         pub temp: TempDir,
@@ -625,10 +624,10 @@ pub mod test_support {
 mod tests {
     use super::*;
     use crate::config::SessionContextFactory;
+    use ds_tools::types::tool::ToolKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use ds_tools::types::tool::ToolKind;
     fn factory_for_test() -> Arc<dyn SessionContextFactory> {
         Arc::new(test_support::TestSessionContextFactory::new())
     }
@@ -669,10 +668,7 @@ mod tests {
     async fn resolve_session_toolset_mcp_merge_dedup_by_id_baseline_wins() {
         let factory = factory_for_test();
         let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "DsBuild:read_file",
-                Some(ToolKind::Read),
-            )],
+            tools: vec![test_support::tc("DsBuild:read_file", Some(ToolKind::Read))],
             behavior_preset: None,
         };
         let mut mcp_dup = test_support::tc("DsBuild:read_file", Some(ToolKind::Read));
@@ -795,10 +791,7 @@ mod tests {
     #[test]
     fn resolve_session_toolset_mcp_edit_dropped_under_readonly() {
         let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "DsBuild:read_file",
-                Some(ToolKind::Read),
-            )],
+            tools: vec![test_support::tc("DsBuild:read_file", Some(ToolKind::Read))],
             behavior_preset: None,
         };
         let mcp_edit = test_support::tc("mcp.editor", Some(ToolKind::Edit));
@@ -900,10 +893,7 @@ mod tests {
     #[test]
     fn hub_tool_dropped_under_readonly_because_kind_none() {
         let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "DsBuild:read_file",
-                Some(ToolKind::Read),
-            )],
+            tools: vec![test_support::tc("DsBuild:read_file", Some(ToolKind::Read))],
             behavior_preset: None,
         };
         let hub = vec![test_support::tc("hub:remote_exec", None)];
@@ -954,10 +944,7 @@ mod tests {
     #[test]
     fn hub_tool_name_collision_with_baseline_skipped() {
         let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "DsBuild:read_file",
-                Some(ToolKind::Read),
-            )],
+            tools: vec![test_support::tc("DsBuild:read_file", Some(ToolKind::Read))],
             behavior_preset: None,
         };
         let mut hub_tool = test_support::tc("hub:read_file_v2", None);

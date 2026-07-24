@@ -2,11 +2,6 @@
 use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
 use crate::prompt::user_message::UserMessageTemplate;
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 use ds_tools::implementations::codex;
 use ds_tools::implementations::ds_build;
 use ds_tools::implementations::ds_build_concise;
@@ -15,6 +10,11 @@ use ds_tools::implementations::opencode;
 use ds_tools::implementations::search_tool;
 use ds_tools::implementations::use_tool;
 use ds_tools::registry::types::{ToolConfig, ToolServerConfig};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 /// Process-global registry of externally-provided toolset presets.
 ///
 /// # Visibility
@@ -794,8 +794,8 @@ pub struct AgentDefinition {
     pub memory: Option<MemoryScope>,
     #[serde(default)]
     pub model: ModelOverride,
-    /// Completion requirement — declares that this agent must call a
-    /// specific tool before the turn ends.
+    /// Completion requirement — declares that this agent must finish with a
+    /// clean successful call to a specific tool before the turn is accepted.
     #[serde(default)]
     pub completion_requirement: Option<CompletionRequirement>,
     /// Subagent types this agent can spawn (derived by builder from `tools`).
@@ -828,15 +828,23 @@ pub struct AgentDefinition {
     #[serde(skip)]
     pub scope: AgentScope,
 }
-/// Declares that the agent must call a specific tool before the turn ends.
+/// Declares that the agent must finish with a clean successful call to a
+/// specific tool before the turn is accepted.
+///
+/// The shell requires the tool to be the sole real tool in the final tool-call
+/// batch and to record at least one success and no failures in that attempt.
+/// Merely emitting the tool name does not satisfy this contract.
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionRequirement {
-    /// Canonical tool name that must be called.
+    /// Client-facing tool name that must execute successfully as the final
+    /// solo real-tool call. When a tool has a name override, configure the
+    /// overridden name exposed to the model.
     pub tool: String,
     /// Reminder text injected when the tool hasn't been called.
     pub reminder: String,
-    /// Suggested recovery policy for the harness.
+    /// Optional recovery policy for the harness. `None` means zero recovery
+    /// retries; it does not disable completion-requirement enforcement.
     #[serde(default)]
     pub recovery: Option<RecoveryPolicy>,
 }
@@ -1102,9 +1110,7 @@ impl MemoryScope {
     pub fn resolve_dir(self, agent_name: &str, project_cwd: &std::path::Path) -> ResolvedMemoryDir {
         match self {
             Self::User => ResolvedMemoryDir {
-                path: ds_config::ds_home()
-                    .join("agent-memory")
-                    .join(agent_name),
+                path: ds_config::ds_home().join("agent-memory").join(agent_name),
                 is_project_scoped: false,
             },
             Self::Project => ResolvedMemoryDir {
@@ -1112,9 +1118,7 @@ impl MemoryScope {
                 is_project_scoped: true,
             },
             Self::Local => ResolvedMemoryDir {
-                path: project_cwd
-                    .join(".ds/agent-memory-local")
-                    .join(agent_name),
+                path: project_cwd.join(".ds/agent-memory-local").join(agent_name),
                 is_project_scoped: true,
             },
         }
@@ -1332,9 +1336,7 @@ impl AgentDefinition {
         if path_str.contains(".ds/agents/") || path_str.contains(".ds\\agents\\") {
             return AgentScope::Project;
         }
-        if path_str.contains(".ds/bundled/agents/")
-            || path_str.contains(".ds\\bundled\\agents\\")
-        {
+        if path_str.contains(".ds/bundled/agents/") || path_str.contains(".ds\\bundled\\agents\\") {
             return AgentScope::Bundled;
         }
         AgentScope::BuiltIn
@@ -1404,16 +1406,10 @@ impl AgentDefinition {
     /// Swap the definition's file tools for the equivalents in `file_tools`
     /// (hashline vs standard), slot by slot — never granting a slot the
     /// definition doesn't already have (read-only toolsets stay read-only).
-    pub fn override_file_tools(
-        &mut self,
-        file_tools: Vec<ds_tools::registry::types::ToolConfig>,
-    ) {
+    pub fn override_file_tools(&mut self, file_tools: Vec<ds_tools::registry::types::ToolConfig>) {
         const FILE_TOOL_SLOTS: &[[&str; 2]] = &[
             ["DsBuild:read_file", "DsBuildHashline:hashline_read"],
-            [
-                "DsBuild:search_replace",
-                "DsBuildHashline:hashline_edit",
-            ],
+            ["DsBuild:search_replace", "DsBuildHashline:hashline_edit"],
             ["DsBuild:grep", "DsBuildHashline:hashline_grep"],
         ];
         for tool in self.tool_config.tools.iter_mut() {
@@ -1694,11 +1690,7 @@ mod tests {
             "ds-computer",
         ] {
             let ts = toolset_for_preset(name).unwrap_or_else(|| panic!("missing preset {name}"));
-            let count = ts
-                .tools
-                .iter()
-                .filter(|t| t.id == headroom_id)
-                .count();
+            let count = ts.tools.iter().filter(|t| t.id == headroom_id).count();
             assert_eq!(
                 count, 1,
                 "preset `{name}` must register headroom_retrieve exactly once (got {count})"
@@ -2434,10 +2426,7 @@ description: Test default tool config
     fn test_model_override_in_frontmatter() {
         let content = "---\nname: test\ndescription: Test\nmodel: ds-3-fast\n---\n";
         let def = AgentDefinition::parse(content).unwrap();
-        assert_eq!(
-            def.model,
-            ModelOverride::Override("ds-3-fast".to_string())
-        );
+        assert_eq!(def.model, ModelOverride::Override("ds-3-fast".to_string()));
     }
     #[test]
     fn test_model_override_in_frontmatter_inherit() {

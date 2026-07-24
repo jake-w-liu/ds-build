@@ -50,10 +50,55 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
     }
     true
 }
+/// Process-wide override for the trusted key set. Integration tests install a
+/// throwaway keypair here so verification can be exercised without baking a
+/// production key into the binary. `None` → use the compiled-in set.
+static KEY_OVERRIDE: std::sync::Mutex<Option<Vec<(String, Vec<u8>)>>> = std::sync::Mutex::new(None);
+
 /// Run `f` over the trusted key set — the compiled-in [`EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS`],
-/// unless the compile-time-excluded test seam overrides it.
+/// unless the test seam overrides it (see [`test_seam`]).
 fn with_embedded_keys<R>(f: impl FnOnce(&[(&str, &[u8])]) -> R) -> R {
-    f(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS)
+    let guard = KEY_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(ref keys) = *guard {
+        let refs: Vec<(&str, &[u8])> = keys
+            .iter()
+            .map(|(id, pk)| (id.as_str(), pk.as_slice()))
+            .collect();
+        f(&refs)
+    } else {
+        f(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS)
+    }
+}
+
+/// Test-only seam for installing throwaway trusted keys in integration tests.
+///
+/// Must remain available in normal library builds: `cfg(test)` on this crate
+/// does not apply when dependents (e.g. `ds-shell` integration tests) link it.
+#[doc(hidden)]
+pub mod test_seam {
+    use super::KEY_OVERRIDE;
+
+    /// Replace the trusted key set with `keys` for the rest of the process
+    /// (or until [`clear_embedded_keys`]). Each entry is `(key_id, raw 32-byte
+    /// Ed25519 public key)`.
+    pub fn set_embedded_keys(keys: &[(&str, &[u8])]) {
+        let owned: Vec<(String, Vec<u8>)> = keys
+            .iter()
+            .map(|(id, pk)| ((*id).to_owned(), (*pk).to_vec()))
+            .collect();
+        *KEY_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(owned);
+    }
+
+    /// Clear any override and fall back to the compiled-in key set.
+    pub fn clear_embedded_keys() {
+        *KEY_OVERRIDE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 }
 /// Sidecar persisted next to the policy so the load-time gate can re-verify it offline.
 pub const SIGNATURE_SIDECAR_FILE: &str = "managed_config.sig.json";

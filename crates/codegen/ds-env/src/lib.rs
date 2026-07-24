@@ -97,21 +97,20 @@ impl std::fmt::Display for DsBuildEnvironment {
     }
 }
 /// Serializes env-var mutation across tests; `std::env` is process-global.
-#[cfg(test)]
+// Process-wide lock + guard are available outside this crate's unit tests so
+// dependents (e.g. `ds-shell`) can serialize env mutations in *their* tests.
+// `cfg(test)` only enables code when *this* crate is under test.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-#[cfg(test)]
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 /// RAII env-var override for tests: constructors snapshot the prior value
 /// under [`ENV_LOCK`], `Drop` restores it, panics included.
-#[cfg(test)]
 pub struct EnvVarGuard {
     key: &'static str,
     prev: Option<String>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
-#[cfg(test)]
 impl EnvVarGuard {
     pub fn set(key: &'static str, value: &str) -> Self {
         let lock = env_lock();
@@ -138,7 +137,6 @@ impl EnvVarGuard {
         unsafe { std::env::set_var(self.key, value) };
     }
 }
-#[cfg(test)]
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
         match self.prev.take() {
@@ -153,10 +151,7 @@ mod tests {
     /// The env-var prefixes are an operator interface; do not rename.
     #[test]
     fn test_env_prefix() {
-        assert_eq!(
-            DsBuildEnvironment::Production.env_prefix(),
-            "DS_PRODUCTION"
-        );
+        assert_eq!(DsBuildEnvironment::Production.env_prefix(), "DS_PRODUCTION");
     }
     #[test]
     fn env_var_guard_set_value_updates_then_restores_on_drop() {
@@ -184,8 +179,10 @@ mod tests {
     /// compiled production defaults coincide.
     #[test]
     fn relay_and_gateway_urls_are_distinct() {
-        let _gateway_guard =
-            EnvVarGuard::set("DS_PRODUCTION_GATEWAY_WS_URL", "wss://gateway.example.com/ws");
+        let _gateway_guard = EnvVarGuard::set(
+            "DS_PRODUCTION_GATEWAY_WS_URL",
+            "wss://gateway.example.com/ws",
+        );
         assert_ne!(
             DsBuildEnvironment::Production.relay_ws_url(),
             DsBuildEnvironment::Production.gateway_ws_url(),

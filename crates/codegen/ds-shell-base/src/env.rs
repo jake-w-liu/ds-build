@@ -11,7 +11,9 @@
 //!   per-session gateway bridge actor and routes prompts through
 //!   it. Unset → falls back to [`DsBuildEnvironment::gateway_ws_url`] for
 //!   sessions created in gateway mode; otherwise local-mode (unchanged).
-#[cfg(test)]
+// Re-exported for downstream crates' tests (and any test harness). `cfg(test)`
+// would only enable this when *this* crate is under test, which hides it from
+// dependents such as `ds-shell`.
 pub use ds_env::EnvVarGuard;
 pub use ds_env::{
     DsBuildEnvironment, PROD_ASSET_SERVER_URL, PROD_CLI_CHAT_PROXY_BASE_URL, PROD_GATEWAY_WS_URL,

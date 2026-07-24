@@ -2413,8 +2413,7 @@ async fn drain_goal_updates_blocked_reason_takes_precedence_over_completed() {
 // classifier sampler invoked); the full Achieved/NotAchieved/cap
 // E2E suite using `MockSpawner` lives separately.
 
-fn make_completed_cmd()
--> ds_tools::implementations::ds_build::update_goal::UpdateGoalEnvelope {
+fn make_completed_cmd() -> ds_tools::implementations::ds_build::update_goal::UpdateGoalEnvelope {
     let input = ds_tools::implementations::ds_build::update_goal::UpdateGoalInput {
         completed: Some(true),
         message: None,
@@ -3429,17 +3428,45 @@ async fn goal_tokens_by_model_breaks_down_active_goal_records() {
     local
         .run_until(async {
             let actor = make_test_actor_with_active_goal().await;
-            insert_record_with_model(&actor, "a", Some("test-goal"), 0, 100, Some("deepseek-v4-pro"));
-            insert_record_with_model(&actor, "b", Some("test-goal"), 0, 400, Some("deepseek-v4-flash"));
+            insert_record_with_model(
+                &actor,
+                "a",
+                Some("test-goal"),
+                0,
+                100,
+                Some("deepseek-v4-pro"),
+            );
+            insert_record_with_model(
+                &actor,
+                "b",
+                Some("test-goal"),
+                0,
+                400,
+                Some("deepseek-v4-flash"),
+            );
             // No captured model → folds under the supplied current model.
             insert_record_with_model(&actor, "c", Some("test-goal"), 0, 50, None);
             // A record from another goal must be excluded.
-            insert_record_with_model(&actor, "d", Some("other-goal"), 0, 999, Some("deepseek-v4-flash"));
+            insert_record_with_model(
+                &actor,
+                "d",
+                Some("other-goal"),
+                0,
+                999,
+                Some("deepseek-v4-flash"),
+            );
             // A FINISHED record under the active goal must be excluded from the
             // LIVE active-window breakdown (the per-model analogue of the
             // finished/in-flight split in goal_tokens). If it leaked, deepseek-v4-pro
             // would be 800 and sort first.
-            insert_record_with_model(&actor, "e", Some("test-goal"), 0, 700, Some("deepseek-v4-pro"));
+            insert_record_with_model(
+                &actor,
+                "e",
+                Some("test-goal"),
+                0,
+                700,
+                Some("deepseek-v4-pro"),
+            );
             actor
                 .subagent_token_records
                 .lock()
@@ -3465,7 +3492,14 @@ async fn goal_tokens_by_model_empty_without_active_goal() {
     local
         .run_until(async {
             let actor = make_test_actor_with_active_goal().await;
-            insert_record_with_model(&actor, "a", Some("test-goal"), 0, 100, Some("deepseek-v4-pro"));
+            insert_record_with_model(
+                &actor,
+                "a",
+                Some("test-goal"),
+                0,
+                100,
+                Some("deepseek-v4-pro"),
+            );
             // Drop the orchestration: with no active goal the breakdown is
             // empty regardless of any lingering records.
             actor.goal_tracker.lock().clear();
@@ -3946,8 +3980,7 @@ async fn subagent_progress_advances_goal_tokens_live_without_double_count() {
             );
             // The SubagentProgress notification itself must never persist.
             while let Ok(msg) = persistence_rx.try_recv() {
-                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Ds(n)) = msg
-                {
+                if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Ds(n)) = msg {
                     assert!(
                         !matches!(n.update, DsSessionUpdate::SubagentProgress { .. }),
                         "SubagentProgress must never be persisted",

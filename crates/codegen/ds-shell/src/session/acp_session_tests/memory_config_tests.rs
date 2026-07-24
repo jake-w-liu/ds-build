@@ -1,9 +1,9 @@
 use super::support::*;
 use super::*;
-use tokio::sync::mpsc;
 use ds_paths::AbsPathBuf;
 use ds_workspace::file_system::MockFs;
 use ds_workspace::permission::PermissionHandle;
+use tokio::sync::mpsc;
 #[test]
 fn initial_injection_backend_params_use_override_min_score() {
     let params = crate::session::memory::MemoryBackendParams {
@@ -295,6 +295,9 @@ async fn create_test_actor_with_memory(
         subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
         workspace_ops: ds_workspace::WorkspaceOps::for_test(),
         trace_config_template: std::cell::RefCell::new(None),
+        structure_active: std::cell::Cell::new(false),
+        structure_subagents_spawned: std::cell::Cell::new(false),
+        structure_code_written: std::cell::Cell::new(false),
     }
 }
 #[tokio::test(flavor = "current_thread")]

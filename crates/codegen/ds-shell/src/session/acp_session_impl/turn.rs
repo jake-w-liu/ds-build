@@ -11,7 +11,8 @@ const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
-    /// Accepted, or retries exhausted: the carried result is the final output.
+    /// Accepted, or retries exhausted. The caller converts a carried `Err`
+    /// into a terminal turn error rather than reporting normal completion.
     Complete(Result<serde_json::Value, String>),
     /// Non-conforming args; a corrective tool_result was pushed — re-sample.
     Retry,
@@ -34,6 +35,108 @@ fn validate_structured_output(
         Ok(()) => Ok(value),
         Err(e) => Err(format!("output does not match the required schema: {e}")),
     }
+}
+/// Return whether a configured completion requirement was satisfied by the
+/// completed turn.
+///
+/// A model-emitted tool name is not enough. The required tool must:
+/// - have a clean recorded execution in the final batch;
+/// - be the only real tool in the final real-tool batch, so no artifact edit
+///   can occur after validation in the same turn;
+/// - for the synthetic `StructuredOutput` tool, yield schema-valid output.
+fn completion_requirement_satisfied(
+    result: &Result<TurnOutcome, acp::Error>,
+    required_tool: &str,
+) -> bool {
+    let Ok(TurnOutcome::Completed {
+        snapshot,
+        last_real_tool_call_batch,
+        last_real_tool_call_batch_succeeded,
+        structured_output,
+        refusal,
+        ..
+    }) = result
+    else {
+        return false;
+    };
+
+    if *refusal {
+        return false;
+    }
+
+    if required_tool == STRUCTURED_OUTPUT_TOOL {
+        return matches!(structured_output.as_ref(), Some(Ok(_)));
+    }
+
+    if last_real_tool_call_batch.len() != 1
+        || last_real_tool_call_batch[0].as_str() != required_tool
+        || !*last_real_tool_call_batch_succeeded
+    {
+        return false;
+    }
+
+    snapshot.as_ref().as_ref().is_some_and(|snapshot| {
+        snapshot
+            .delta
+            .tool_outcomes_this_turn
+            .iter()
+            .any(|outcome| outcome.tool_name == required_tool && outcome.successes > 0)
+    })
+}
+
+/// Outcomes that should never be retried merely to satisfy a completion tool.
+/// User cancellation, turn limits, and provider refusals are terminal.
+fn completion_recovery_is_terminal(result: &Result<TurnOutcome, acp::Error>) -> bool {
+    matches!(
+        result,
+        Ok(TurnOutcome::Cancelled { .. })
+            | Ok(TurnOutcome::MaxTurnsReached { .. })
+            | Ok(TurnOutcome::Completed { refusal: true, .. })
+    )
+}
+
+fn completion_result_description(result: &Result<TurnOutcome, acp::Error>) -> String {
+    match result {
+        Ok(TurnOutcome::Completed { .. }) => {
+            "agent ended without a clean, final successful completion-tool call".to_string()
+        }
+        Ok(TurnOutcome::Cancelled { .. }) => "turn was cancelled".to_string(),
+        Ok(TurnOutcome::MaxTurnsReached { limit }) => {
+            format!("turn reached the max-turns limit ({limit})")
+        }
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+fn completion_recovery_delay_ms(policy: &ds_agent::config::RecoveryPolicy, attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(63);
+    let factor = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+    policy
+        .base_delay_ms
+        .saturating_mul(factor)
+        .min(policy.max_delay_ms)
+}
+
+fn completion_requirement_error(
+    required_tool: &str,
+    recovery_attempts: u32,
+    last_outcome: &str,
+) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "code": "completion_requirement_unsatisfied",
+        "requiredTool": required_tool,
+        "recoveryAttempts": recovery_attempts,
+        "totalAttempts": recovery_attempts.saturating_add(1),
+        "lastOutcome": last_outcome,
+    }))
+}
+
+fn structured_output_error(stage: &str, error: &str) -> acp::Error {
+    acp::Error::internal_error().data(serde_json::json!({
+        "code": "structured_output_validation_failed",
+        "stage": stage,
+        "error": error,
+    }))
 }
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
@@ -60,9 +163,7 @@ impl UsageDrainOutcome {
     /// Same policy as freeze's terminal outcome: FG live → fail-closed;
     /// sticky and background → report only.
     pub(super) fn from_outstanding_reply(
-        reply: Option<
-            &ds_tools::implementations::ds_build::task::types::SubagentOutstandingReply,
-        >,
+        reply: Option<&ds_tools::implementations::ds_build::task::types::SubagentOutstandingReply>,
     ) -> Self {
         match reply {
             None => Self {
@@ -266,7 +367,8 @@ impl SessionActor {
                  2. Execute your plan.\n\
                  3. Spawn attacker subagents (distinct adversarial lenses) to verify.\n\
                  4. Report outcome-first.\n\n\
-                 Do not write any code until you have spawned subagents.".to_string(),
+                 Do not write any code until you have spawned subagents."
+                    .to_string(),
             ));
             prompt_blocks.insert(0, enforcement);
         }
@@ -419,18 +521,14 @@ impl SessionActor {
                     );
                 }
                 for sk in &parsed_skills {
-                    ds_telemetry::session_ctx::log_event(
-                        ds_telemetry::events::SlashCommandUsed {
-                            command: sk.name.clone(),
-                            args_provided: !sk.args.is_empty(),
-                        },
-                    );
-                    ds_telemetry::session_ctx::log_event(
-                        ds_telemetry::events::SkillDispatched {
-                            skill_name: sk.name.clone(),
-                            plugin_source: sk.plugin_name.clone(),
-                        },
-                    );
+                    ds_telemetry::session_ctx::log_event(ds_telemetry::events::SlashCommandUsed {
+                        command: sk.name.clone(),
+                        args_provided: !sk.args.is_empty(),
+                    });
+                    ds_telemetry::session_ctx::log_event(ds_telemetry::events::SkillDispatched {
+                        skill_name: sk.name.clone(),
+                        plugin_source: sk.plugin_name.clone(),
+                    });
                     let skill_source = if sk.plugin_name.is_some() {
                         "plugin"
                     } else {
@@ -445,15 +543,13 @@ impl SessionActor {
                     )
                     .in_scope(|| {});
                     if let Some(ref pname) = sk.plugin_name {
-                        ds_telemetry::session_ctx::log_event(
-                            ds_telemetry::events::PluginUsed {
-                                plugin_id: pname.clone(),
-                                plugin_name: pname.clone(),
-                                skill_name: Some(sk.name.clone()),
-                                hook_event: None,
-                                success: true,
-                            },
-                        );
+                        ds_telemetry::session_ctx::log_event(ds_telemetry::events::PluginUsed {
+                            plugin_id: pname.clone(),
+                            plugin_name: pname.clone(),
+                            skill_name: Some(sk.name.clone()),
+                            hook_event: None,
+                            success: true,
+                        });
                         tracing::info_span!(
                             "plugin.used", plugin_name = % pname, skill_name = % sk.name,
                         )
@@ -494,13 +590,11 @@ impl SessionActor {
             redirect_kind,
         });
         self.observability_bridge
-            .emit(
-                ds_tool_protocol::session_event::SessionEvent::TurnStarted {
-                    turn_number,
-                    model_id: model_id.clone(),
-                    yolo_mode,
-                },
-            )
+            .emit(ds_tool_protocol::session_event::SessionEvent::TurnStarted {
+                turn_number,
+                model_id: model_id.clone(),
+                yolo_mode,
+            })
             .await;
         self.send_before_turn_event(ds_tool_protocol::turn_hook::BeforeTurnPayload {
             turn_number: self.chat_state_handle.get_prompt_index().await as u64,
@@ -899,16 +993,14 @@ impl SessionActor {
                     cancellation_context: None,
                 })
                 .await;
-                ds_telemetry::session_ctx::log_event(
-                    ds_telemetry::events::TurnCompleted {
-                        outcome: ds_telemetry::events::Outcome::Completed,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: None,
-                    },
-                );
+                ds_telemetry::session_ctx::log_event(ds_telemetry::events::TurnCompleted {
+                    outcome: ds_telemetry::events::Outcome::Completed,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: None,
+                    error_category: None,
+                });
             }
             Ok(TurnOutcome::Cancelled { category, context }) => {
                 self.emit_turn_ended(
@@ -930,16 +1022,14 @@ impl SessionActor {
                     cancellation_context: context.clone(),
                 })
                 .await;
-                ds_telemetry::session_ctx::log_event(
-                    ds_telemetry::events::TurnCompleted {
-                        outcome: ds_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: category.map(|c| format!("{c:?}")),
-                        error_category: None,
-                    },
-                );
+                ds_telemetry::session_ctx::log_event(ds_telemetry::events::TurnCompleted {
+                    outcome: ds_telemetry::events::Outcome::Cancelled,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: category.map(|c| format!("{c:?}")),
+                    error_category: None,
+                });
             }
             Ok(TurnOutcome::MaxTurnsReached { limit }) => {
                 tracing::info!(limit, "turn ended: max_turns reached");
@@ -963,16 +1053,14 @@ impl SessionActor {
                     )),
                 })
                 .await;
-                ds_telemetry::session_ctx::log_event(
-                    ds_telemetry::events::TurnCompleted {
-                        outcome: ds_telemetry::events::Outcome::Cancelled,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: Some("max_turns_reached".to_string()),
-                        error_category: None,
-                    },
-                );
+                ds_telemetry::session_ctx::log_event(ds_telemetry::events::TurnCompleted {
+                    outcome: ds_telemetry::events::Outcome::Cancelled,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: Some("max_turns_reached".to_string()),
+                    error_category: None,
+                });
             }
             Err(err) => {
                 self.emit_turn_ended(crate::session::events::TurnOutcomeLabel::Error, None, None);
@@ -988,24 +1076,20 @@ impl SessionActor {
                 })
                 .await;
                 let error_category = Self::classify_turn_error(err);
-                ds_telemetry::session_ctx::log_session_event(
-                    ds_telemetry::events::ApiError {
-                        error_category: error_category.clone(),
-                        model_id: turn_model_id.clone(),
-                        status_code: None,
-                        duration_ms: Some(turn_duration_ms),
-                    },
-                );
-                ds_telemetry::session_ctx::log_event(
-                    ds_telemetry::events::TurnCompleted {
-                        outcome: ds_telemetry::events::Outcome::Error,
-                        duration_ms: turn_duration_ms,
-                        tool_call_count: turn_tool_count,
-                        model_id: turn_model_id,
-                        cancellation_category: None,
-                        error_category: Some(error_category),
-                    },
-                );
+                ds_telemetry::session_ctx::log_session_event(ds_telemetry::events::ApiError {
+                    error_category: error_category.clone(),
+                    model_id: turn_model_id.clone(),
+                    status_code: None,
+                    duration_ms: Some(turn_duration_ms),
+                });
+                ds_telemetry::session_ctx::log_event(ds_telemetry::events::TurnCompleted {
+                    outcome: ds_telemetry::events::Outcome::Error,
+                    duration_ms: turn_duration_ms,
+                    tool_call_count: turn_tool_count,
+                    model_id: turn_model_id,
+                    cancellation_category: None,
+                    error_category: Some(error_category),
+                });
                 self.dispatch_hook(
                     ds_hooks::event::HookEventName::StopFailure,
                     ds_hooks::event::HookPayload::StopFailure {
@@ -1396,14 +1480,16 @@ impl SessionActor {
             }
         }
     }
-    /// Wraps `process_conversation_turn` with auto-recovery for agents that opt in.
+    /// Wraps `process_conversation_turn` with fail-closed enforcement of an
+    /// agent completion requirement.
     ///
-    /// Agents with a `completion_requirement` in their definition require the model
-    /// to call a specific tool before finishing. If a prompt turn ends without that
-    /// tool having been called, this method injects the recovery prompt and re-runs
-    /// the turn with exponential backoff.
+    /// A requirement is satisfied only when the required tool executed
+    /// successfully as the sole tool in the final real-tool batch. A missing
+    /// recovery policy means zero retries, not "skip enforcement". Recovery
+    /// preserves the caller's JSON schema on every attempt.
     ///
-    /// Agents without `completion_requirement` bypass this entirely.
+    /// User cancellation, max-turn exhaustion, and provider refusal are
+    /// terminal and are not converted into recovery loops.
     #[tracing::instrument(
         name = "session.process_conversation_turn_with_recovery",
         skip_all,
@@ -1423,35 +1509,26 @@ impl SessionActor {
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
         );
-        let agent_ref = self.agent.borrow();
-        let completion_req = match agent_ref.completion_requirement() {
-            Some(req) => req,
-            None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
-            }
+
+        let completion_req = self.agent.borrow().completion_requirement().cloned();
+        let Some(completion_req) = completion_req else {
+            return self
+                .process_conversation_turn(
+                    req_id,
+                    trace_gcs_config,
+                    artifact_tracker.as_ref(),
+                    json_schema,
+                )
+                .await;
         };
-        let recovery = match &completion_req.recovery {
-            Some(r) => r.clone(),
-            None => {
-                return self
-                    .process_conversation_turn(
-                        req_id,
-                        trace_gcs_config,
-                        artifact_tracker.as_ref(),
-                        json_schema,
-                    )
-                    .await;
-            }
-        };
-        let required_tool = completion_req.tool.clone();
-        let recovery_prompt = completion_req.reminder.clone();
+
+        let required_tool = completion_req.tool;
+        let recovery_prompt = completion_req.reminder;
+        let recovery_policy = completion_req.recovery;
+        let max_retries = recovery_policy
+            .as_ref()
+            .map_or(0, |policy| policy.max_retries);
+
         let mut result = self
             .process_conversation_turn(
                 req_id,
@@ -1460,88 +1537,83 @@ impl SessionActor {
                 json_schema.clone(),
             )
             .await;
-        if matches!(result, Ok(TurnOutcome::MaxTurnsReached { .. })) {
-            return result;
-        }
-        if let Ok(TurnOutcome::Completed {
-            ref tools_called, ..
-        }) = result
-            && tools_called.iter().any(|name| name == &required_tool)
+
+        if completion_recovery_is_terminal(&result)
+            || completion_requirement_satisfied(&result, &required_tool)
         {
-            tracing::info!(
-                "Completion requirement satisfied (tool '{}' called) for session {}",
-                required_tool,
-                self.session_info.id.0,
-            );
             return result;
         }
-        let mut attempt = 0u32;
-        loop {
-            attempt += 1;
-            let error_desc = match &result {
-                Ok(_) => "Agent finished without completing required task".into(),
-                Err(e) => format!("{e:?}"),
-            };
-            if attempt > recovery.max_retries {
-                tracing::error!(
-                    "Auto-recovery exhausted after {attempt} attempts for session {}: {error_desc}",
-                    self.session_info.id.0,
-                );
-                self.send_ds_notification(DsSessionUpdate::AutoRecoveryExhausted {
-                    attempts: attempt,
-                    error: error_desc,
-                })
-                .await;
-                return result;
-            }
-            let delay_ms = std::cmp::min(
-                recovery.base_delay_ms * 2u64.pow(attempt.saturating_sub(1)),
-                recovery.max_delay_ms,
-            );
-            let delay = std::time::Duration::from_millis(delay_ms);
+
+        // A sampling/tool error is already fail-closed. With no configured
+        // retries, preserve the original error rather than obscuring it.
+        if result.is_err() && max_retries == 0 {
+            return result;
+        }
+
+        for attempt in 1..=max_retries {
+            let error_desc = completion_result_description(&result);
+            let delay_ms = recovery_policy
+                .as_ref()
+                .map_or(0, |policy| completion_recovery_delay_ms(policy, attempt));
+
             tracing::warn!(
-                "Auto-recovery attempt {}/{} for session {}: {error_desc}. Retrying in {}ms",
+                required_tool = required_tool.as_str(),
                 attempt,
-                recovery.max_retries,
-                self.session_info.id.0,
-                delay.as_millis(),
+                max_retries,
+                delay_ms,
+                session_id = %self.session_info.id.0,
+                error = error_desc.as_str(),
+                "completion requirement not satisfied; starting recovery"
             );
             self.send_ds_notification(DsSessionUpdate::AutoRecoveryStarted {
                 attempt,
-                max_retries: recovery.max_retries,
+                max_retries,
                 error: error_desc,
-                delay_ms: delay.as_millis() as u64,
+                delay_ms,
             })
             .await;
-            sleep(delay).await;
-            let recovery_message = ConversationItem::auto_recovery(recovery_prompt.clone());
-            self.chat_state_handle.push_user_message(recovery_message);
+
+            if delay_ms > 0 {
+                sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            self.chat_state_handle
+                .push_user_message(ConversationItem::auto_recovery(recovery_prompt.clone()));
             result = self
                 .process_conversation_turn(
                     req_id,
                     trace_gcs_config.clone(),
                     artifact_tracker.as_ref(),
-                    None,
+                    json_schema.clone(),
                 )
                 .await;
-            if matches!(result, Ok(TurnOutcome::MaxTurnsReached { .. })) {
-                return result;
-            }
-            if let Ok(TurnOutcome::Completed {
-                ref tools_called, ..
-            }) = result
-                && tools_called.iter().any(|name| name == &required_tool)
+
+            if completion_recovery_is_terminal(&result)
+                || completion_requirement_satisfied(&result, &required_tool)
             {
-                tracing::info!(
-                    "Completion requirement satisfied after {} recovery attempt(s) \
-                     (tool '{}' called) for session {}",
-                    attempt,
-                    required_tool,
-                    self.session_info.id.0,
-                );
                 return result;
             }
         }
+
+        let last_outcome = completion_result_description(&result);
+        tracing::error!(
+            required_tool = required_tool.as_str(),
+            recovery_attempts = max_retries,
+            session_id = %self.session_info.id.0,
+            last_outcome = last_outcome.as_str(),
+            "completion requirement exhausted without a successful final validation"
+        );
+        self.send_ds_notification(DsSessionUpdate::AutoRecoveryExhausted {
+            attempts: max_retries.saturating_add(1),
+            error: last_outcome.clone(),
+        })
+        .await;
+
+        Err(completion_requirement_error(
+            &required_tool,
+            max_retries,
+            &last_outcome,
+        ))
     }
     /// Compute the first-turn memory reminder, if one should be injected.
     ///
@@ -1613,17 +1685,15 @@ impl SessionActor {
             target : ds_telemetry::memory_log::TARGET, configured_min_score,
             "MEMORY_INJECT_SEARCH: results={result_count}"
         );
-        ds_telemetry::session_ctx::log_event(
-            ds_telemetry::memory_telemetry::MemoryInjection {
-                session_id: self.session_info.id.to_string(),
-                was_greeting_fallback: was_greeting,
-                result_count,
-                total_snippet_chars,
-                top_score,
-                configured_min_score,
-                injection_duration_ms: inject_start.elapsed().as_millis() as u64,
-            },
-        );
+        ds_telemetry::session_ctx::log_event(ds_telemetry::memory_telemetry::MemoryInjection {
+            session_id: self.session_info.id.to_string(),
+            was_greeting_fallback: was_greeting,
+            result_count,
+            total_snippet_chars,
+            top_score,
+            configured_min_score,
+            injection_duration_ms: inject_start.elapsed().as_millis() as u64,
+        });
         inject_results.and_then(|results| {
             crate::session::helpers::memory_context::format_memory_reminder(&results)
         })
@@ -1828,8 +1898,14 @@ impl SessionActor {
             });
         }
         self.record_turn_model().await;
+        let required_completion_tool = self
+            .agent
+            .borrow()
+            .completion_requirement()
+            .map(|requirement| requirement.tool.clone());
         let mut metrics_drop_guard = TurnMetrics::new();
-        let mut turn_tools_called: Vec<String> = Vec::new();
+        let mut last_real_tool_call_batch: Vec<String> = Vec::new();
+        let mut last_real_tool_call_batch_succeeded = false;
         let mut tool_turn_count: usize = 1;
         let mut loop_index: u32 = 0;
         let mut todo_gate_fires: u32 = 0;
@@ -1840,6 +1916,9 @@ impl SessionActor {
         let structured_output_validator = json_schema.as_ref().map(|schema| {
             jsonschema::validator_for(schema).map_err(|e| format!("invalid output schema: {e}"))
         });
+        if let Some(Err(error)) = structured_output_validator.as_ref() {
+            return Err(structured_output_error("schema", error));
+        }
         let schema_ok = matches!(structured_output_validator, Some(Ok(_)));
         let native_backend = if json_schema.is_some() {
             match self.chat_state_handle.get_sampling_config().await {
@@ -2076,23 +2155,18 @@ impl SessionActor {
             let model_duration_ms = model_timer.elapsed().as_millis() as u64;
             {
                 let model_id = self.current_model_id().await;
-                ds_telemetry::session_ctx::log_event(
-                    ds_telemetry::events::ModelResponseReceived {
-                        model_id,
-                        duration_ms: model_duration_ms,
-                        stop_reason: response
-                            .stop_reason
-                            .as_ref()
-                            .map(|r| format!("{r:?}").to_ascii_lowercase()),
-                        prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
-                        completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
-                        reasoning_tokens: response.usage.as_ref().map(|u| u.reasoning_tokens),
-                        cached_prompt_tokens: response
-                            .usage
-                            .as_ref()
-                            .map(|u| u.cached_prompt_tokens),
-                    },
-                );
+                ds_telemetry::session_ctx::log_event(ds_telemetry::events::ModelResponseReceived {
+                    model_id,
+                    duration_ms: model_duration_ms,
+                    stop_reason: response
+                        .stop_reason
+                        .as_ref()
+                        .map(|r| format!("{r:?}").to_ascii_lowercase()),
+                    prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
+                    completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
+                    reasoning_tokens: response.usage.as_ref().map(|u| u.reasoning_tokens),
+                    cached_prompt_tokens: response.usage.as_ref().map(|u| u.cached_prompt_tokens),
+                });
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
             if let Some(pt) = prompt_timing.take() {
@@ -2131,8 +2205,7 @@ impl SessionActor {
             let fallback_text = response.fallback_text();
             let stop_reason = response.stop_reason;
             let response_is_empty = response.is_empty();
-            let turn_refused =
-                stop_reason == Some(ds_sampling_types::StopReason::ContentFilter);
+            let turn_refused = stop_reason == Some(ds_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
             for item in response.items {
@@ -2234,6 +2307,23 @@ impl SessionActor {
                     tracing::info!("Drained interjection(s) before turn completion — continuing");
                     continue;
                 }
+                let structured_output = if turn_refused {
+                    None
+                } else {
+                    match (
+                        structured_output_validator.as_ref(),
+                        final_answer_text.as_ref(),
+                    ) {
+                        (Some(validator), Some(text)) => {
+                            Some(validate_structured_output(validator, text))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(Err(error)) = structured_output.as_ref() {
+                    return Err(structured_output_error("model_output", error));
+                }
+
                 let snapshot = self
                     .finalize_turn_bookkeeping(
                         req_id,
@@ -2248,18 +2338,10 @@ impl SessionActor {
                     );
                     continue;
                 }
-                let structured_output = match (
-                    structured_output_validator.as_ref(),
-                    final_answer_text.as_ref(),
-                ) {
-                    (Some(validator), Some(text)) => {
-                        Some(validate_structured_output(validator, text))
-                    }
-                    _ => None,
-                };
                 return Ok(TurnOutcome::Completed {
                     snapshot: Box::new(snapshot),
-                    tools_called: turn_tools_called,
+                    last_real_tool_call_batch,
+                    last_real_tool_call_batch_succeeded,
                     structured_output,
                     refusal: turn_refused,
                 });
@@ -2275,7 +2357,9 @@ impl SessionActor {
                     .await
                 {
                     StructuredOutputStep::Complete(validated) => {
-                        turn_tools_called.push(STRUCTURED_OUTPUT_TOOL.to_string());
+                        let value = validated.map_err(|error| {
+                            structured_output_error("structured_output_tool", &error)
+                        })?;
                         let snapshot = self
                             .finalize_turn_bookkeeping(
                                 req_id,
@@ -2286,8 +2370,9 @@ impl SessionActor {
                             .await;
                         return Ok(TurnOutcome::Completed {
                             snapshot: Box::new(snapshot),
-                            tools_called: turn_tools_called,
-                            structured_output: Some(validated),
+                            last_real_tool_call_batch,
+                            last_real_tool_call_batch_succeeded,
+                            structured_output: Some(Ok(value)),
                             refusal: false,
                         });
                     }
@@ -2295,6 +2380,23 @@ impl SessionActor {
                     StructuredOutputStep::Proceed => {}
                 }
             }
+            last_real_tool_call_batch = tool_calls
+                .iter()
+                .map(|tool_call| tool_call.name.clone())
+                .collect();
+            last_real_tool_call_batch_succeeded = false;
+            let completion_batch_is_candidate =
+                required_completion_tool
+                    .as_deref()
+                    .is_some_and(|required_tool| {
+                        last_real_tool_call_batch.len() == 1
+                            && last_real_tool_call_batch[0].as_str() == required_tool
+                    });
+            let completion_batch_signal_before = if completion_batch_is_candidate {
+                self.signals_handle().snapshot().await
+            } else {
+                None
+            };
             for tc in &tool_calls {
                 if let Some((server, tool)) =
                     crate::session::mcp_servers::parse_mcp_tool_name(&tc.name)
@@ -2303,7 +2405,6 @@ impl SessionActor {
                     span.record("mcp_server.name", server.as_str());
                     span.record("mcp_tool.name", tool.as_str());
                 }
-                turn_tools_called.push(tc.name.clone());
             }
             let tool_call_responses: Vec<ToolCallResponse> = tool_calls
                 .into_iter()
@@ -2327,6 +2428,19 @@ impl SessionActor {
                 )
                 .await;
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
+            if let Some(before) = completion_batch_signal_before {
+                if let Some(after) = self.signals_handle().snapshot().await {
+                    let executed_calls =
+                        after.tool_call_count.saturating_sub(before.tool_call_count);
+                    let failed_calls = after
+                        .tool_failure_count
+                        .saturating_sub(before.tool_failure_count);
+                    last_real_tool_call_batch_succeeded =
+                        matches!(&execute_tool_calls_result, Ok(ToolLoop::Continue))
+                            && executed_calls == 1
+                            && failed_calls == 0;
+                }
+            }
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
                     return Ok(TurnOutcome::Cancelled {
@@ -2375,12 +2489,10 @@ impl SessionActor {
                     // overflowing context on the next iteration, which
                     // will produce a context-length error — failing the
                     // turn is better than spinning forever.
-                    self.compaction
-                        .auto_compact_suppressed
-                        .store(
-                            crate::session::compaction_config::SUPPRESS_TURN,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
+                    self.compaction.auto_compact_suppressed.store(
+                        crate::session::compaction_config::SUPPRESS_TURN,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                 }
                 continue;
             }
@@ -2520,6 +2632,187 @@ The Fable method's BOUNDS section says \"SOLO when: single-area OR tools faster 
 After you finish, the shell will verify that you spawned evidence and attacker subagents. If you wrote code without spawning subagents, your turn will be REJECTED and you will be forced to redo it with proper orchestration.\
         "
     )
+}
+
+#[cfg(test)]
+mod completion_requirement_tests {
+    use super::{
+        STRUCTURED_OUTPUT_TOOL, TurnOutcome, completion_recovery_delay_ms,
+        completion_recovery_is_terminal, completion_requirement_satisfied,
+    };
+    use crate::session::signals::{
+        SessionSignals, SessionSignalsDelta, ToolOutcome as SignalToolOutcome, TurnDeltaSnapshot,
+    };
+    use agent_client_protocol as acp;
+    use ds_agent::config::RecoveryPolicy;
+
+    fn completed(
+        outcomes: Vec<SignalToolOutcome>,
+        last_batch: &[&str],
+        last_batch_succeeded: bool,
+        structured_output: Option<Result<serde_json::Value, String>>,
+        refusal: bool,
+    ) -> Result<TurnOutcome, acp::Error> {
+        let mut delta = SessionSignalsDelta::default();
+        delta.tool_outcomes_this_turn = outcomes;
+        Ok(TurnOutcome::Completed {
+            snapshot: Box::new(Some(TurnDeltaSnapshot {
+                current: SessionSignals::default(),
+                delta,
+                start_prompt_mode: None,
+                end_prompt_mode: None,
+                turn_input_tokens: 0,
+                turn_output_tokens: 0,
+                turn_cached_input_tokens: 0,
+            })),
+            last_real_tool_call_batch: last_batch.iter().map(|name| (*name).to_string()).collect(),
+            last_real_tool_call_batch_succeeded: last_batch_succeeded,
+            structured_output,
+            refusal,
+        })
+    }
+
+    fn outcome(name: &str, successes: u32, failures: u32) -> SignalToolOutcome {
+        SignalToolOutcome {
+            tool_name: name.to_string(),
+            successes,
+            failures,
+        }
+    }
+
+    #[test]
+    fn accepts_only_a_clean_successful_final_solo_tool_call() {
+        let result = completed(
+            vec![outcome("mpr_validate_artifact", 1, 0)],
+            &["mpr_validate_artifact"],
+            true,
+            None,
+            false,
+        );
+        assert!(completion_requirement_satisfied(
+            &result,
+            "mpr_validate_artifact"
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_calls_and_accepts_a_repaired_clean_final_call() {
+        let name_only = completed(vec![], &["mpr_validate_artifact"], false, None, false);
+        assert!(!completion_requirement_satisfied(
+            &name_only,
+            "mpr_validate_artifact"
+        ));
+
+        // A success from an earlier invocation must not make a denied or
+        // malformed final call appear successful.
+        let stale_success = completed(
+            vec![outcome("mpr_validate_artifact", 1, 0)],
+            &["mpr_validate_artifact"],
+            false,
+            None,
+            false,
+        );
+        assert!(!completion_requirement_satisfied(
+            &stale_success,
+            "mpr_validate_artifact"
+        ));
+
+        let failed = completed(
+            vec![outcome("mpr_validate_artifact", 0, 1)],
+            &["mpr_validate_artifact"],
+            false,
+            None,
+            false,
+        );
+        assert!(!completion_requirement_satisfied(
+            &failed,
+            "mpr_validate_artifact"
+        ));
+
+        let failed_then_succeeded = completed(
+            vec![outcome("mpr_validate_artifact", 1, 1)],
+            &["mpr_validate_artifact"],
+            true,
+            None,
+            false,
+        );
+        assert!(completion_requirement_satisfied(
+            &failed_then_succeeded,
+            "mpr_validate_artifact"
+        ));
+
+        let mixed_batch = completed(
+            vec![
+                outcome("mpr_validate_artifact", 1, 0),
+                outcome("edit_file", 1, 0),
+            ],
+            &["mpr_validate_artifact", "edit_file"],
+            false,
+            None,
+            false,
+        );
+        assert!(!completion_requirement_satisfied(
+            &mixed_batch,
+            "mpr_validate_artifact"
+        ));
+    }
+
+    #[test]
+    fn structured_output_requires_schema_valid_data() {
+        let valid = completed(
+            vec![],
+            &[],
+            false,
+            Some(Ok(serde_json::json!({"answer": 42}))),
+            false,
+        );
+        assert!(completion_requirement_satisfied(
+            &valid,
+            STRUCTURED_OUTPUT_TOOL
+        ));
+
+        let invalid = completed(
+            vec![],
+            &[],
+            false,
+            Some(Err("schema mismatch".to_string())),
+            false,
+        );
+        assert!(!completion_requirement_satisfied(
+            &invalid,
+            STRUCTURED_OUTPUT_TOOL
+        ));
+    }
+
+    #[test]
+    fn cancellation_limits_and_refusal_are_terminal() {
+        let cancelled: Result<TurnOutcome, acp::Error> = Ok(TurnOutcome::Cancelled {
+            category: None,
+            context: None,
+        });
+        assert!(completion_recovery_is_terminal(&cancelled));
+
+        let limited: Result<TurnOutcome, acp::Error> =
+            Ok(TurnOutcome::MaxTurnsReached { limit: 4 });
+        assert!(completion_recovery_is_terminal(&limited));
+
+        let refusal = completed(vec![], &[], false, None, true);
+        assert!(completion_recovery_is_terminal(&refusal));
+    }
+
+    #[test]
+    fn recovery_delay_is_exponential_capped_and_overflow_safe() {
+        let policy = RecoveryPolicy {
+            max_retries: 8,
+            base_delay_ms: 100,
+            max_delay_ms: 450,
+        };
+        assert_eq!(completion_recovery_delay_ms(&policy, 1), 100);
+        assert_eq!(completion_recovery_delay_ms(&policy, 2), 200);
+        assert_eq!(completion_recovery_delay_ms(&policy, 3), 400);
+        assert_eq!(completion_recovery_delay_ms(&policy, 4), 450);
+        assert_eq!(completion_recovery_delay_ms(&policy, u32::MAX), 450);
+    }
 }
 
 #[cfg(test)]
