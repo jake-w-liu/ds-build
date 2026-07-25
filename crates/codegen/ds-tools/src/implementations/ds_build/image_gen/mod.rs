@@ -43,10 +43,10 @@ pub use ds_tools_api::slash_commands::{
 };
 
 /// Prose returned to the model (as a normal, successful tool result) when a
-/// free / X Basic user calls `image_gen` or `image_edit`. The model relays it
+/// free-tier account calls `image_gen` or `image_edit`. The model relays it
 /// to the user. The deliberate `/imagine` slash command shows the richer
-/// DS Pro upsell modal instead; this covers the natural-language path.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is a DS Pro feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to DS Pro: https://www.deepseek.com/ds_pro?referrer=ds-build. Do not retry this tool.";
+/// upsell modal instead; this covers the natural-language path.
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Image generation is not available on this account tier. Tell the user image generation is unavailable with their current plan, and do not retry this tool.";
 
 /// HTTP client for DeepSeek Imagine API. Cloned per-request; shares `Arc` state.
 #[derive(Clone)]
@@ -65,8 +65,8 @@ pub struct ImageGenClient {
     /// `consumer == "ImageGen"` for unified auth-failure telemetry.
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
-    /// (free / X Basic). `image_gen` / `image_edit` short-circuit before any
-    /// HTTP call and return the DS Pro upsell prose instead. See
+    /// (free-tier). `image_gen` / `image_edit` short-circuit before any
+    /// HTTP call and return the tier-restricted upsell prose instead. See
     /// [`ImageGenClient::is_tier_restricted`].
     tier_restricted: bool,
 }
@@ -145,9 +145,9 @@ impl ImageGenClient {
         })
     }
 
-    /// Whether the current user's tier (free / X Basic) is zero-limited on
+    /// Whether the current user's tier (free-tier) is zero-limited on
     /// Imagine server-side. `image_gen` / `image_edit` use this to short-circuit
-    /// with the DS Pro upsell instead of issuing a doomed request.
+    /// with the tier-restricted upsell instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -278,9 +278,9 @@ pub enum ImageGenConfig {
         /// `image_gen_model_override` config flag. `image_edit` is unaffected.
         model_override: Option<String>,
         /// `true` when the user is on a tier the Imagine server zero-limits
-        /// (free / X Basic). The tools stay advertised to the model, but
+        /// (free-tier). The tools stay advertised to the model, but
         /// `image_gen` / `image_edit` short-circuit at call time with the
-        /// DS Pro upsell prose instead of a doomed request. Set by the
+        /// tier-restricted upsell prose instead of a doomed request. Set by the
         /// host from the subscription tier; always `false` for team /
         /// API-key / workspace callers.
         tier_restricted: bool,
@@ -423,7 +423,7 @@ impl ds_tool_runtime::Tool for ImageGenTool {
             res.require::<ImageGenClient>()?.clone()
         };
 
-        // Free / X Basic users are zero-limited on Imagine server-side; return
+        // Free-tier users are zero-limited on Imagine server-side; return
         // the upsell prose instead of a doomed request (the tool stays
         // advertised so the model can surface the nudge in-conversation).
         if client.is_tier_restricted() {
@@ -547,10 +547,10 @@ mod tests {
 
     #[tokio::test]
     async fn tier_restricted_short_circuits_with_upsell() {
-        // A free / X Basic user's image_gen call returns the DS Pro upsell
-        // prose as a normal result (no HTTP, no error card) so the model can
-        // relay it. Only the client is inserted — the short-circuit returns
-        // before any other resource (e.g. SessionFolder) is required.
+        // A free-tier image_gen call returns tier-restricted upsell prose as a
+        // normal result (no HTTP, no error card) so the model can relay it.
+        // Only the client is inserted — the short-circuit returns before any
+        // other resource (e.g. SessionFolder) is required.
         let cfg = ImageGenConfig::Enabled {
             api_key: "k".into(),
             base_url: "https://api.deepseek.com/v1".into(),
@@ -576,8 +576,16 @@ mod tests {
 
         match result {
             ToolOutput::Text(t) => {
-                assert!(t.text.contains("DS Pro"), "got: {}", t.text);
-                assert!(t.text.contains("ds_pro?referrer=ds-build"));
+                assert!(
+                    t.text.contains("not available on this account tier"),
+                    "got: {}",
+                    t.text
+                );
+                assert!(
+                    !t.text.contains("X Basic"),
+                    "must not surface Grok-era tier names: {}",
+                    t.text
+                );
             }
             other => panic!("expected Text upsell, got {other:?}"),
         }

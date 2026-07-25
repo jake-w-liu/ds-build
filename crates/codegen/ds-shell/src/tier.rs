@@ -8,14 +8,13 @@
 //! cosmetic slash-command gate and the shell's capability (toolset) gate can't
 //! drift apart.
 //!
-//! "Restricted" tiers are the personal free tier and X Basic — the tiers the
-//! server zero-limits on the Imagine and voice endpoints. Everything else
-//! (DS Pro, DS Heavy/Lite, X Premium/+, and any unknown future name)
-//! is unrestricted (**fail-open**).
+//! "Restricted" tiers are personal free accounts (and a few legacy display
+//! names still emitted by older CCP/JWT payloads). Everything else (DS Pro,
+//! DS Heavy/Lite, API Key, unknown future names) is unrestricted (**fail-open**).
 
-/// Whether a **known** subscription-tier display name is a gated tier: the free
-/// tier (CCP display "Free" or an empty string) or X Basic (CCP display
-/// "X Basic"; JWT-claim fallback spelling "x_basic").
+/// Whether a **known** subscription-tier display name is a gated free-tier
+/// account: empty string, `"Free"`, or legacy aliases still seen in the wild
+/// (`"X Basic"` / `"x_basic"` from older CCP/JWT payloads).
 ///
 /// Case-insensitive and whitespace-trimmed. Callers decide the policy for an
 /// *absent* tier (`None`): the pager treats absence as restricted (cosmetic,
@@ -24,6 +23,8 @@
 /// limits, so never withhold a capability on a guess).
 pub fn is_restricted_tier_name(tier: &str) -> bool {
     let t = tier.trim().to_ascii_lowercase();
+    // Keep matching legacy "x basic" / "x_basic" so old tokens still classify
+    // correctly; do not surface those names in user-facing product copy.
     t.is_empty() || t == "free" || t == "x basic" || t == "x_basic"
 }
 

@@ -149,8 +149,8 @@ pub struct VideoGenClient {
     /// `"VideoGen.poll"` (poll request) for unified auth-failure telemetry.
     attribution_callback: Option<SharedAttributionCallback>,
     /// When `true`, the user is on a tier the Imagine server zero-limits
-    /// (free / X Basic). The video tools short-circuit before any HTTP call
-    /// and return the DS Pro upsell prose. See [`VideoGenClient::is_tier_restricted`].
+    /// (free-tier). The video tools short-circuit before any HTTP call
+    /// and return the tier-restricted upsell prose. See [`VideoGenClient::is_tier_restricted`].
     tier_restricted: bool,
 }
 
@@ -234,9 +234,9 @@ impl VideoGenClient {
         })
     }
 
-    /// Whether the current user's tier (free / X Basic) is zero-limited on
+    /// Whether the current user's tier (free-tier) is zero-limited on
     /// Imagine server-side. The video tools use this to short-circuit with the
-    /// DS Pro upsell instead of issuing a doomed request.
+    /// tier-restricted upsell instead of issuing a doomed request.
     pub(crate) fn is_tier_restricted(&self) -> bool {
         self.tier_restricted
     }
@@ -680,8 +680,8 @@ pub enum VideoGenConfig {
         extra_headers: indexmap::IndexMap<String, String>,
         zdr_video_output_s3: Option<Box<ZdrVideoOutputS3Config>>,
         /// `true` when the user is on a tier the Imagine server zero-limits
-        /// (free / X Basic). The video tools stay advertised but short-circuit
-        /// at call time with the DS Pro upsell prose. Set by the host from
+        /// (free-tier). The video tools stay advertised but short-circuit
+        /// at call time with the tier-restricted upsell prose. Set by the host from
         /// the subscription tier; always `false` for team / API-key / workspace.
         tier_restricted: bool,
     },
@@ -694,10 +694,10 @@ impl VideoGenConfig {
 }
 
 /// Prose returned to the model (as a normal, successful tool result) when a
-/// free / X Basic user calls a video tool. The model relays it to the user;
-/// the deliberate `/imagine-video` slash command shows the DS Pro upsell
+/// free-tier account calls a video tool. The model relays it to the user;
+/// the deliberate `/imagine-video` slash command shows the richer upsell
 /// modal instead.
-pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is a DS Pro feature and isn't available on the free or X Basic tier. Let the user know they can unlock image and video generation by upgrading to DS Pro: https://www.deepseek.com/ds_pro?referrer=ds-build. Do not retry this tool.";
+pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is not available on this account tier. Tell the user video generation is unavailable with their current plan, and do not retry this tool.";
 
 fn default_resolution_name() -> String {
     DEFAULT_RESOLUTION.to_owned()
@@ -1034,7 +1034,7 @@ impl ds_tool_runtime::Tool for ImageToVideoTool {
 
         let (client, session_folder) = acquire_video_client(&ctx).await?;
 
-        // Free / X Basic users are zero-limited on Imagine server-side; return
+        // Free-tier users are zero-limited on Imagine server-side; return
         // the upsell prose instead of a doomed request.
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));
@@ -1153,7 +1153,7 @@ impl ds_tool_runtime::Tool for ReferenceToVideoTool {
 
         let (client, session_folder) = acquire_video_client(&ctx).await?;
 
-        // Free / X Basic users are zero-limited on Imagine server-side; return
+        // Free-tier users are zero-limited on Imagine server-side; return
         // the upsell prose instead of a doomed request.
         if client.is_tier_restricted() {
             return Ok(ToolOutput::Text(TIER_RESTRICTED_UPSELL.into()));

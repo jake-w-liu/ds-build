@@ -139,14 +139,15 @@ pub struct PromptContext {
     /// stdio / generic-ACP).
     #[serde(default)]
     pub is_non_interactive: bool,
-    /// Identity in the primary ds-build system prompt (`You are <label>…`).
+    /// Identity in the primary system prompt (`You are <label> — …`).
     /// Not the UI picker name. Defaults to [`DEFAULT_SYSTEM_PROMPT_LABEL`].
+    /// Rendered via `${{ system_prompt_label }}` in `templates/prompt.md`.
     #[serde(default = "default_system_prompt_label")]
     pub system_prompt_label: String,
 }
-/// Optional identity label for custom agents; the default system prompt no longer
-/// injects a vendor "released by …" line.
-pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "DS";
+/// Default product identity for the system prompt header.
+/// No vendor "released by …" plate (that was a Grok Build artifact).
+pub const DEFAULT_SYSTEM_PROMPT_LABEL: &str = "DS Build";
 fn default_system_prompt_label() -> String {
     DEFAULT_SYSTEM_PROMPT_LABEL.to_string()
 }

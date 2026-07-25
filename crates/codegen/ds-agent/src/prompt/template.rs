@@ -227,6 +227,15 @@ mod tests {
         let prompt = render_base(&default_renderer(), &default_placeholders());
         assert!(prompt.contains("user_query"));
         assert!(prompt.contains("interactive CLI tool"));
+        // Product identity from system_prompt_label (no vendor "released by" plate).
+        assert!(
+            prompt.contains(crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL),
+            "base prompt must render system_prompt_label identity"
+        );
+        assert!(
+            !prompt.contains("released by"),
+            "must not reinstate Grok Build vendor identity plate"
+        );
     }
 
     #[test]
@@ -794,6 +803,13 @@ mod tests {
             !prompt.contains("autonomous agent"),
             "interactive prompt must NOT advertise non-interactive (autonomous) mode"
         );
+        assert!(
+            prompt.starts_with(&format!(
+                "You are {} — an interactive CLI tool",
+                crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL
+            )),
+            "interactive header must lead with product identity label"
+        );
     }
 
     #[test]
@@ -808,6 +824,13 @@ mod tests {
         assert!(
             !prompt.contains("interactive CLI tool"),
             "non-interactive prompt must NOT claim to be the interactive CLI"
+        );
+        assert!(
+            prompt.starts_with(&format!(
+                "You are {} — an autonomous agent",
+                crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL
+            )),
+            "non-interactive header must lead with product identity label"
         );
         // Sanity: rest of the template still renders.
         assert!(prompt.contains("user_query"));

@@ -180,9 +180,10 @@ pub fn workspace_ds_build_toolset() -> ToolServerConfig {
     tools.push((&ds_build::ExitPlanModeTool).into());
     tools.push((&ds_build::AskUserQuestionTool).into());
     tools.push((&ds_build::WebSearchTool).into());
-    tools.push((&ds_build::ImageGenTool).into());
-    tools.push((&ds_build::ImageToVideoTool).into());
-    tools.push((&ds_build::ReferenceToVideoTool).into());
+    // Image/video gen are NOT listed here: AgentBuilder injects them only when
+    // ImageGenConfig / VideoGenConfig are Enabled (credentials + flags).
+    // Advertising them in the static workspace preset made free-tier / API-key
+    // sessions look like a media product (Grok Imagine surface) they cannot use.
     tools.push((&ds_build::WebFetchTool).into());
     tools.push((&memory::search_tool::MemorySearchImpl).into());
     tools.push((&memory::get_tool::MemoryGetImpl).into());
@@ -471,9 +472,7 @@ fn orchestrator_toolset() -> ToolServerConfig {
             (&ds_build::MonitorTool).into(),
             (&ds_build::WebSearchTool).into(),
             (&ds_build::WebFetchTool).into(),
-            (&ds_build::ImageGenTool).into(),
-            (&ds_build::ImageToVideoTool).into(),
-            (&ds_build::ReferenceToVideoTool).into(),
+            // Image/video: injected by AgentBuilder only when media gen is enabled.
             (&memory::MemorySearchImpl).into(),
             (&memory::MemoryGetImpl).into(),
             (&ds_build::HeadroomRetrieveTool).into(),
@@ -785,7 +784,7 @@ pub struct AgentDefinition {
     pub agents_md: bool,
     /// When true (the default), the AgentBuilder layers session-level optional
     /// tools on top of the agent's declared `tool_config`: memory_search/get,
-    /// web_search, web_fetch, lsp, image_gen, video_gen, OpenCode write
+    /// web_search, web_fetch, lsp, OpenCode write (media gen injected when enabled)
     /// fallback, and the plan-mode tools.
     ///
     /// Set this to `false` for harnesses that need an exact, minimal toolset
