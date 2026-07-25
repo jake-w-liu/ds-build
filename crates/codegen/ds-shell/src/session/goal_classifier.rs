@@ -1279,9 +1279,21 @@ fn extract_path_line_tokens(text: &str) -> Vec<String> {
 
 /// Required implementer-scratch filename for math / quantitative goals.
 /// The planner must name this path in the verification plan; the harness
-/// refuses `completed: true` when the file is missing or empty for
-/// [`GoalKind::Math`].
+/// refuses `completed: true` when the file is missing, empty, or missing
+/// required exhaustive-check sections for [`GoalKind::Math`].
 pub(crate) const ADVERSARIAL_MATH_VERIFY_LOG: &str = "adversarial-math-verify.log";
+
+/// Required section headers inside [`ADVERSARIAL_MATH_VERIFY_LOG`].
+/// Spot-checking a sample of claims is NOT enough — each section must be
+/// present so skeptics and the harness can audit coverage mechanically.
+/// Matching is case-insensitive on the header text.
+pub(crate) const MATH_VERIFY_REQUIRED_SECTIONS: &[&str] = &[
+    "## equality-checks",
+    "## dimensional-checks",
+    "## edge-cases",
+    "## count-consistency",
+    "## tool-transcript",
+];
 
 /// The planner's `## Goal kind` tag (see `goal_planner_prompt.md`). Selects
 /// the kind-specific verifier review lens; an unrecognised / absent kind maps
@@ -1359,16 +1371,27 @@ This goal explains or diagnoses something; the failure mode to hunt is a fluent,
 - Verifiable — when the analysis claims \"X causes Y\" or \"the bug is Z\", confirm it with a cheap repro/test where feasible; a falsifiable causal claim you can disprove is a decisive refute.\n\
 - Answers the question — the analysis must address what was actually asked, with no critical sub-question hand-waved, hedged into vagueness, or skipped.\n";
 
-/// `math` correctness lens — independent recomputation of every substantive claim.
+/// `math` correctness lens — exhaustive tool-backed verification, not sampling.
 const KIND_LENS_MATH: &str = "\n## Math / quantitative correctness lens\n\n\
-This goal produces mathematical derivations, proofs, or quantitative results. Structural completeness (sections filled, markers present) is NEVER enough — correctness is the only gate. **Default to `refuted: true` if any substantive claim lacks independent tool-backed verification.**\n\n\
-**Exception to \"Audit, don't author\":** for every substantive numerical, algebraic, or closed-form claim in the deliverable you MUST either (a) audit a tool-backed independent recomputation already present in `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` (or another path the Verification plan names), or (b) cheaply recompute it yourself with shell (SymPy / numerical / residual). Head-only agreement with the implementer's prose is NOT evidence.\n\n\
-- Machine-auditable artifact — `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` MUST exist, be non-empty, and show tool-backed independent recomputation of EVERY substantive claim (not a single spot-check). Absent, empty, or prose-only logs are decisive `refuted: true` (`kind: gap`).\n\
-- Independent recomputation — re-derive critical steps and the final boxed/primary result from first principles; flag every mismatch.\n\
-- Domain / threshold / equality — test -/0/+, below/at/above critical values; distinguish strict vs non-strict conditions.\n\
-- Admissibility — domains, units, residual substitution, special cases, conservation, sign/branch errors.\n\
-- No remembered formulas without verified hypotheses; no tool claims without successful tool evidence in the log or current transcript.\n\
-- A plan whose only correctness check is structural (grep, marker presence, line counts) without adversarial math recompute is itself grounds to refute.\n";
+This goal produces mathematical derivations, proofs, or quantitative results. Structural completeness (sections filled, markers present) is NEVER enough — correctness is the only gate. **Default to `refuted: true` if any substantive claim lacks independent tool-backed verification. Sampling a few problems is a FAIL — verification must be exhaustive over the deliverable.**\n\n\
+**Exception to \"Audit, don't author\":** you MUST either (a) audit a tool-backed exhaustive log at `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log`, or (b) cheaply recompute missing checks yourself with shell (SymPy / numerical / residual / dimensional analysis). Head-only agreement with the implementer's prose is NOT evidence.\n\n\
+### Required log structure (harness-enforced sections)\n\
+`{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` MUST contain ALL of:\n\
+`## equality-checks` · `## dimensional-checks` · `## edge-cases` · `## count-consistency` · `## tool-transcript`\n\
+Missing any section, empty log, or prose-only content without tool evidence → decisive `refuted: true` (`kind: gap`).\n\n\
+### Exhaustive checks (NOT optional sampling)\n\
+1. **Equality chains** — for EVERY displayed algebraic/numerical equality in the deliverable (not a 5-problem sample), plug random admissible numbers (or SymPy simplify) and confirm both sides match. Catches sign errors, false intermediates, and rewritten identities that fail numerically.\n\
+2. **Dimensional / units** — for EVERY units claim or dimensional identity, recompute dimensions (e.g. SymPy physics.units or manual SI). Catches wrong unit conclusions ([σ/ε₀] ≠ [V], etc.).\n\
+3. **Edge / regime parameters** — for EVERY formula with parameters, evaluate edges (0, ±, critical thresholds, ∞ limits where claimed). Catches false \"→1 as c→∞\" style claims.\n\
+4. **Count / consistency lint** — when the text asserts counts (\"n=5 variables\", \"k cases\"), verify by counting listed items; flag mismatches.\n\
+5. **Independent recompute** — re-derive boxed/primary results from first principles; residual-substitute into the original equation when applicable.\n\
+6. **Domain / threshold / admissibility** — test -/0/+, below/at/above critical values; strict vs non-strict; regularity/normalization/BC/IC as applicable.\n\n\
+### Refute hard on\n\
+- Spot-check-only logs (\"verified 5 of N\") when N>5 claims exist.\n\
+- Claimed identities never numerically evaluated.\n\
+- Units claims without dimensional recompute.\n\
+- Tool claims without successful tool transcript in `## tool-transcript`.\n\
+- A plan whose only correctness check is structural (grep/markers) without the exhaustive sections above.\n";
 
 /// The review-lens block for `kind` (empty string for `None` — generic verifier).
 fn kind_lens(kind: Option<GoalKind>) -> &'static str {
@@ -1387,13 +1410,59 @@ pub(crate) fn math_verify_artifact_path(implementer_scratch: &Path) -> PathBuf {
     implementer_scratch.join(ADVERSARIAL_MATH_VERIFY_LOG)
 }
 
-/// `true` when `{implementer_scratch}/adversarial-math-verify.log` exists
-/// and is non-empty (machine-auditable proof of adversarial math check).
-pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
+/// Section headers from [`MATH_VERIFY_REQUIRED_SECTIONS`] that are absent
+/// from `body` (case-insensitive). Empty vec ⇒ structure is complete.
+pub(crate) fn math_verify_log_missing_sections(body: &str) -> Vec<&'static str> {
+    let lower = body.to_ascii_lowercase();
+    MATH_VERIFY_REQUIRED_SECTIONS
+        .iter()
+        .copied()
+        .filter(|header| !lower.contains(&header.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Result of the harness structural gate on the math verify log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MathVerifyArtifactGate {
+    Ok,
+    Missing,
+    Empty,
+    Incomplete { missing_sections: Vec<&'static str> },
+}
+
+/// Structural gate: file exists, non-empty, and contains every required
+/// exhaustive-check section header. Content honesty is still audited by
+/// skeptics; this only prevents "one spot-check paragraph" theater.
+pub(crate) fn math_verify_artifact_gate(implementer_scratch: &Path) -> MathVerifyArtifactGate {
     let path = math_verify_artifact_path(implementer_scratch);
-    std::fs::metadata(&path)
-        .map(|m| m.is_file() && m.len() > 0)
-        .unwrap_or(false)
+    let meta = match std::fs::metadata(&path) {
+        Ok(m) if m.is_file() => m,
+        _ => return MathVerifyArtifactGate::Missing,
+    };
+    if meta.len() == 0 {
+        return MathVerifyArtifactGate::Empty;
+    }
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(_) => return MathVerifyArtifactGate::Missing,
+    };
+    let missing = math_verify_log_missing_sections(&body);
+    if missing.is_empty() {
+        MathVerifyArtifactGate::Ok
+    } else {
+        MathVerifyArtifactGate::Incomplete {
+            missing_sections: missing,
+        }
+    }
+}
+
+/// `true` when the math verify log passes the structural gate
+/// (exists, non-empty, all required sections present).
+pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
+    matches!(
+        math_verify_artifact_gate(implementer_scratch),
+        MathVerifyArtifactGate::Ok
+    )
 }
 
 /// Strong objective signals that the deliverable is mathematical /
@@ -2232,47 +2301,75 @@ pub(crate) async fn run_verification_stage(
     let implementer_scratch = inputs.implementer_scratch_dir.to_string_lossy();
 
     // Hard gate for math: refuse completion before the panel when the
-    // required machine-auditable adversarial-math artifact is missing.
-    // Skeptics would also catch this via the math lens; short-circuiting
-    // avoids a full panel spend and gives a deterministic, actionable gap.
-    if matches!(goal_kind, Some(GoalKind::Math))
-        && !math_verify_artifact_present(inputs.implementer_scratch_dir)
-    {
-        let artifact = math_verify_artifact_path(inputs.implementer_scratch_dir);
-        let gap = format!(
-            "- [harness] missing non-empty math verification log at {} — \
-             run independent tool-backed recomputation (SymPy/numerical/residual) \
-             of EVERY substantive claim and write the transcript to \
-             {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG} before completed: true",
-            artifact.display()
-        );
-        let body = format!(
-            "# Goal verification — Not Achieved\n\n\
-             ## Gaps to fix\n\n{gap}\n\n\
-             ## Reason\n\n\
-             Math/quantitative goals require a non-empty \
-             `{ADVERSARIAL_MATH_VERIFY_LOG}` under the implementer scratch \
-             dir. The harness short-circuited the skeptic panel.\n"
-        );
-        write_details_file(&details_path, &body).await;
-        let latency_ms = started.elapsed().as_millis() as u64;
-        emit_event(Event::GoalClassifierVerdict {
-            verdict: GoalClassifierVerdict::NotAchieved.into(),
-            attempt: inputs.attempt,
-            latency_ms,
-        });
-        let fp = gap_fingerprint(&[&gap]);
-        return VerificationStageResult {
-            outcome: GoalClassifierOutcome::NotAchieved {
-                details_path: details_raw,
-                gaps_summary: gap,
-                pause_summary: format!("{PAUSE_GROUP_FIXABLE}:\nmissing adversarial-math-verify.log"),
-                gap_fingerprint: fp,
-            },
-            skeptic0_session_id: None,
-            // No panel ran — do not overwrite the resume chain.
-            panel_ran: false,
-        };
+    // required machine-auditable adversarial-math artifact is missing or
+    // lacks exhaustive-check sections. Short-circuit avoids a full panel
+    // spend and gives a deterministic, actionable gap.
+    if matches!(goal_kind, Some(GoalKind::Math)) {
+        match math_verify_artifact_gate(inputs.implementer_scratch_dir) {
+            MathVerifyArtifactGate::Ok => {}
+            gate => {
+                let artifact = math_verify_artifact_path(inputs.implementer_scratch_dir);
+                let required = MATH_VERIFY_REQUIRED_SECTIONS.join(", ");
+                let (gap, reason) = match gate {
+                    MathVerifyArtifactGate::Missing => (
+                        format!(
+                            "- [harness] missing math verification log at {} — write \
+                             exhaustive tool-backed checks to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG} \
+                             with sections: {required}",
+                            artifact.display()
+                        ),
+                        "file missing".to_string(),
+                    ),
+                    MathVerifyArtifactGate::Empty => (
+                        format!(
+                            "- [harness] empty math verification log at {} — must be non-empty \
+                             with sections: {required}",
+                            artifact.display()
+                        ),
+                        "file empty".to_string(),
+                    ),
+                    MathVerifyArtifactGate::Incomplete { missing_sections } => (
+                        format!(
+                            "- [harness] incomplete math verification log at {} — missing \
+                             section(s): {}. Required: {required}. Spot-check-only logs fail.",
+                            artifact.display(),
+                            missing_sections.join(", ")
+                        ),
+                        format!("missing sections: {}", missing_sections.join(", ")),
+                    ),
+                    MathVerifyArtifactGate::Ok => unreachable!(),
+                };
+                let body = format!(
+                    "# Goal verification — Not Achieved\n\n\
+                     ## Gaps to fix\n\n{gap}\n\n\
+                     ## Reason\n\n\
+                     Math/quantitative goals require an *exhaustive* \
+                     `{ADVERSARIAL_MATH_VERIFY_LOG}` ({reason}) with all of: \
+                     {required}. Sampling a subset of claims is insufficient. \
+                     The harness short-circuited the skeptic panel.\n"
+                );
+                write_details_file(&details_path, &body).await;
+                let latency_ms = started.elapsed().as_millis() as u64;
+                emit_event(Event::GoalClassifierVerdict {
+                    verdict: GoalClassifierVerdict::NotAchieved.into(),
+                    attempt: inputs.attempt,
+                    latency_ms,
+                });
+                let fp = gap_fingerprint(&[&gap]);
+                return VerificationStageResult {
+                    outcome: GoalClassifierOutcome::NotAchieved {
+                        details_path: details_raw,
+                        gaps_summary: gap,
+                        pause_summary: format!(
+                            "{PAUSE_GROUP_FIXABLE}:\nincomplete adversarial-math-verify.log ({reason})"
+                        ),
+                        gap_fingerprint: fp,
+                    },
+                    skeptic0_session_id: None,
+                    panel_ran: false,
+                };
+            }
+        }
     }
 
     let n = inputs
@@ -4447,7 +4544,10 @@ mod tests {
         assert!(kind_lens(Some(GoalKind::Analysis)).contains("Analysis soundness lens"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("Math / quantitative correctness lens"));
         assert!(kind_lens(Some(GoalKind::Math)).contains(ADVERSARIAL_MATH_VERIFY_LOG));
-        assert!(kind_lens(Some(GoalKind::Math)).contains("Independent recomputation"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("Equality chains"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("Dimensional / units"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("Spot-check-only logs"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("## equality-checks"));
         assert_eq!(kind_lens(None), "", "no kind ⇒ generic verifier, no lens");
     }
 
@@ -4481,11 +4581,48 @@ mod tests {
     fn math_verify_artifact_present_requires_nonempty_file() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!math_verify_artifact_present(dir.path()));
+        assert_eq!(
+            math_verify_artifact_gate(dir.path()),
+            MathVerifyArtifactGate::Missing
+        );
         let path = math_verify_artifact_path(dir.path());
         std::fs::write(&path, b"").unwrap();
-        assert!(!math_verify_artifact_present(dir.path()), "empty is not enough");
-        std::fs::write(&path, b"sympy ok\n").unwrap();
+        assert_eq!(
+            math_verify_artifact_gate(dir.path()),
+            MathVerifyArtifactGate::Empty
+        );
+        // Prose-only / spot-check without required sections fails the gate.
+        std::fs::write(&path, b"sympy ok on 5 sample problems\n").unwrap();
+        let gate = math_verify_artifact_gate(dir.path());
+        assert!(
+            matches!(gate, MathVerifyArtifactGate::Incomplete { .. }),
+            "spot-check prose must be Incomplete, got {gate:?}"
+        );
+        assert!(!math_verify_artifact_present(dir.path()));
+        // Full required section set passes structure (content honesty is skeptic).
+        let full = MATH_VERIFY_REQUIRED_SECTIONS
+            .iter()
+            .map(|s| format!("{s}\ncheck\n"))
+            .collect::<String>();
+        std::fs::write(&path, full).unwrap();
+        assert_eq!(math_verify_artifact_gate(dir.path()), MathVerifyArtifactGate::Ok);
         assert!(math_verify_artifact_present(dir.path()));
+    }
+
+    #[test]
+    fn math_verify_log_missing_sections_is_case_insensitive() {
+        let body = "## EQUALITY-CHECKS\nok\n## Dimensional-Checks\nok\n\
+                    ## edge-cases\nok\n## COUNT-CONSISTENCY\nok\n## tool-transcript\nok\n";
+        assert!(math_verify_log_missing_sections(body).is_empty());
+        assert_eq!(
+            math_verify_log_missing_sections("## equality-checks\nonly one\n"),
+            vec![
+                "## dimensional-checks",
+                "## edge-cases",
+                "## count-consistency",
+                "## tool-transcript",
+            ]
+        );
     }
 
     #[test]
@@ -5131,11 +5268,11 @@ mod tests {
         let spawner2 = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
         let observed2 = spawner2.clone();
         let spawner2: Arc<dyn GoalClassifierSpawner> = spawner2;
-        std::fs::write(
-            math_verify_artifact_path(scratch.path()),
-            b"sympy: claim rechecked OK\n",
-        )
-        .unwrap();
+        let full_log = MATH_VERIFY_REQUIRED_SECTIONS
+            .iter()
+            .map(|s| format!("{s}\nsympy: claim rechecked OK\n"))
+            .collect::<String>();
+        std::fs::write(math_verify_artifact_path(scratch.path()), full_log).unwrap();
         let vid2 = unique_verifier_id();
         let _ = super::super::goal_tracker::ensure_goal_scratch_root(&vid2);
         let mut inputs2 = stage_inputs(

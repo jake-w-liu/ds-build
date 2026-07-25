@@ -1283,7 +1283,8 @@ impl MvpAgent {
         use ds_tools::implementations::ds_build::deploy_app::AppBuilderDeployerConfig;
         AppBuilderDeployerConfig::Disabled
     }
-    /// Build video generation config. Video tools call the DeepSeek API directly.
+    /// Build video generation config. Video tools call the DeepSeek API
+    /// directly when enabled; default is off for API-key installs.
     pub(super) fn prepare_video_gen_config(
         &self,
     ) -> ds_tools::implementations::ds_build::video_gen::VideoGenConfig {
@@ -1293,6 +1294,9 @@ impl MvpAgent {
         };
         let tier_restricted = self.is_tier_restricted_capability();
         let cfg = self.cfg.borrow();
+        if !cfg.resolve_video_gen().value {
+            return VideoGenConfig::Disabled;
+        }
         let zdr_video_output_s3 = cfg
             .disable_zdr_incompatible_tools
             .then(|| cfg.zdr_video_output_s3.clone())

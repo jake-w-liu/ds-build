@@ -1248,6 +1248,12 @@ mod tests {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("adversarial-math-verify.log"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Adversarial correctness gating"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("attacker-math"));
+        // Exhaustive verification sections (not spot-check-only).
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## equality-checks"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## dimensional-checks"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## edge-cases"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## count-consistency"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## tool-transcript"));
     }
 
     /// A math objective with an incomplete plan is fail-closed and the

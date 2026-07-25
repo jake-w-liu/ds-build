@@ -1,10 +1,11 @@
 ---
 name: fable
 description: >
-  Fable Method toggle and dispatcher (think/act/prove). Fable is always ON in
-  the system prompt (harness default). /fable or /fable on re-affirms standing
-  instructions; /fable off temporarily deactivates; /fable <task> applies the
-  full loop immediately; subcommands: plan, audit, report, loop, judge.
+  Fable Method toggle and dispatcher (think/act/prove). A compact Fable loop is
+  ON by default in the system prompt; this skill expands the full method and
+  orchestration details. /fable or /fable on re-affirms; /fable off temporarily
+  deactivates; /fable <task> applies the full loop; subcommands: plan, audit,
+  report, loop, judge.
 metadata:
   short-description: "Fable Method on/off and subcommands"
   user-invocable: true
@@ -12,8 +13,9 @@ metadata:
 
 # The Fable Method
 
-Standing harness mode is **always active** by default (system prompt). This
-skill re-affirms, routes sub-commands, or temporarily deactivates.
+A **compact** Fable loop is active by default in the system prompt. This skill
+expands the full method, re-affirms, routes sub-commands, or temporarily
+deactivates.
 
 ## Usage
 
@@ -31,7 +33,10 @@ skill re-affirms, routes sub-commands, or temporarily deactivates.
 
 ## The method loop
 
-The full method loop (Steps 0–6: Classify → Define → Gather → Decide → Act → Verify → Report) and orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT) are defined in the system prompt's `<fable_method>` block. This skill only handles toggles and subcommand routing.
+The system prompt ships a **compact** Fable loop. The expanded method
+(Steps 0–6: Classify → Define → Gather → Decide → Act → Verify → Report) and
+orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT) live in this
+skill and in `/fable-loop`.
 
 ## Sub-command routing
 

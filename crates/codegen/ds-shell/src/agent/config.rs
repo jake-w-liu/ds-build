@@ -2266,21 +2266,22 @@ impl Config {
             .default(true)
             .resolve()
     }
-    /// `image_gen` tool gate. Default on; gated only by the `DS_IMAGE_GEN`
-    /// env var and managed-config requirement pin.
+    /// `image_gen` tool gate. **Default OFF** for DS Build API-key installs
+    /// (Imagine is not part of the core coding product). Enable with
+    /// `DS_IMAGE_GEN=1`, a managed requirement pin, or remote settings.
     pub(crate) fn resolve_image_gen(&self) -> Resolved<bool> {
         BoolFlag::env("DS_IMAGE_GEN")
             .requirement(self.requirements.image_gen.pinned())
-            .default(true)
+            .default(false)
             .resolve()
     }
-    /// `image_edit` tool gate.
+    /// `image_edit` tool gate. **Default OFF** (same product surface as
+    /// `image_gen`).
     ///
     /// The remote settings `imagine_tools_disabled` denylist is authoritative:
     /// when it lists `image_edit`, the tool is force-removed and local
     /// env/config can't re-enable it. A managed requirement pin still outranks
-    /// it; otherwise the tool defaults on and is overridable via
-    /// `DS_IMAGE_EDIT`.
+    /// it; otherwise enable via `DS_IMAGE_EDIT=1`.
     pub(crate) fn resolve_image_edit(&self) -> Resolved<bool> {
         use ds_tools::implementations::ds_build::IMAGE_EDIT_TOOL_NAME;
         if let Some(pinned) = self.requirements.image_edit.pinned() {
@@ -2293,7 +2294,16 @@ impl Config {
         {
             return Resolved::new(false, ConfigSource::Remote);
         }
-        BoolFlag::env("DS_IMAGE_EDIT").default(true).resolve()
+        BoolFlag::env("DS_IMAGE_EDIT").default(false).resolve()
+    }
+    /// `image_to_video` / `reference_to_video` gate. **Default OFF** — enable
+    /// with `DS_VIDEO_GEN=1`, `[features] video_gen = true`, or a requirement pin.
+    pub(crate) fn resolve_video_gen(&self) -> Resolved<bool> {
+        BoolFlag::env("DS_VIDEO_GEN")
+            .requirement(self.requirements.video_gen.pinned())
+            .config(self.features.video_gen)
+            .default(false)
+            .resolve()
     }
     /// Optional Imagine model override for `image_gen`. When set (non-empty),
     /// `image_gen` calls this model slug instead of the default quality model.
@@ -8324,9 +8334,13 @@ reasoning_effort = "low"
         let off = with_list(vec!["image_edit"]).resolve_image_edit();
         assert!(!off.value);
         assert_eq!(off.source, ConfigSource::Remote);
-        unsafe { std::env::remove_var("DS_IMAGE_EDIT") };
+        // Unrelated denylist entry does not block env enable.
         assert!(with_list(vec!["image_to_video"]).resolve_image_edit().value);
-        assert!(Config::default().resolve_image_edit().value);
+        unsafe { std::env::remove_var("DS_IMAGE_EDIT") };
+        // Media tools default OFF for API-key DS Build installs.
+        assert!(!Config::default().resolve_image_edit().value);
+        assert!(!Config::default().resolve_image_gen().value);
+        assert!(!Config::default().resolve_video_gen().value);
     }
     /// Clear every env var the goal/companion resolvers read so tests
     /// start from a known baseline regardless of run order.

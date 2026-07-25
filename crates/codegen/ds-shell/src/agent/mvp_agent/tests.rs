@@ -2465,6 +2465,8 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
     }
     let agent = build_minimal_agent_for_tests();
     agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    // Video gen defaults OFF; enable for the ZDR path under test.
+    agent.cfg.borrow_mut().features.video_gen = Some(true);
     assert!(matches!(
         agent.prepare_video_gen_config(),
         VideoGenConfig::Enabled { .. }

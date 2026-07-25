@@ -19,7 +19,9 @@ Plan: {PLAN_PATH}
   the shipped code in-repo, and write the captured run output to your scratch dir
   (the one the goal rules name; never shared `/tmp/...`). Fix any missing
   observation before calling the goal complete.
-- For `math` goals: run independent tool-backed recomputation (spawn
-  `attacker-math` or shell/SymPy yourself) for every substantive claim and write
-  the transcript to `{SCRATCH}/adversarial-math-verify.log` — required, not
-  optional; the harness gates completion on that file.
+- For `math` goals: run **exhaustive** tool-backed checks (not a sample) —
+  equality chains, dimensional lint, edge params, count consistency — via
+  `attacker-math` and/or shell/SymPy. Write `{SCRATCH}/adversarial-math-verify.log`
+  with sections `equality-checks`, `dimensional-checks`, `edge-cases`,
+  `count-consistency`, `tool-transcript`. The harness gates completion on that
+  structure.

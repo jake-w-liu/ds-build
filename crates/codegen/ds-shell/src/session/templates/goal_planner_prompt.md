@@ -207,15 +207,31 @@ The method: spawn `attacker-math` (or perform the check directly with shell)
 that independently re-derives each result from first principles using
 computational tools (SymPy, numerical integration, dimensional analysis,
 limiting-case checks). Flag every mismatch as a defect. **Machine-auditable
-artifact (required):** capture the full tool-backed recomputation transcript
-to the literal path `{SCRATCH}/adversarial-math-verify.log` (the harness
-refuses `completed: true` when this file is missing or empty). A plan for
-such a task whose only correctness check is a single spot-check, or that
-omits that log path, is an INVALID plan — the harness will reject it at plan
-time and the verifier will refute it. Structural
-well-formedness checks (grep, compilation, marker presence, line counts) MUST
-be tagged `evidence`, never `gating` — only the adversarial correctness step
-earns the `gating` tag.
+artifact (required):** write exhaustive tool-backed checks to the literal path
+`{SCRATCH}/adversarial-math-verify.log`. The harness refuses `completed: true`
+when this file is missing, empty, **or missing required sections**. The log
+MUST contain ALL of these headers (case-insensitive) with real tool evidence
+under each — **not a sample of 5 problems**:
+
+```
+## equality-checks
+## dimensional-checks
+## edge-cases
+## count-consistency
+## tool-transcript
+```
+
+- **equality-checks** — numerically or symbolically verify EVERY displayed
+  equality in the deliverable (plug random admissible values / SymPy).
+- **dimensional-checks** — recompute dimensions for EVERY units claim.
+- **edge-cases** — evaluate 0/±/critical/limit regimes for EVERY formula.
+- **count-consistency** — verify stated counts (\"n=5 variables\") against lists.
+- **tool-transcript** — commands run and outputs (no head-only claims).
+
+A plan whose only correctness check is a single spot-check, or that omits that
+log path / these sections, is an INVALID plan. Structural well-formedness
+checks (grep, compilation, marker presence) MUST be tagged `evidence`, never
+`gating` — only the adversarial correctness step earns the `gating` tag.
 
 Each step gives the **action** (run the tests,
 exercise the entry point, read the artifact) and the

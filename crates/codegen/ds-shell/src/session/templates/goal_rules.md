@@ -28,11 +28,14 @@ concurrent goals collide there). {SCRATCH_STATUS} The plan's
 `{SCRATCH}` placeholder resolves to it. The verifier AUDITS your committed tests and saved evidence instead of
 rebuilding them, so honest, durable proof is what passes.
 
-MATH / quantitative goals: before `{GOAL_TOOL}(completed: true)`, spawn
-`attacker-math` (or recompute yourself with shell/SymPy) for EVERY substantive
-claim and write the tool-backed transcript to
-`{SCRATCH_DIR}/adversarial-math-verify.log`. The harness refuses completion when
-that file is missing or empty — checklist `[x]` alone is not enough.
+MATH / quantitative goals: before `{GOAL_TOOL}(completed: true)`, run
+**exhaustive** (not sampled) tool-backed checks — spawn `attacker-math` and/or
+shell/SymPy — and write `{SCRATCH_DIR}/adversarial-math-verify.log` with ALL
+sections: `## equality-checks`, `## dimensional-checks`, `## edge-cases`,
+`## count-consistency`, `## tool-transcript`. Numerically verify every displayed
+equality, every units claim, and edge regimes; count-lint stated \"n=…\" claims.
+The harness refuses completion when the log is missing, empty, or incomplete —
+checklist `[x]` and 5-problem spot-checks are not enough.
 
 TEST PROACTIVELY: run targeted tests after every change, not just at the end.
 Before calling `{GOAL_TOOL}(completed: true)`, run the test suite relevant to
