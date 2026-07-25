@@ -841,21 +841,26 @@ pub const ATTACKER_CODE_PROMPT: &str = concat!(
 );
 
 /// Prompt for **attacker-math** — adversarial math/physics review lens.
+/// Has shell for CAS/numerical recomputation; no file-edit tools.
 pub const ATTACKER_MATH_PROMPT: &str = concat!(
     "You are an adversarial math/physics critic. Attack the derivation, not the presentation.\n\n",
-    "=== READ-ONLY MODE ===\n",
-    "You have NO file editing tools. Do not create, modify, or delete files.\n\n",
-    "Lenses (apply all that fit):\n",
-    "- Independent recomputation of critical steps and the final claim\n",
+    "=== NO FILE EDITS ===\n",
+    "You have NO file editing tools. Do not create, modify, or delete workspace files.\n",
+    "You MAY run shell commands (Python/SymPy, numerical checks) to recompute independently.\n\n",
+    "Lenses (apply ALL that fit — tool-backed recompute is MANDATORY for every substantive claim):\n",
+    "- Independent recomputation of critical steps and the final claim via ${{ tools.by_kind.execute }}\n",
+    "  (SymPy, numerical integration, residual substitution, dimensional analysis)\n",
     "- Domain / threshold / equality: test -/0/+, below/at/above critical values\n",
     "- Admissibility: domains, regularity, normalization, square-integrability, positivity, BC/IC, units\n",
     "- Residuals / special cases / conservation / sign and branch errors\n",
     "- Convention switches (silent redefinition of dimensionless numbers)\n\n",
     "Guidelines:\n",
-    "- Prefer ${{ tools.by_kind.search }}/${{ tools.by_kind.read }}/${{ tools.by_kind.list }}\n",
+    "- Prefer ${{ tools.by_kind.execute }} for recomputation; use ${{ tools.by_kind.search }}/",
+    "${{ tools.by_kind.read }}/${{ tools.by_kind.list }} for artifacts\n",
     "- Cite equation labels, problem IDs, or file:line for artifact-backed work\n",
     "- Do not accept a remembered formula without checking hypotheses\n",
-    "- Tool claims require successful tool evidence in the current task trace\n\n",
+    "- Tool claims require successful tool evidence in the current task trace\n",
+    "- Head-only recomputation without tool evidence is NOT sufficient for acceptance-critical claims\n\n",
     attacker_output_contract!(),
 );
 
@@ -888,14 +893,16 @@ pub const ATTACKER_CODE_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     prompt_template: ATTACKER_CODE_PROMPT,
 };
 
-/// Built-in **attacker-math** subagent (read-only adversarial math/physics).
+/// Built-in **attacker-math** subagent (adversarial math/physics with shell).
 pub const ATTACKER_MATH_SUBAGENT: BuiltinSubagent = BuiltinSubagent {
     name: "attacker-math",
-    description: "Adversarial math/physics critic: residuals, thresholds, admissibility \
-         (read-only; runs in the foreground).",
-    tools_template: "Read-only \u{2014} has access to: \
-         ${{ tools.by_kind.read }}, ${{ tools.by_kind.list }}, \
-         ${{ tools.by_kind.search }}.",
+    description: "Adversarial math/physics critic: independent recomputation via shell \
+         (SymPy/numerical), residuals, thresholds, admissibility \
+         (no file edits; runs in the foreground).",
+    tools_template: "Has access to: \
+         ${{ tools.by_kind.execute }}, ${{ tools.by_kind.read }}, \
+         ${{ tools.by_kind.list }}, ${{ tools.by_kind.search }}. \
+         No file-edit tools.",
     prompt_template: ATTACKER_MATH_PROMPT,
 };
 
@@ -1387,10 +1394,14 @@ mod tests {
             );
         }
         // Read-only profiles carry the read-only banner; general-purpose doesn't.
+        // attacker-math has shell for CAS recompute (no READ-ONLY banner).
         assert!(EXPLORE_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(PLAN_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(ATTACKER_CODE_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(ATTACKER_MATH_PROMPT.contains("NO FINDINGS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("NO FILE EDITS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("tools.by_kind.execute"));
+        assert!(!ATTACKER_MATH_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(ATTACKER_RESEARCH_PROMPT.contains("NO FINDINGS"));
         assert!(!GENERAL_PURPOSE_PROMPT.contains("READ-ONLY"));
     }

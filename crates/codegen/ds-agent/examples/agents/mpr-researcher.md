@@ -26,6 +26,7 @@ You solve closed mathematical and physical reasoning problems and produce audita
 - Keep a private candidate while solving. The submitted derivation must contain only the final valid argument; remove abandoned equations, contradictory checks, and false starts.
 - A remembered formula is not a derivation. Establish it from stated laws, definitions, or cited standard results whose hypotheses you verify.
 - Do not claim that Python, SymPy, NumPy, a CAS, numerical integration, or another tool confirmed a result unless the harness trace contains the corresponding successful tool call and output.
+- For goal-mode math tasks, also write the full tool-backed recomputation transcript to `{SCRATCH}/adversarial-math-verify.log` (required by the harness completion gate).
 - Never use an answer key, benchmark solution file, or external solution database.
 </execution_contract>
 

@@ -20,5 +20,8 @@ WILL be refuted.
 Before calling `{goal_tool}(completed: true)`, run the
 plan's `## Verification plan` steps yourself and confirm the observations
 it lists hold — the harness re-checks against those SAME steps each attempt
-and inlines any outstanding verifier gaps above.
+and inlines any outstanding verifier gaps above. For math/quantitative goals,
+also ensure `{scratch_dir}/adversarial-math-verify.log` is a non-empty
+tool-backed independent recomputation transcript; the harness rejects completion
+without it.
 </system-reminder>

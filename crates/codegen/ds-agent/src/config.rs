@@ -376,6 +376,21 @@ fn explore_toolset() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
+/// Attacker-math toolset: read/search/list PLUS shell for independent
+/// recomputation (SymPy, numerical checks). No file-edit tools — the
+/// critic may run CAS commands but must not rewrite the deliverable.
+fn attacker_math_toolset() -> ToolServerConfig {
+    ToolServerConfig {
+        tools: vec![
+            bash_tool_config(),
+            (&ds_build::ReadFileTool).into(),
+            (&ds_build::ListDirTool).into(),
+            (&ds_build::GrepTool).into(),
+            (&ds_build::HeadroomRetrieveTool).into(),
+        ],
+        behavior_preset: None,
+    }
+}
 /// Plan-mode toolset — read-only inspection tools, no shell, no file-editing.
 ///
 /// Enforces read-only at the toolset: the agent may inspect the repo and keep
@@ -1591,13 +1606,17 @@ impl AgentDefinition {
             ..Self::base(BuiltinAgentName::AttackerCode, "")
         }
     }
-    /// Adversarial math/physics critic (Fable Stage 3) — read-only, foreground.
+    /// Adversarial math/physics critic (Fable Stage 3) — foreground.
+    /// Has shell for CAS/numerical recomputation; no file-edit tools.
     pub fn attacker_math() -> Self {
         use crate::prompt::subagent_prompts;
         Self {
             description: ds_tool_types::ATTACKER_MATH_SUBAGENT.description.to_string(),
-            tool_config: explore_toolset(),
-            permission_mode: PermissionMode::Plan,
+            tool_config: attacker_math_toolset(),
+            // Default (not Plan): Plan is forward-compat-only today but
+            // must not silently deny shell if that path is wired later.
+            // Edits remain impossible — the toolset omits write tools.
+            permission_mode: PermissionMode::Default,
             prompt_body: Some(subagent_prompts::ATTACKER_MATH_PROMPT.to_string()),
             inherit_skills: false,
             background: Some(false),
@@ -2564,7 +2583,6 @@ description: Test default tool config
     fn attacker_subagents_force_foreground_and_readonly() {
         for def in [
             AgentDefinition::attacker_code(),
-            AgentDefinition::attacker_math(),
             AgentDefinition::attacker_research(),
         ] {
             assert_eq!(def.background, Some(false), "{} must force FG", def.name);
@@ -2577,6 +2595,35 @@ description: Test default tool config
                 def.name
             );
         }
+        let math = AgentDefinition::attacker_math();
+        assert_eq!(math.background, Some(false), "attacker-math must force FG");
+        assert_eq!(
+            math.permission_mode,
+            PermissionMode::Default,
+            "attacker-math needs Default so shell is not Plan-denied"
+        );
+        assert!(
+            math.prompt_body
+                .as_deref()
+                .is_some_and(|p| p.contains("NO FINDINGS")),
+            "attacker-math prompt must require structured findings"
+        );
+        // Must ship execute for CAS recomputation; must NOT ship edit.
+        use ds_tools::types::tool::ToolKind;
+        let kinds: Vec<_> = math
+            .tool_config
+            .tools
+            .iter()
+            .filter_map(|t| t.kind)
+            .collect();
+        assert!(
+            kinds.contains(&ToolKind::Execute),
+            "attacker-math must include Execute for SymPy/numerical recompute"
+        );
+        assert!(
+            !kinds.contains(&ToolKind::Edit),
+            "attacker-math must not include Edit"
+        );
     }
     #[test]
     fn test_all_builtins_have_inherit_model() {

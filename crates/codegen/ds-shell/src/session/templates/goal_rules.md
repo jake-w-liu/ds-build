@@ -28,6 +28,12 @@ concurrent goals collide there). {SCRATCH_STATUS} The plan's
 `{SCRATCH}` placeholder resolves to it. The verifier AUDITS your committed tests and saved evidence instead of
 rebuilding them, so honest, durable proof is what passes.
 
+MATH / quantitative goals: before `{GOAL_TOOL}(completed: true)`, spawn
+`attacker-math` (or recompute yourself with shell/SymPy) for EVERY substantive
+claim and write the tool-backed transcript to
+`{SCRATCH_DIR}/adversarial-math-verify.log`. The harness refuses completion when
+that file is missing or empty — checklist `[x]` alone is not enough.
+
 TEST PROACTIVELY: run targeted tests after every change, not just at the end.
 Before calling `{GOAL_TOOL}(completed: true)`, run the test suite relevant to
 what you changed (the touched packages/modules — the whole repo suite only when

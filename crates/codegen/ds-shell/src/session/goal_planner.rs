@@ -492,6 +492,45 @@ pub(crate) async fn run_goal_planner(
         );
     }
 
+    // Static math/adversarial contract: quantitative objectives must ship
+    // kind=math, a gating independent-recomputation step, and the named
+    // adversarial-math-verify.log artifact. Delete the invalid plan so a
+    // resume can replan rather than skipping on "plan already present".
+    match tokio::fs::read_to_string(inputs.plan_file).await {
+        Ok(body) => {
+            if let Err(reason) =
+                crate::session::goal_classifier::validate_math_plan_contract(inputs.objective, &body)
+            {
+                tracing::warn!(
+                    plan_file = %plan_file_str,
+                    reason,
+                    "goal planner: plan failed math adversarial contract; failing closed",
+                );
+                let _ = tokio::fs::remove_file(inputs.plan_file).await;
+                return record_fail_closed(
+                    GoalPlannerFailClosedReason::InvalidPlan,
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                plan_file = %plan_file_str,
+                error = %err,
+                "goal planner: failed to read plan for math contract check; failing closed",
+            );
+            let _ = tokio::fs::remove_file(inputs.plan_file).await;
+            return record_fail_closed(
+                GoalPlannerFailClosedReason::InvalidPlan,
+                inputs.attempt,
+                started,
+                emit_event,
+            );
+        }
+    }
+
     let latency_ms = started.elapsed().as_millis() as u64;
     emit_event(Event::GoalPlannerCompleted {
         attempt: inputs.attempt,
@@ -1199,6 +1238,83 @@ mod tests {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## Verification plan"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("implementer"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("observations that MUST be"));
+    }
+
+    /// Math goals must use kind `math`, require adversarial gating, and
+    /// name the machine-auditable adversarial-math-verify.log artifact.
+    #[test]
+    fn planner_prompt_pins_math_kind_and_adversarial_artifact() {
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("`math`"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("adversarial-math-verify.log"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Adversarial correctness gating"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("attacker-math"));
+    }
+
+    /// A math objective with an incomplete plan is fail-closed and the
+    /// invalid plan file is deleted so resume can replan.
+    #[tokio::test]
+    async fn math_plan_missing_contract_fails_closed_and_deletes_plan() {
+        use crate::session::events::GoalPlannerFailClosedReason;
+        use crate::session::goal_classifier::ADVERSARIAL_MATH_VERIFY_LOG;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan_file = dir.path().join("plan.md");
+        // Planner writes a math-tagged plan WITHOUT the artifact path.
+        let bad_body = b"## Goal kind\nmath\n## Verification plan\n1. gating: adversarial recompute with SymPy\n";
+        let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, bad_body));
+        let tool_names = RoleToolNames::inherit_defaults();
+        let outcome = run_goal_planner(
+            spawner,
+            GoalPlannerInputs {
+                objective: "Derive the closed form of the integral.",
+                context: "",
+                plan_file: &plan_file,
+                attempt: 1,
+                model_id: "test",
+                tool_names: &tool_names,
+                inherit_tool_names: &tool_names,
+            },
+            &|_| {},
+        )
+        .await;
+        match outcome {
+            GoalPlannerOutcome::FailClosed {
+                reason: GoalPlannerFailClosedReason::InvalidPlan,
+                ..
+            } => {}
+            other => panic!("expected InvalidPlan fail-closed, got {other:?}"),
+        }
+        assert!(
+            !plan_file.exists(),
+            "invalid plan must be deleted so resume can replan"
+        );
+        // Control: a complete math plan succeeds.
+        let good = format!(
+            "## Goal kind\nmath\n## Verification plan\n\
+             1. gating: adversarial independent recompute every claim with SymPy\n\
+             Capture to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
+        );
+        let plan_file2 = dir.path().join("plan2.md");
+        let spawner2 = Arc::new(MockSpawner::ok_writes(&plan_file2, good.as_bytes()));
+        let outcome2 = run_goal_planner(
+            spawner2,
+            GoalPlannerInputs {
+                objective: "Derive the closed form of the integral.",
+                context: "",
+                plan_file: &plan_file2,
+                attempt: 1,
+                model_id: "test",
+                tool_names: &tool_names,
+                inherit_tool_names: &tool_names,
+            },
+            &|_| {},
+        )
+        .await;
+        assert!(
+            matches!(outcome2, GoalPlannerOutcome::Planned { .. }),
+            "complete math plan must succeed: {outcome2:?}"
+        );
+        assert!(plan_file2.exists());
     }
 
     /// The planner must instruct verification-plan output paths to use the

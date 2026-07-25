@@ -94,8 +94,12 @@ STAGE 3 — VERIFY (adversarial):
     run named verification yourself (done criterion observed + build/tests)
     IF consequential: spawn 1–3 parallel attacker-* subagents (foreground; platform-enforced max 3 live):
         attacker-code → diff incompleteness | runtime breakage | spec contradiction
-        attacker-math → independent recomputation | domain/threshold/admissibility | units/residual/special cases
+        attacker-math → independent recomputation (shell/SymPy) | domain/threshold/admissibility | units/residual/special cases
         attacker-research → source verification | hidden assumptions | counterevidence/alternative explanations
+    MATH / derivation / quantitative / closed-form / boxed-answer tasks:
+        attacker-math is MANDATORY (not optional), foreground, with tool-backed recomputation of EVERY substantive claim
+        write the full tool transcript to {scratch or goal SCRATCH}/adversarial-math-verify.log before claiming done
+        head-only recompute without tool evidence does NOT satisfy this stage
     acceptance-critical critics and validators run in the foreground and finish before completion
     surviving findings → Stage 2     MAX 3 fix-verify cycles same issue
 

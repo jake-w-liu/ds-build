@@ -49,6 +49,10 @@ from best knowledge.
 - `code-change` — modify the workspace; the diff is the evidence.
 - `analysis` — understand existing code; deliverable is prose, diff may be empty.
 - `research` — gather external info; deliverable is a summary, diff may be empty.
+- `math` — mathematical derivation, proof, closed form, or quantitative result;
+  correctness (not structure) is the gate. Use this whenever the objective asks
+  to derive, prove, solve, integrate, or produce a boxed/numerical answer — even
+  if the writeup lives in a Markdown file (do NOT pick `analysis` for that).
 
 ## Specify OUTCOMES, not architecture
 
@@ -138,7 +142,7 @@ sections, in order. `## Implementation approach` and `## Task checklist` are
 # Plan: <one-sentence headline paraphrasing OBJECTIVE>
 
 ## Goal kind
-<code-change | analysis | research>
+<code-change | analysis | research | math>
 
 ## Acceptance criteria
 1. <gating, outcome-based criterion>
@@ -195,15 +199,20 @@ only checks that something exists, compiles, or parses is evidence, not gating.
 **Adversarial correctness gating (MANDATORY for math, science, derivation, or
 quantitative tasks).** When the deliverable contains mathematical derivations,
 scientific computations, proofs, numerical results, or any claim that can be
-independently verified by computation, the verification plan MUST include at
+independently verified by computation, set `## Goal kind` to `math` and the
+verification plan MUST include at
 least one `gating` step that performs adversarial independent verification of
 EVERY substantive claim in the deliverable — never just one spot-check.
-The method: spawn attacker subagents (or perform the check directly) that
-independently re-derive each result from first principles using computational
-tools (SymPy, numerical integration, dimensional analysis, limiting-case
-checks). Flag every mismatch as a defect. A plan for such a task whose only
-correctness check is a single spot-check is an INVALID plan — the implementer
-will ship unverified work and the verifier will refute it. Structural
+The method: spawn `attacker-math` (or perform the check directly with shell)
+that independently re-derives each result from first principles using
+computational tools (SymPy, numerical integration, dimensional analysis,
+limiting-case checks). Flag every mismatch as a defect. **Machine-auditable
+artifact (required):** capture the full tool-backed recomputation transcript
+to the literal path `{SCRATCH}/adversarial-math-verify.log` (the harness
+refuses `completed: true` when this file is missing or empty). A plan for
+such a task whose only correctness check is a single spot-check, or that
+omits that log path, is an INVALID plan — the harness will reject it at plan
+time and the verifier will refute it. Structural
 well-formedness checks (grep, compilation, marker presence, line counts) MUST
 be tagged `evidence`, never `gating` — only the adversarial correctness step
 earns the `gating` tag.

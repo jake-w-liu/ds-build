@@ -348,13 +348,18 @@ pub const GOAL_PLANNER_FAIL_CLOSED_MISSING_PLAN: &str = "missing_plan_file";
 /// Harness could not pre-create the plan-file parent directory.
 pub const GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED: &str = "file_write_failed";
 
+/// Planner wrote a plan that fails the math/adversarial contract
+/// (missing kind `math`, gating recomputation step, or named verify log).
+pub const GOAL_PLANNER_FAIL_CLOSED_INVALID_PLAN: &str = "invalid_plan";
+
 #[allow(clippy::const_is_empty)]
 const _: () = assert!(
     !GOAL_PLANNER_FAIL_CLOSED_TRANSPORT.is_empty()
         && !GOAL_PLANNER_FAIL_CLOSED_RUNTIME.is_empty()
         && !GOAL_PLANNER_FAIL_CLOSED_ABORTED.is_empty()
         && !GOAL_PLANNER_FAIL_CLOSED_MISSING_PLAN.is_empty()
-        && !GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED.is_empty(),
+        && !GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED.is_empty()
+        && !GOAL_PLANNER_FAIL_CLOSED_INVALID_PLAN.is_empty(),
     "GoalPlanner discriminator consts must be non-empty",
 );
 
@@ -367,6 +372,7 @@ pub(crate) enum GoalPlannerFailClosedReason {
     Aborted,
     MissingPlan,
     FileWriteFailed,
+    InvalidPlan,
 }
 
 impl GoalPlannerFailClosedReason {
@@ -377,6 +383,7 @@ impl GoalPlannerFailClosedReason {
             Self::Aborted => GOAL_PLANNER_FAIL_CLOSED_ABORTED,
             Self::MissingPlan => GOAL_PLANNER_FAIL_CLOSED_MISSING_PLAN,
             Self::FileWriteFailed => GOAL_PLANNER_FAIL_CLOSED_FILE_WRITE_FAILED,
+            Self::InvalidPlan => GOAL_PLANNER_FAIL_CLOSED_INVALID_PLAN,
         }
     }
 }

@@ -1277,6 +1277,12 @@ fn extract_path_line_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Required implementer-scratch filename for math / quantitative goals.
+/// The planner must name this path in the verification plan; the harness
+/// refuses `completed: true` when the file is missing or empty for
+/// [`GoalKind::Math`].
+pub(crate) const ADVERSARIAL_MATH_VERIFY_LOG: &str = "adversarial-math-verify.log";
+
 /// The planner's `## Goal kind` tag (see `goal_planner_prompt.md`). Selects
 /// the kind-specific verifier review lens; an unrecognised / absent kind maps
 /// to `None` (no lens — the generic adversarial verifier).
@@ -1285,6 +1291,8 @@ pub(crate) enum GoalKind {
     CodeChange,
     Analysis,
     Research,
+    /// Mathematical derivation / quantitative computation / proof deliverable.
+    Math,
 }
 
 /// Parse the `## Goal kind` value from a plan-file body. Reads the first
@@ -1311,6 +1319,9 @@ pub(crate) fn parse_goal_kind(plan: &str) -> Option<GoalKind> {
                 "code-change" => Some(GoalKind::CodeChange),
                 "analysis" => Some(GoalKind::Analysis),
                 "research" => Some(GoalKind::Research),
+                "math" | "math-derivation" | "derivation" | "quantitative" => {
+                    Some(GoalKind::Math)
+                }
                 _ => None,
             };
         }
@@ -1348,14 +1359,135 @@ This goal explains or diagnoses something; the failure mode to hunt is a fluent,
 - Verifiable — when the analysis claims \"X causes Y\" or \"the bug is Z\", confirm it with a cheap repro/test where feasible; a falsifiable causal claim you can disprove is a decisive refute.\n\
 - Answers the question — the analysis must address what was actually asked, with no critical sub-question hand-waved, hedged into vagueness, or skipped.\n";
 
+/// `math` correctness lens — independent recomputation of every substantive claim.
+const KIND_LENS_MATH: &str = "\n## Math / quantitative correctness lens\n\n\
+This goal produces mathematical derivations, proofs, or quantitative results. Structural completeness (sections filled, markers present) is NEVER enough — correctness is the only gate. **Default to `refuted: true` if any substantive claim lacks independent tool-backed verification.**\n\n\
+**Exception to \"Audit, don't author\":** for every substantive numerical, algebraic, or closed-form claim in the deliverable you MUST either (a) audit a tool-backed independent recomputation already present in `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` (or another path the Verification plan names), or (b) cheaply recompute it yourself with shell (SymPy / numerical / residual). Head-only agreement with the implementer's prose is NOT evidence.\n\n\
+- Machine-auditable artifact — `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` MUST exist, be non-empty, and show tool-backed independent recomputation of EVERY substantive claim (not a single spot-check). Absent, empty, or prose-only logs are decisive `refuted: true` (`kind: gap`).\n\
+- Independent recomputation — re-derive critical steps and the final boxed/primary result from first principles; flag every mismatch.\n\
+- Domain / threshold / equality — test -/0/+, below/at/above critical values; distinguish strict vs non-strict conditions.\n\
+- Admissibility — domains, units, residual substitution, special cases, conservation, sign/branch errors.\n\
+- No remembered formulas without verified hypotheses; no tool claims without successful tool evidence in the log or current transcript.\n\
+- A plan whose only correctness check is structural (grep, marker presence, line counts) without adversarial math recompute is itself grounds to refute.\n";
+
 /// The review-lens block for `kind` (empty string for `None` — generic verifier).
 fn kind_lens(kind: Option<GoalKind>) -> &'static str {
     match kind {
         Some(GoalKind::CodeChange) => KIND_LENS_CODE_CHANGE,
         Some(GoalKind::Research) => KIND_LENS_RESEARCH,
         Some(GoalKind::Analysis) => KIND_LENS_ANALYSIS,
+        Some(GoalKind::Math) => KIND_LENS_MATH,
         None => "",
     }
+}
+
+/// Absolute path of the required math-verification artifact under the
+/// implementer's private scratch dir.
+pub(crate) fn math_verify_artifact_path(implementer_scratch: &Path) -> PathBuf {
+    implementer_scratch.join(ADVERSARIAL_MATH_VERIFY_LOG)
+}
+
+/// `true` when `{implementer_scratch}/adversarial-math-verify.log` exists
+/// and is non-empty (machine-auditable proof of adversarial math check).
+pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
+    let path = math_verify_artifact_path(implementer_scratch);
+    std::fs::metadata(&path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Strong objective signals that the deliverable is mathematical /
+/// quantitative (derivation, proof, closed form) rather than code or
+/// generic research prose. Conservative — avoids "calculus history" style
+/// false positives by requiring derivation/solve/compute phrasing.
+pub(crate) fn objective_suggests_math(objective: &str) -> bool {
+    let o = objective.to_ascii_lowercase();
+    const STRONG: &[&str] = &[
+        "derive ",
+        "derivation",
+        "prove that",
+        "closed-form",
+        "closed form",
+        "sympy",
+        "\\boxed",
+        "boxed answer",
+        "solve the equation",
+        "differential equation",
+        "partial differential",
+        "eigenvalue",
+        "math completion",
+        "mathematical derivation",
+        "adversarial math",
+        "compute the integral",
+        "evaluate the integral",
+        "find the closed form",
+        "independent recomputation",
+    ];
+    STRONG.iter().any(|s| o.contains(s))
+}
+
+/// Whether this plan must include the adversarial-math gating contract
+/// (verification step + named artifact). True when kind is `math`, or
+/// when the objective is strongly quantitative and the kind is not
+/// `code-change` (coding tasks with math-flavored words stay on the
+/// code-change path).
+pub(crate) fn plan_requires_math_adversarial(objective: &str, plan: &str) -> bool {
+    match parse_goal_kind(plan) {
+        Some(GoalKind::Math) => true,
+        Some(GoalKind::CodeChange) => false,
+        _ => objective_suggests_math(objective),
+    }
+}
+
+/// Static check: a math-required plan must (1) tag kind `math`, (2) include
+/// a `gating` verification step that performs adversarial / independent
+/// recomputation, and (3) name the machine-auditable
+/// `{SCRATCH}/adversarial-math-verify.log` artifact. Returns `Ok(())` when
+/// the contract holds or math is not required.
+pub(crate) fn validate_math_plan_contract(
+    objective: &str,
+    plan: &str,
+) -> Result<(), &'static str> {
+    if !plan_requires_math_adversarial(objective, plan) {
+        return Ok(());
+    }
+    if !matches!(parse_goal_kind(plan), Some(GoalKind::Math)) {
+        return Err(
+            "math/quantitative objective requires ## Goal kind `math` so the math \
+             verifier lens applies",
+        );
+    }
+    if !plan_has_adversarial_math_gate(plan) {
+        return Err(
+            "math plan missing gating adversarial/independent recomputation step \
+             in ## Verification plan",
+        );
+    }
+    if !plan_names_math_verify_artifact(plan) {
+        return Err(
+            "math plan must name {SCRATCH}/adversarial-math-verify.log as captured evidence",
+        );
+    }
+    Ok(())
+}
+
+/// True when the verification plan mentions a gating adversarial /
+/// independent recomputation step (case-insensitive substring scan).
+fn plan_has_adversarial_math_gate(plan: &str) -> bool {
+    let lower = plan.to_ascii_lowercase();
+    let has_gating = lower.contains("gating");
+    let has_adversarial = lower.contains("adversarial")
+        || lower.contains("independent re")
+        || lower.contains("re-deriv")
+        || lower.contains("rederiv")
+        || lower.contains("recompute")
+        || lower.contains("sympy")
+        || lower.contains("attacker-math");
+    has_gating && has_adversarial
+}
+
+fn plan_names_math_verify_artifact(plan: &str) -> bool {
+    plan.contains(ADVERSARIAL_MATH_VERIFY_LOG)
 }
 
 /// Delta-focused resume prompt for skeptic 0 when it is RESUMED across
@@ -2080,6 +2212,9 @@ pub(crate) async fn run_verification_stage(
 
     // Select the shared review lens from the plan's `## Goal kind`. Best-effort:
     // an unreadable or untagged plan yields the generic verifier (empty lens).
+    // Also fall back to Math when the objective is strongly quantitative so
+    // a mis-tagged plan still gets the math lens (plan validation should
+    // have caught this at plan time; this is defence in depth).
     let goal_kind = match inputs.plan_file {
         Some(path) => tokio::fs::read_to_string(path)
             .await
@@ -2087,9 +2222,58 @@ pub(crate) async fn run_verification_stage(
             .and_then(|body| parse_goal_kind(&body)),
         None => None,
     };
+    let goal_kind = match goal_kind {
+        Some(k) => Some(k),
+        None if objective_suggests_math(inputs.objective) => Some(GoalKind::Math),
+        None => None,
+    };
     let kind_lens = kind_lens(goal_kind);
 
     let implementer_scratch = inputs.implementer_scratch_dir.to_string_lossy();
+
+    // Hard gate for math: refuse completion before the panel when the
+    // required machine-auditable adversarial-math artifact is missing.
+    // Skeptics would also catch this via the math lens; short-circuiting
+    // avoids a full panel spend and gives a deterministic, actionable gap.
+    if matches!(goal_kind, Some(GoalKind::Math))
+        && !math_verify_artifact_present(inputs.implementer_scratch_dir)
+    {
+        let artifact = math_verify_artifact_path(inputs.implementer_scratch_dir);
+        let gap = format!(
+            "- [harness] missing non-empty math verification log at {} — \
+             run independent tool-backed recomputation (SymPy/numerical/residual) \
+             of EVERY substantive claim and write the transcript to \
+             {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG} before completed: true",
+            artifact.display()
+        );
+        let body = format!(
+            "# Goal verification — Not Achieved\n\n\
+             ## Gaps to fix\n\n{gap}\n\n\
+             ## Reason\n\n\
+             Math/quantitative goals require a non-empty \
+             `{ADVERSARIAL_MATH_VERIFY_LOG}` under the implementer scratch \
+             dir. The harness short-circuited the skeptic panel.\n"
+        );
+        write_details_file(&details_path, &body).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        emit_event(Event::GoalClassifierVerdict {
+            verdict: GoalClassifierVerdict::NotAchieved.into(),
+            attempt: inputs.attempt,
+            latency_ms,
+        });
+        let fp = gap_fingerprint(&[&gap]);
+        return VerificationStageResult {
+            outcome: GoalClassifierOutcome::NotAchieved {
+                details_path: details_raw,
+                gaps_summary: gap,
+                pause_summary: format!("{PAUSE_GROUP_FIXABLE}:\nmissing adversarial-math-verify.log"),
+                gap_fingerprint: fp,
+            },
+            skeptic0_session_id: None,
+            // No panel ran — do not overwrite the resume chain.
+            panel_ran: false,
+        };
+    }
 
     let n = inputs
         .skeptic_count
@@ -4221,6 +4405,14 @@ mod tests {
             Some(GoalKind::Analysis),
             "header + value matching is case-insensitive",
         );
+        assert_eq!(
+            parse_goal_kind("## Goal kind\nmath\n"),
+            Some(GoalKind::Math)
+        );
+        assert_eq!(
+            parse_goal_kind("## Goal kind\n`math-derivation`\n"),
+            Some(GoalKind::Math)
+        );
         assert_eq!(parse_goal_kind("## Goal kind\nbogus\n"), None);
         assert_eq!(parse_goal_kind("no kind section here\n"), None);
     }
@@ -4253,7 +4445,47 @@ mod tests {
         assert!(kind_lens(Some(GoalKind::Research)).contains("Research fact-check lens"));
         assert!(kind_lens(Some(GoalKind::Research)).contains("web_fetch"));
         assert!(kind_lens(Some(GoalKind::Analysis)).contains("Analysis soundness lens"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("Math / quantitative correctness lens"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains(ADVERSARIAL_MATH_VERIFY_LOG));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("Independent recomputation"));
         assert_eq!(kind_lens(None), "", "no kind ⇒ generic verifier, no lens");
+    }
+
+    #[test]
+    fn math_plan_contract_requires_kind_gate_and_artifact() {
+        let obj = "Derive the closed form of the integral and prove that it holds.";
+        assert!(objective_suggests_math(obj));
+        assert!(validate_math_plan_contract("implement a REST API", "# Plan\n## Goal kind\ncode-change\n").is_ok());
+
+        let bad_kind = "## Goal kind\nanalysis\n## Verification plan\n1. gating: adversarial recompute\n";
+        assert!(validate_math_plan_contract(obj, bad_kind).is_err());
+
+        let no_gate = format!(
+            "## Goal kind\nmath\n## Verification plan\n1. evidence: file exists\n\
+             Capture to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
+        );
+        assert!(validate_math_plan_contract(obj, &no_gate).is_err());
+
+        let no_artifact = "## Goal kind\nmath\n## Verification plan\n1. gating: adversarial independent recompute with SymPy\n";
+        assert!(validate_math_plan_contract(obj, no_artifact).is_err());
+
+        let good = format!(
+            "## Goal kind\nmath\n## Verification plan\n\
+             1. gating: adversarial independent recompute every claim with SymPy\n\
+             Capture transcript to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
+        );
+        assert!(validate_math_plan_contract(obj, &good).is_ok());
+    }
+
+    #[test]
+    fn math_verify_artifact_present_requires_nonempty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!math_verify_artifact_present(dir.path()));
+        let path = math_verify_artifact_path(dir.path());
+        std::fs::write(&path, b"").unwrap();
+        assert!(!math_verify_artifact_present(dir.path()), "empty is not enough");
+        std::fs::write(&path, b"sympy ok\n").unwrap();
+        assert!(math_verify_artifact_present(dir.path()));
     }
 
     #[test]
@@ -4843,6 +5075,91 @@ mod tests {
             Some(4),
             "GoalClassifierFired.max_runs must report inputs.max_runs (effective cap), not the default constant",
         );
+    }
+
+    /// Math goals without `{SCRATCH}/adversarial-math-verify.log` must
+    /// NotAchieved BEFORE any skeptic is spawned (harness hard gate).
+    #[tokio::test]
+    async fn verification_stage_math_missing_artifact_short_circuits() {
+        let spawner = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
+        let observed = spawner.clone();
+        let spawner: Arc<dyn GoalClassifierSpawner> = spawner;
+        let emit = |_: Event| {};
+        let wsp = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let plan_path = wsp.path().join("plan.md");
+        tokio::fs::write(
+            &plan_path,
+            format!(
+                "## Goal kind\nmath\n## Verification plan\n\
+                 1. gating: adversarial recompute\n\
+                 Capture to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
+            ),
+        )
+        .await
+        .unwrap();
+        let vid = unique_verifier_id();
+        // Ensure the goal scratch root exists so details writes succeed.
+        let _ = super::super::goal_tracker::ensure_goal_scratch_root(&vid);
+        let mut inputs = stage_inputs(
+            "Derive the closed form of the integral.",
+            "done",
+            wsp.path(),
+            &vid,
+            1,
+            1,
+        );
+        inputs.plan_file = Some(&plan_path);
+        inputs.implementer_scratch_dir = scratch.path();
+        let result = run_verification_stage(spawner, inputs, &emit).await;
+        assert!(!result.panel_ran, "must not spawn skeptics without the log");
+        assert_eq!(
+            observed.spawn_count.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "no skeptic spawns on math artifact short-circuit"
+        );
+        match result.outcome {
+            GoalClassifierOutcome::NotAchieved { gaps_summary, .. } => {
+                assert!(
+                    gaps_summary.contains(ADVERSARIAL_MATH_VERIFY_LOG),
+                    "gaps must name the missing log: {gaps_summary}"
+                );
+            }
+            other => panic!("expected NotAchieved, got {other:?}"),
+        }
+        // With the artifact present, the panel is allowed to run (N=1).
+        let spawner2 = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
+        let observed2 = spawner2.clone();
+        let spawner2: Arc<dyn GoalClassifierSpawner> = spawner2;
+        std::fs::write(
+            math_verify_artifact_path(scratch.path()),
+            b"sympy: claim rechecked OK\n",
+        )
+        .unwrap();
+        let vid2 = unique_verifier_id();
+        let _ = super::super::goal_tracker::ensure_goal_scratch_root(&vid2);
+        let mut inputs2 = stage_inputs(
+            "Derive the closed form of the integral.",
+            "done",
+            wsp.path(),
+            &vid2,
+            1,
+            1,
+        );
+        inputs2.plan_file = Some(&plan_path);
+        inputs2.implementer_scratch_dir = scratch.path();
+        let result2 = run_verification_stage(spawner2, inputs2, &emit).await;
+        assert!(result2.panel_ran);
+        assert_eq!(
+            observed2
+                .spawn_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(matches!(
+            result2.outcome,
+            GoalClassifierOutcome::Achieved { .. }
+        ));
     }
 
     #[tokio::test]
