@@ -1,0 +1,1051 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{enumitem}
+\usepackage{booktabs,longtable,array}
+\usepackage[hidelinks]{hyperref}
+\usepackage[T1]{fontenc}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\setlength{\emergencystretch}{2em}
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\ee}{\mathrm{e}}
+\newcommand{\ii}{\mathrm{i}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\C}{\mathbb{C}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\title{MPR-100 Verified Answer Sheet\\[0.5em]\large Development set}
+\author{DS Build evaluation control}
+\date{Reference version 1 --- 26 July 2026}
+\begin{document}
+\maketitle
+
+\section*{Submission metadata}
+\begin{tabular}{@{}ll@{}}
+System / harness name: & DS Build evaluation control\\
+Model and version: & Not applicable (verified reference)\\
+Run identifier: & reference-v1\\
+Administration scope: & Development\\
+Tool policy: & Analytic work with disclosed local symbolic/numerical checks\\
+Time / token budget: & Not applicable\\
+\end{tabular}
+
+\newenvironment{mprsolution}[1]
+{\clearpage\section*{Solution #1}}
+{}
+
+%<MPR:BEGIN id=M01>
+\begin{mprsolution}{M01}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(A\) is invertible over \(\R\).  Transpose is denoted by \(^{\mathsf T}\), and
+\(s=1+\alpha v^{\mathsf T}A^{-1}u\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The matrix determinant lemma applied to \(A+\alpha uv^{\mathsf T}\) gives
+\(\det B=\det A\,(1+\alpha v^{\mathsf T}A^{-1}u)=\det A\,s\).
+\item When \(s\ne0\), direct multiplication gives
+\[
+B^{-1}=A^{-1}-\frac{\alpha A^{-1}uv^{\mathsf T}A^{-1}}{s}.
+\]
+Indeed, the coefficient of \(A^{-1}uv^{\mathsf T}\) in the product is
+\(\alpha-\alpha/s-\alpha^2(v^{\mathsf T}A^{-1}u)/s=0\).
+\item If \(s=0\), then \(r=A^{-1}u\ne0\) satisfies
+\(Br=u(1+\alpha v^{\mathsf T}A^{-1}u)=0\).
+Similarly, \(\ell=A^{-\mathsf T}v\ne0\) satisfies
+\(\ell^{\mathsf T}B=v^{\mathsf T}(1+\alpha v^{\mathsf T}A^{-1}u)=0\).
+The rank can fall by at most one, so it is \(n-1\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+\det B=\det A\,s,\qquad
+B^{-1}=A^{-1}-\dfrac{\alpha A^{-1}uv^{\mathsf T}A^{-1}}{s}\quad(s\ne0),\\
+s=0:\quad \ker B=\operatorname{span}\{A^{-1}u\},\quad
+\ker B^{\mathsf T}=\operatorname{span}\{A^{-\mathsf T}v\}.
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item For \(\alpha=0\), the formulas reduce to \(\det A\) and \(A^{-1}\);
+the multiplication and both null-vector products were also checked exactly.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} analytic derivation and exact SymPy matrix assertions in
+\texttt{verify\_reference.py}.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M01>
+
+%<MPR:BEGIN id=M05>
+\begin{mprsolution}{M05}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(t\ge0\) and \(K\in\R\).  Magnitude means absolute value of the first
+component.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The second equation gives \(x_2(t)=e^{-2t}\).  Variation of constants in
+\(x_1'+x_1=Ke^{-2t}\), \(x_1(0)=0\), gives
+\(x_1(t)=K(e^{-t}-e^{-2t})\).
+\item For \(K\ne0\), maximizing \(|x_1|\) is equivalent to maximizing
+\(g(t)=e^{-t}-e^{-2t}\).  Since \(g'(t)=-e^{-t}+2e^{-2t}\), the unique interior
+maximum is \(t_*=\log2\), with \(g(t_*)=1/4\).
+\item The eigenvalues are \(-1,-2\), but non-normal eigenvectors permit the
+off-diagonal forcing to produce an \(O(|K|)\) transient before both modes decay.
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{x(t)=\binom{K(e^{-t}-e^{-2t})}{e^{-2t}},\qquad
+t_*=\log2,\qquad \max_{t\ge0}|x_1(t)|=\frac{|K|}{4}.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Substitution satisfies \(x'=Ax\) and \(x(0)=e_2\).  If \(K=0\),
+\(|x_1|\equiv0\), so every time (including \(\log2\)) is a maximizer.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} analytic solution with symbolic ODE and extremum checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M05>
+
+%<MPR:BEGIN id=M12>
+\begin{mprsolution}{M12}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+All integrals are improper Lebesgue (equivalently convergent improper Riemann)
+integrals; \(\log\) is natural.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The smooth bijection \(x=\tan\theta\) maps \((0,\infty)\) to
+\((0,\pi/2)\), and truncating before taking limits gives
+\[
+I=\int_0^{\pi/2}\log(\sec^2\theta)\,\dd\theta
+=-2\int_0^{\pi/2}\log(\cos\theta)\,\dd\theta .
+\]
+\item For \(F(a)=\int_0^{\pi/2}\cos^a\theta\,\dd\theta\), \(a>-1\),
+\[
+F(a)=\frac{\sqrt\pi\,\Gamma((a+1)/2)}{2\Gamma((a+2)/2)}.
+\]
+For \(|a|\le1/2\), differentiation is dominated by an integrable multiple of
+\(\cos^{-1/2}\theta|\log\cos\theta|\), hence
+\(F'(0)=\int\log(\cos\theta)\,\dd\theta\).
+\item Using \(\psi(1/2)=-\gamma-2\log2\) and \(\psi(1)=-\gamma\) gives
+\(F'(0)=F(0)[\psi(1/2)-\psi(1)]/2=-(\pi/2)\log2\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle \int_0^\infty\frac{\log(1+x^2)}{1+x^2}\,\dd x
+=\pi\log2.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item A 50-digit numerical quadrature agrees with \(\pi\log2\) to better than
+\(10^{-50}\).
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} Gamma-function derivation and high-precision mpmath
+quadrature.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M12>
+
+%<MPR:BEGIN id=M18>
+\begin{mprsolution}{M18}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(0<\varepsilon\ll1\), \(0\le x\le1\); exponentially small terms are retained
+when comparing with the exact solution.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The reduced equation is \(y_0'=0\).  Satisfying the right boundary gives
+the outer solution \(y_0=1\); the unsatisfied condition is at \(x=0\).
+\item Balance requires \(X=x/\varepsilon\).  With \(Y(X)=y(x)\),
+\(Y_{XX}+Y_X=0\), \(Y(0)=0\), and \(Y(\infty)=1\), so
+\(Y=1-e^{-X}\).
+\item Subtracting the common part \(1\) yields the composite
+\(y_{\rm comp}=1-e^{-x/\varepsilon}\).
+\item Direct integration of the original equation gives
+\[
+y_{\rm exact}=\frac{1-e^{-x/\varepsilon}}{1-e^{-1/\varepsilon}}.
+\]
+Thus \(y_{\rm exact}-y_{\rm comp}=
+(1-e^{-x/\varepsilon})e^{-1/\varepsilon}/(1-e^{-1/\varepsilon})
+=O(e^{-1/\varepsilon})\) uniformly.
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+y_0=1,\quad X=x/\varepsilon,\quad Y=1-e^{-X},\\
+y_{\rm comp}=1-e^{-x/\varepsilon},\qquad
+y_{\rm exact}=\dfrac{1-e^{-x/\varepsilon}}{1-e^{-1/\varepsilon}}.
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item The exact expression satisfies both boundary values and has zero
+residual in \(\varepsilon y''+y'\); the displayed uniform error was simplified
+symbolically.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} matched asymptotics plus exact SymPy residual and error
+checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M18>
+
+%<MPR:BEGIN id=M21>
+\begin{mprsolution}{M21}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(N\ge1\), \(0\le i\le N\), \(q=1-p\), and absorption time is zero at either
+boundary.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item With \(h_i=\Pr_i(X_T=N)\), first-step conditioning gives
+\(h_i=ph_{i+1}+qh_{i-1}\), \(h_0=0,h_N=1\).  Its roots are \(1,q/p\), giving
+\(h_i=[1-(q/p)^i]/[1-(q/p)^N]\) for \(p\ne q\).
+\item With \(T_i=\E_iT\), the recurrence is
+\(T_i=1+pT_{i+1}+qT_{i-1}\), \(T_0=T_N=0\).  A linear particular solution plus
+the same homogeneous roots gives \(T_i=(Nh_i-i)/(p-q)\).
+\item At \(p=q=1/2\), solving the repeated-root recurrences directly gives
+\(h_i=i/N\) and \(T_i=i(N-i)\); these are also the continuous limits.
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{array}{c|cc}
+&\Pr_i(X_T=N)&\E_iT\\ \hline
+p\ne q&\dfrac{1-(q/p)^i}{1-(q/p)^N}&
+\dfrac{N[1-(q/p)^i]/[1-(q/p)^N]-i}{p-q}\\[0.6em]
+p=q=\tfrac12&\dfrac{i}{N}&i(N-i)
+\end{array}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Exact arithmetic verifies both recurrences for \(2\le N\le8\), four
+biased probabilities, and the fair case, including both boundaries.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} recurrence derivation and exact SymPy enumeration.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M21>
+
+%<MPR:BEGIN id=M25>
+\begin{mprsolution}{M25}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+States are \(0,1,2\).  The finite irreducible chain has a unique stationary
+distribution, and return time means the first positive return.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Detailed balance on the two edges gives
+\(\pi_0/3=\pi_1/4\) and \(\pi_1/5=\pi_2/2\), so
+\(\pi_0:\pi_1:\pi_2=15:20:8\).
+\item Normalization yields \(\pi=(15,20,8)/43\).  The two edge identities,
+zero non-neighbor flows, and trivial diagonal identities prove
+\(\pi_iP_{ij}=\pi_jP_{ji}\), hence reversibility and \(\pi P=\pi\).
+\item Kac's return-time formula gives \(m_i=1/\pi_i\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+\pi=\frac1{43}(15,20,8),\qquad
+(m_0,m_1,m_2)=\left(\frac{43}{15},\frac{43}{20},\frac{43}{8}\right).}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Exact matrix multiplication gives \(\pi P=\pi\), and all nine detailed
+balance identities hold.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} rational arithmetic with exact matrix checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M25>
+
+%<MPR:BEGIN id=M31>
+\begin{mprsolution}{M31}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+The real solution is sought on the maximal interval containing \(0\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Set \(z=y-x\).  Then \(y'=z'+1\), so the ODE becomes
+\(z'=z^2-2\), with \(z(0)=0\).
+\item Separation (or direct recognition) gives
+\(z=-\sqrt2\tanh(\sqrt2x)\), since its derivative is
+\(-2\operatorname{sech}^2(\sqrt2x)=z^2-2\).
+\item Therefore \(y=x+z\).  This expression is finite for every real \(x\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle y(x)=x-\sqrt2\,\tanh(\sqrt2\,x),\qquad x\in\R.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Direct symbolic substitution gives residual zero in
+\(y'-(y^2-2xy+x^2-1)\), and \(y(0)=0\).
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} analytic substitution and exact SymPy residual check.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M31>
+
+%<MPR:BEGIN id=M34>
+\begin{mprsolution}{M34}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(\omega_d=\sqrt{\omega_0^2-\gamma^2}>0\); the Green function is retarded and
+the forcing is locally integrable.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item For \(t>0\), the homogeneous characteristic roots are
+\(-\gamma\pm i\omega_d\), so causality and \(G(0^+)=0\) give
+\(G(t)=C e^{-\gamma t}\sin(\omega_dt)\).
+\item Integrating \(G''+2\gamma G'+\omega_0^2G=\delta(t)\) across zero gives
+\(G'(0^+)-G'(0^-)=1\).  Since \(G=0\) for \(t<0\), \(C=1/\omega_d\).
+\item Duhamel's principle then gives the zero-data solution
+\(x(t)=\int_0^tG(t-s)f(s)\,\dd s\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+G(t)=\Theta(t)\frac{e^{-\gamma t}\sin(\omega_dt)}{\omega_d},\qquad
+x(t)=\int_0^t\frac{e^{-\gamma(t-s)}\sin[\omega_d(t-s)]}{\omega_d}f(s)\,\dd s.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Symbolic differentiation gives the homogeneous residual zero,
+\(G(0^+)=0\), and \(G'(0^+)=1\), proving the delta normalization.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} distributional derivation and exact symbolic residual.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M34>
+
+%<MPR:BEGIN id=M41>
+\begin{mprsolution}{M41}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(n\) is a nonnegative integer and the three codomain labels are distinct.
+The empty fiber has even cardinality.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The exponential generating function for an odd-sized labeled fiber is
+\(\sinh z\).  Thus the desired number is \(n![z^n](\sinh z)^3\).
+\item The identity
+\((\sinh z)^3=[\sinh(3z)-3\sinh z]/4\) gives
+\((3^n-3)/4\) for odd \(n\) and zero for even \(n\).
+\item Every odd cardinality is positive, so each of the three fibers is
+nonempty; surjectivity is automatic.
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+N_n=\begin{cases}(3^n-3)/4,&n\ \text{odd},\\0,&n\ \text{even},\end{cases}
+\quad\text{equivalently}\quad
+N_n=\frac{(3^n-3)(1-(-1)^n)}8.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Brute-force enumeration for \(0\le n\le9\) matches the formula; at
+\(n=3\) it gives \(6=3!\).
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} exponential generating functions and Python brute force.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M41>
+
+%<MPR:BEGIN id=M43>
+\begin{mprsolution}{M43}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(m,n>0\) and congruences are over integers.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Put \(d=\gcd(m,n)\).  A common solution implies \(d\mid(b-a)\).
+Conversely, \(x=a+mk\) reduces to
+\((m/d)k\equiv(b-a)/d\pmod{n/d}\), which has a unique solution because
+\(\gcd(m/d,n/d)=1\).
+\item Consequently the common solutions form one class modulo
+\(\operatorname{lcm}(m,n)=mn/d\).
+\item Here \(d=12\).  Writing \(x=17+84k\) gives
+\(7k\equiv4\pmod5\), hence \(k\equiv2\pmod5\) and \(x=185+420j\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+x\equiv a\pmod m,\ x\equiv b\pmod n
+\iff \gcd(m,n)\mid(b-a),\\
+\text{unique modulo }\operatorname{lcm}(m,n),\qquad
+x\equiv185\pmod{420}\ \text{in the stated case}.
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item \(185\bmod84=17\), \(185\bmod60=5\), and exhaustive checking modulo
+\(420\) finds no second representative.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} extended-CRT proof and exhaustive integer residue check.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=M43>
+
+%<MPR:BEGIN id=P51>
+\begin{mprsolution}{P51}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(\theta=0\) is the bottom, \(\Omega\ge0\), and angles are modulo \(2\pi\).
+The rotation is externally prescribed.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Since \(\rho=a\sin\theta\), \(z=-a\cos\theta\),
+\[
+L=\tfrac12ma^2(\dot\theta^2+\Omega^2\sin^2\theta)+mga\cos\theta,
+\]
+and Euler--Lagrange gives
+\(\ddot\theta=\sin\theta(\Omega^2\cos\theta-g/a)\).
+\item Equilibria are \(\theta=0,\pi\), plus
+\(\cos\theta_*=g/(a\Omega^2)\) when \(\Omega^2\ge g/a\).
+\item Linearizing \(\ddot\delta=F'(\theta_e)\delta\) gives:
+the bottom is stable for \(\Omega^2<g/a\), with
+\(\omega_b=\sqrt{g/a-\Omega^2}\); the top has
+\(F'=\Omega^2+g/a>0\) and is unstable.
+\item For \(\Omega^2>g/a\), both nonvertical equilibria have
+\(F'=-\Omega^2\sin^2\theta_*<0\), so
+\(\omega_*=\Omega|\sin\theta_*|\).  At equality the bottom is linearly
+marginal with zero frequency (and is nonlinearly quartic-stable).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+\ddot\theta=\sin\theta(\Omega^2\cos\theta-g/a),\\
+\theta=0:\ \omega_b=\sqrt{g/a-\Omega^2}\ (\Omega^2<g/a);
+\quad\theta=\pi:\ \text{unstable};\\
+\cos\theta_*=\frac{g}{a\Omega^2}:\ 
+\omega_*=\Omega|\sin\theta_*|\ (\Omega^2>g/a).
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item The curvatures at bottom, top, and off-axis points were differentiated
+symbolically; at \(\Omega=0\), the pendulum frequency \(\sqrt{g/a}\) returns.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} Lagrangian derivation and exact symbolic curvature checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P51>
+
+%<MPR:BEGIN id=P54>
+\begin{mprsolution}{P54}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+Positive velocity is forward; exhaust leaves backward at relative speed \(u\).
+\(0<m\le m_0\), \(\dot m=-\mu\), and \(c,\mu,u>0\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Momentum balance gives \(m\dot v=\mu u-cv\).
+Since \(\dot m=-\mu\), this becomes
+\(m\,\dd v/\dd m-(c/\mu)v=-u\).
+\item Multiplication by \(m^{-c/\mu}\) and integration gives
+\(v=\mu u/c+C m^{c/\mu}\).  The condition \(v(m_0)=0\) fixes \(C\).
+\item For \(r=m/m_0\),
+\(\lim_{c\to0}(\mu u/c)[1-r^{c/\mu}]
+=-u\log r=u\log(m_0/m)\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+v(m)=\frac{\mu u}{c}\left[1-\left(\frac{m}{m_0}\right)^{c/\mu}\right],
+\qquad
+\lim_{c\to0}v(m)=u\log\frac{m_0}{m}.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Differentiation recovers \(m\dot v=\mu u-cv\), \(v(m_0)=0\), and
+the dimensions are velocity throughout.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} variable-mass balance and symbolic ODE/limit checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P54>
+
+%<MPR:BEGIN id=P61>
+\begin{mprsolution}{P61}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(z>0\), vacuum permittivity is \(\varepsilon_0\), and positive \(E_z\) points
+away from a positively charged disk.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Integrating rings of charge gives
+\[
+V(z)=\frac{\sigma}{2\varepsilon_0}\int_0^R
+\frac{r\,\dd r}{\sqrt{r^2+z^2}}
+=\frac{\sigma}{2\varepsilon_0}(\sqrt{z^2+R^2}-z).
+\]
+\item Hence \(E_z=-V'(z)=\frac{\sigma}{2\varepsilon_0}
+[1-z/\sqrt{z^2+R^2}]\).
+\item At \(z\ll R\), \(E_z\to\sigma/(2\varepsilon_0)\).  At \(z\gg R\),
+with \(Q=\pi R^2\sigma\),
+\(V\sim Q/(4\pi\varepsilon_0z)\) and
+\(E_z\sim Q/(4\pi\varepsilon_0z^2)\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+V(z)=\frac{\sigma}{2\varepsilon_0}(\sqrt{z^2+R^2}-z),\qquad
+E_z(z)=\frac{\sigma}{2\varepsilon_0}
+\left(1-\frac{z}{\sqrt{z^2+R^2}}\right),\quad z>0.}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Symbolic differentiation and both asymptotic limits reproduce the
+infinite-plane and point-charge fields.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} ring integration with symbolic derivative and limit checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P61>
+
+%<MPR:BEGIN id=P65>
+\begin{mprsolution}{P65}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+The vacuum light speed is \(c_0\), fields vary as
+\(e^{i(\beta z-\omega t)}\), and \(b<a\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item The TE boundary conditions give
+\(k_c^2=(m\pi/a)^2+(n\pi/b)^2\).  For TE\(_{10}\),
+\(k_c=\pi/a\), so \(\omega_c=\pi c_0/a\) and \(f_c=c_0/(2a)\).
+\item The vacuum dispersion relation gives
+\(\beta=\sqrt{\omega^2/c_0^2-(\pi/a)^2}\), real for
+\(\omega>\omega_c\) and imaginary below cutoff.
+\item Therefore
+\[
+v_p=\frac{\omega}{\beta}
+=\frac{c_0}{\sqrt{1-(\omega_c/\omega)^2}},\qquad
+v_g=\frac{\dd\omega}{\dd\beta}
+=c_0\sqrt{1-(\omega_c/\omega)^2},
+\]
+so \(v_pv_g=c_0^2\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+f_c=\frac{c_0}{2a},\quad
+\beta=\sqrt{\frac{\omega^2}{c_0^2}-\frac{\pi^2}{a^2}},\quad
+v_pv_g=c_0^2\quad(\omega>\omega_c=\pi c_0/a).}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Differentiating the dispersion relation gives \(v_g\); as
+\(\omega\to\infty\), both velocities approach \(c_0\).
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} Maxwell-mode separation and symbolic velocity-product
+check.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P65>
+
+%<MPR:BEGIN id=P71>
+\begin{mprsolution}{P71}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+The particle mass is \(m\), and a bound energy obeys \(-V_0<E<0\).
+Set \(k=\sqrt{2m(E+V_0)}/\hbar\) and
+\(\kappa=\sqrt{-2mE}/\hbar\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Inside the well the even/odd solutions are \(\cos kx,\sin kx\);
+outside they decay as \(e^{-\kappa|x|}\).  Log-derivative matching at \(a\)
+gives \(k\tan(ka)=\kappa\) (even) and
+\(-k\cot(ka)=\kappa\) (odd).
+\item Let \(z=ka\) and
+\(z_0=a\sqrt{2mV_0}/\hbar\).  Since
+\(k^2+\kappa^2=2mV_0/\hbar^2\), the equations are
+\(z\tan z=\sqrt{z_0^2-z^2}\) and
+\(-z\cot z=\sqrt{z_0^2-z^2}\).
+\item The first odd state enters at \(\kappa\downarrow0\) with
+\(z=\pi/2\).  A normalizable odd state therefore requires
+\(z_0>\pi/2\), or \(V_0>\pi^2\hbar^2/(8ma^2)\); equality is a
+zero-energy, non-normalizable threshold state.
+\item The first even branch has a root for every \(z_0>0\), so every
+one-dimensional attractive square well has an even bound state.
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+k\tan(ka)=\kappa\quad(\mathrm{even}),\qquad
+-k\cot(ka)=\kappa\quad(\mathrm{odd}),\\
+k^2+\kappa^2=\frac{2mV_0}{\hbar^2},\qquad
+\text{odd state iff }V_0>\frac{\pi^2\hbar^2}{8ma^2};
+\quad\text{an even state always exists.}
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Numerical root checks find an even state at \(z_0=0.01\), no odd
+branch at \(z_0=1.55<\pi/2\), and one at \(z_0=1.60>\pi/2\).
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} parity matching and 60-digit mpmath threshold checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P71>
+
+%<MPR:BEGIN id=P72>
+\begin{mprsolution}{P72}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+The excited state has \(\sigma_z=+1\); \(\Delta,\Omega\in\R\), and
+\(\Omega_R=\sqrt{\Delta^2+\Omega^2}\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Since \((\Delta\sigma_z+\Omega\sigma_x)^2=\Omega_R^2I\),
+\[
+U(t)=I\cos(\Omega_Rt/2)
+-i\frac{\Delta\sigma_z+\Omega\sigma_x}{\Omega_R}
+\sin(\Omega_Rt/2).
+\]
+\item Acting on the \(\sigma_z=-1\) state, the excited-state amplitude is
+\(-i(\Omega/\Omega_R)\sin(\Omega_Rt/2)\); squaring gives the probability.
+\item At resonance, \(P_e=\sin^2(\Omega t/2)\), whose first unit maximum is
+at \(t_\pi=\pi/|\Omega|\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+P_e(t)=\frac{\Omega^2}{\Delta^2+\Omega^2}
+\sin^2\!\left(\frac{\sqrt{\Delta^2+\Omega^2}\,t}{2}\right),
+\qquad t_\pi=\frac{\pi}{|\Omega|}\quad(\Delta=0).}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Symbolic matrix exponentiation and 60-digit numerical checks at positive,
+negative, resonant, and zero coupling agree with the formula.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} Pauli-matrix exponential, SymPy, and mpmath.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P72>
+
+%<MPR:BEGIN id=P81>
+\begin{mprsolution}{P81}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(T>0\), \(x=\beta\varepsilon=\varepsilon/(k_BT)>0\), and the systems are
+independent and distinguishable.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item \(Z_1=1+e^{-x}\), hence
+\(U=-N\partial_\beta\log Z_1=N\varepsilon/(e^x+1)\).
+\item Differentiation with respect to \(T\) gives
+\[
+C=Nk_Bx^2\frac{e^x}{(1+e^x)^2}
+=\frac{Nk_Bx^2}{4\cosh^2(x/2)}.
+\]
+\item The logarithmic derivative of the dimensionless heat capacity is
+\(2/x-\tanh(x/2)\).  Thus the positive maximum solves
+\(x\tanh(x/2)=2\), whose root is
+\(x_*=2.399357280515467\ldots\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+U=\dfrac{N\varepsilon}{e^x+1},\qquad
+C=Nk_Bx^2\dfrac{e^x}{(1+e^x)^2},\\
+x_*\tanh(x_*/2)=2,\quad x_*=2.399357280515467\ldots,\quad
+T_{\max}=\dfrac{\varepsilon}{k_Bx_*}.
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item The heat capacity vanishes at both \(x\to0\) and \(x\to\infty\);
+60-digit root finding and neighboring values confirm the unique maximum.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} canonical differentiation, SymPy, and 60-digit mpmath.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P81>
+
+%<MPR:BEGIN id=P85>
+\begin{mprsolution}{P85}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+The canonical partition function exists and may be differentiated; \(C_V\) is
+the heat capacity at fixed external parameters.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item From \(U=-\partial_\beta\log Z\),
+\[
+\operatorname{Var}(E)=\frac{\partial^2\log Z}{\partial\beta^2}
+=-\frac{\partial U}{\partial\beta}.
+\]
+\item Since \(\beta=(k_BT)^{-1}\),
+\(-\partial_\beta U=k_BT^2(\partial U/\partial T)=k_BT^2C_V\).
+\item In a stable extensive system, \(U=O(N)\) and \(C_V=O(N)\), so
+\(\sigma_E/\langle E\rangle=O(N^{-1/2})\) and the relative variance is
+\(O(N^{-1})\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+\operatorname{Var}(E)=\langle(\Delta E)^2\rangle=k_BT^2C_V,\qquad
+\frac{\sigma_E}{\langle E\rangle}=O(N^{-1/2}),\quad
+\frac{\operatorname{Var}(E)}{\langle E\rangle^2}=O(N^{-1}).}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Exact differentiation of a three-level partition function verifies
+\(\operatorname{Var}(E)=-\partial_\beta U\); both sides have units of energy
+squared.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} partition-function calculus and an exact symbolic
+three-level check.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P85>
+
+%<MPR:BEGIN id=P91>
+\begin{mprsolution}{P91}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(a>0\) is the invariant proper acceleration, \(c\) is light speed, and
+\(\tau=0\) at \(t=x=0\).
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Constant proper acceleration makes the rapidity
+\(\eta=a\tau/c\).  Thus \(\dd t/\dd\tau=\cosh\eta\) and
+\(\dd x/\dd\tau=c\sinh\eta\).
+\item Integrating the initial data gives
+\[
+t(\tau)=\frac ca\sinh(a\tau/c),\qquad
+x(\tau)=\frac{c^2}{a}[\cosh(a\tau/c)-1],
+\]
+and their derivative ratio is \(v=c\tanh(a\tau/c)\).
+\item Eliminating \(\tau\) with \(\cosh^2-\sinh^2=1\) gives
+\((x+c^2/a)^2-c^2t^2=(c^2/a)^2\).
+\item For \(a\tau/c\ll1\), \(t\sim\tau\), \(x\sim a\tau^2/2\), and
+\(v\sim a\tau\), hence \(x\sim at^2/2\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\begin{gathered}
+t(\tau)=\dfrac ca\sinh(a\tau/c),\quad
+x(\tau)=\dfrac{c^2}{a}[\cosh(a\tau/c)-1],\\
+v(\tau)=c\tanh(a\tau/c),\qquad
+(x+c^2/a)^2-c^2t^2=(c^2/a)^2.
+\end{gathered}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item Symbolic derivative ratios, the hyperbola identity, and all three
+small-\(\tau\) limits hold exactly.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} rapidity derivation and exact SymPy identity/limit checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P91>
+
+%<MPR:BEGIN id=P97>
+\begin{mprsolution}{P97}
+\subsection*{Assumptions and conventions}
+%<MPR:ASSUMPTIONS>
+\(F\) denotes drag magnitude; \(R,U,\rho,\mu,c>0\).  Numerical constants may
+be absorbed into the dimensionless function.
+%<MPR:ASSUMPTIONS_END>
+\subsection*{Auditable derivation or proof}
+%<MPR:DERIVATION>
+\begin{enumerate}[label=\textbf{Step \arabic*:},leftmargin=*]
+\item Six variables built from \(M,L,T\) with dimensional rank three yield
+three independent Buckingham groups.  Choosing \(\rho,U,R\) as repeating
+variables gives
+\[
+\Pi_F=\frac{F}{\rho U^2R^2},\qquad
+\mathrm{Re}=\frac{\rho UR}{\mu},\qquad
+\mathrm{Ma}=\frac{U}{c}.
+\]
+Thus \(\Pi_F=\Phi(\mathrm{Re},\mathrm{Ma})\).
+\item At \(\mathrm{Re}\ll1\), incompressible creeping flow gives
+\(F=6\pi\mu RU\), equivalently \(\Pi_F=6\pi/\mathrm{Re}\).
+\item At \(\mathrm{Re}\gg1\) and \(\mathrm{Ma}\ll1\), the drag coefficient is
+expected to be \(O(1)\) (away from transition crises), hence
+\(F\sim\rho U^2R^2\).
+\end{enumerate}
+%<MPR:DERIVATION_END>
+\subsection*{Final answer}
+%<MPR:FINAL>
+\[
+\boxed{\displaystyle
+\frac{F}{\rho U^2R^2}
+=\Phi\!\left(\mathrm{Re},\mathrm{Ma}\right),\quad
+\mathrm{Re}=\frac{\rho UR}{\mu},\quad \mathrm{Ma}=\frac Uc;\qquad
+F\sim\begin{cases}6\pi\mu RU,&\mathrm{Re}\ll1,\\
+\rho U^2R^2,&\mathrm{Re}\gg1,\ \mathrm{Ma}\ll1.\end{cases}}
+\]
+%<MPR:FINAL_END>
+\subsection*{Independent checks}
+%<MPR:CHECKS>
+\begin{itemize}[leftmargin=*]
+\item The dimensional matrix has nullity three, and each displayed group has
+zero \(M,L,T\) exponent; both regime scalings have force dimensions.
+\end{itemize}
+%<MPR:CHECKS_END>
+\subsection*{Tools and evidence}
+%<MPR:TOOLS>
+\textbf{Tools used:} Buckingham-\(\Pi\) derivation and exact dimensional
+nullspace checks.
+%<MPR:TOOLS_END>
+\subsection*{Confidence}
+%<MPR:CONFIDENCE>
+\textbf{Confidence:} \(1.00\)
+%<MPR:CONFIDENCE_END>
+\end{mprsolution}
+%<MPR:END id=P97>
+
+\end{document}
