@@ -1375,6 +1375,8 @@ This goal explains or diagnoses something; the failure mode to hunt is a fluent,
 const KIND_LENS_MATH: &str = "\n## Math / quantitative correctness lens\n\n\
 This goal produces mathematical derivations, proofs, or quantitative results. Structural completeness (sections filled, markers present) is NEVER enough — correctness is the only gate. **Default to `refuted: true` if any substantive claim lacks independent tool-backed verification. Sampling a few problems is a FAIL — verification must be exhaustive over the deliverable.**\n\n\
 **Exception to \"Audit, don't author\":** you MUST either (a) audit a tool-backed exhaustive log at `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log`, or (b) cheaply recompute missing checks yourself with shell (SymPy / numerical / residual / dimensional analysis). Head-only agreement with the implementer's prose is NOT evidence.\n\n\
+**Source contract:** recursively inspect every workspace-local requirements/specification/input file named by OBJECTIVE or by another named source. Build an atomic inventory from those sources before judging the artifact. Grouped plan criteria never permit dropping a source subpart, requested notation, structural count, assumption, domain, boundary/initial condition, or validation request.\n\n\
+This lens covers general mathematical and physical research, not only short answer sets. A formulation must state definitions, assumptions, domains, governing relations, conditions, and derivational support. A numerical validation must be reproducible from persistent code/data, state tolerances and convergence controls, report residual/error/conservation checks, and test relevant regimes or sensitivity. Plausible numbers or polished prose are not verification.\n\n\
 ### Required log structure (harness-enforced sections)\n\
 `{IMPLEMENTER_SCRATCH}/adversarial-math-verify.log` MUST contain ALL of:\n\
 `## equality-checks` · `## dimensional-checks` · `## edge-cases` · `## count-consistency` · `## tool-transcript`\n\
@@ -1386,6 +1388,7 @@ Missing any section, empty log, or prose-only content without tool evidence → 
 4. **Count / consistency lint** — when the text asserts counts (\"n=5 variables\", \"k cases\"), verify by counting listed items; flag mismatches.\n\
 5. **Independent recompute** — re-derive boxed/primary results from first principles; residual-substitute into the original equation when applicable.\n\
 6. **Domain / threshold / admissibility** — test -/0/+, below/at/above critical values; strict vs non-strict; regularity/normalization/BC/IC as applicable.\n\n\
+7. **Formulation / numerical validation** — trace definitions and assumptions into every equation; independently run persistent numerical code, verify units and tolerances, and check residuals, convergence, conservation, limiting cases, and sensitivity appropriate to the claim.\n\n\
 ### Refute hard on\n\
 - Spot-check-only logs (\"verified 5 of N\") when N>5 claims exist.\n\
 - Claimed identities never numerically evaluated.\n\
@@ -1468,7 +1471,7 @@ pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
 
 /// Workspace-root, durable receipt required for quantitative deliverables.
 pub(crate) const VERIFICATION_MANIFEST_FILE: &str = "verification_manifest.json";
-const VERIFICATION_MANIFEST_SCHEMA_VERSION: u64 = 1;
+const VERIFICATION_MANIFEST_SCHEMA_VERSION: u64 = 2;
 const VERIFIER_PASS_SENTINEL: &str = "FINAL_VERIFICATION_PASS";
 const MUTATION_REJECTED_SENTINEL: &str = "MUTATION_REJECTED";
 
@@ -1521,6 +1524,14 @@ fn manifest_sha256(path: &Path) -> Result<String, String> {
         hasher.update(&buf[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn manifest_sha256_text(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn manifest_path(
@@ -1624,6 +1635,7 @@ fn validate_verification_manifest(
     workspace_root: &Path,
     receipt_path: &Path,
     receipt: &serde_json::Value,
+    objective: &str,
 ) -> Result<(), String> {
     let schema = manifest_json_u64(receipt, "/schema_version")?;
     if schema != VERIFICATION_MANIFEST_SCHEMA_VERSION {
@@ -1633,13 +1645,74 @@ fn validate_verification_manifest(
     }
     let receipt_mtime = manifest_mtime(receipt_path, VERIFICATION_MANIFEST_FILE)?;
 
-    let source_raw = manifest_json_str(receipt, "/requirements/source_path")?;
-    let source = manifest_path(workspace_root, source_raw, "requirements source", false)?;
-    verify_manifest_hash(
-        "requirements source",
-        &source,
-        manifest_json_str(receipt, "/requirements/source_sha256")?,
-    )?;
+    let objective_hash = manifest_json_str(receipt, "/requirements/objective_sha256")?;
+    if objective_hash.len() != 64
+        || objective_hash != objective_hash.to_ascii_lowercase()
+        || !objective_hash.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("/requirements/objective_sha256 is not a lowercase SHA-256".to_string());
+    }
+    let actual_objective_hash = manifest_sha256_text(objective);
+    if objective_hash != actual_objective_hash {
+        return Err(format!(
+            "/requirements/objective_sha256 mismatch: declared {objective_hash}, actual {actual_objective_hash}"
+        ));
+    }
+
+    let sources = receipt
+        .pointer("/requirements/sources")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "/requirements/sources must be an array".to_string())?;
+    let mut declared_sources = std::collections::BTreeMap::new();
+    let mut canonical_sources = std::collections::BTreeSet::new();
+    for (index, item) in sources.iter().enumerate() {
+        let raw = item
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("/requirements/sources/{index}/path must be non-empty"))?;
+        if raw == "OBJECTIVE" {
+            return Err(
+                "/requirements/sources paths cannot use reserved name OBJECTIVE".to_string(),
+            );
+        }
+        let source = manifest_path(
+            workspace_root,
+            raw,
+            &format!("requirements source {index}"),
+            false,
+        )?;
+        let expected_hash = item
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("/requirements/sources/{index}/sha256 must be non-empty"))?;
+        verify_manifest_hash(&format!("requirements source {index}"), &source, expected_hash)?;
+        if declared_sources
+            .insert(raw.to_string(), source.clone())
+            .is_some()
+            || !canonical_sources.insert(source)
+        {
+            return Err(format!("duplicate requirements source {raw:?}"));
+        }
+    }
+
+    let artifact_raw = manifest_json_str(receipt, "/artifact/path")?;
+    let artifact = manifest_path(workspace_root, artifact_raw, "final artifact", false)?;
+    let artifact_hash = manifest_json_str(receipt, "/artifact/sha256")?;
+    verify_manifest_hash("final artifact", &artifact, artifact_hash)?;
+    let artifact_name = artifact
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "final artifact filename is not valid UTF-8".to_string())?;
+    let artifact_mtime = manifest_mtime(&artifact, "final artifact")?;
+    if artifact_mtime > receipt_mtime {
+        return Err(format!(
+            "final artifact {} is newer than {VERIFICATION_MANIFEST_FILE}; rerun verification and write the manifest last",
+            artifact.display()
+        ));
+    }
+
     let total = manifest_json_u64(receipt, "/requirements/total")?;
     let verified = manifest_json_u64(receipt, "/requirements/verified")?;
     if total == 0 || verified != total {
@@ -1658,6 +1731,7 @@ fn validate_verification_manifest(
         ));
     }
     let mut ids = std::collections::BTreeSet::new();
+    let mut covered_sources = std::collections::BTreeSet::new();
     for (index, item) in coverage.iter().enumerate() {
         let field = |name: &str| {
             item.get(name)
@@ -1666,24 +1740,35 @@ fn validate_verification_manifest(
                 .ok_or_else(|| format!("/requirements/coverage/{index}/{name} must be non-empty"))
         };
         let id = field("id")?;
+        let source_path = field("source_path")?;
         field("source_locator")?;
-        field("artifact_locator")?;
+        field("requirement")?;
+        let artifact_locator = field("artifact_locator")?;
         field("verifier_check")?;
         if !ids.insert(id) {
             return Err(format!("duplicate requirements coverage id {id:?}"));
         }
+        if source_path != "OBJECTIVE" && !declared_sources.contains_key(source_path) {
+            return Err(format!(
+                "/requirements/coverage/{index}/source_path {source_path:?} is not OBJECTIVE or a declared source"
+            ));
+        }
+        if !artifact_locator.contains(artifact_name) {
+            return Err(format!(
+                "/requirements/coverage/{index}/artifact_locator must name canonical artifact {artifact_name:?}"
+            ));
+        }
+        covered_sources.insert(source_path.to_string());
     }
-
-    let artifact_raw = manifest_json_str(receipt, "/artifact/path")?;
-    let artifact = manifest_path(workspace_root, artifact_raw, "final artifact", false)?;
-    let artifact_hash = manifest_json_str(receipt, "/artifact/sha256")?;
-    verify_manifest_hash("final artifact", &artifact, artifact_hash)?;
-    let artifact_mtime = manifest_mtime(&artifact, "final artifact")?;
-    if artifact_mtime > receipt_mtime {
-        return Err(format!(
-            "final artifact {} is newer than {VERIFICATION_MANIFEST_FILE}; rerun verification and write the manifest last",
-            artifact.display()
-        ));
+    if !covered_sources.contains("OBJECTIVE") {
+        return Err("/requirements/coverage must include OBJECTIVE".to_string());
+    }
+    for raw in declared_sources.keys() {
+        if !covered_sources.contains(raw) {
+            return Err(format!(
+                "/requirements/coverage has no atomic entry for declared source {raw:?}"
+            ));
+        }
     }
 
     let verifier_raw = manifest_json_str(receipt, "/verifier/path")?;
@@ -1707,6 +1792,13 @@ fn validate_verification_manifest(
             "/verifier/command must name both the persistent verifier and final artifact"
                 .to_string(),
         );
+    }
+    for (raw, source) in &declared_sources {
+        if !command_mentions(verifier_command, source) && !verifier_command.contains(raw) {
+            return Err(format!(
+                "/verifier/command must name declared requirements source {raw:?}"
+            ));
+        }
     }
     let verifier_output = manifest_path(
         workspace_root,
@@ -1910,7 +2002,10 @@ fn validate_verification_manifest(
 }
 
 /// Validate the persistent receipt against current workspace bytes and mtimes.
-pub(crate) fn verification_manifest_gate(workspace_root: &Path) -> VerificationManifestGate {
+pub(crate) fn verification_manifest_gate(
+    workspace_root: &Path,
+    objective: &str,
+) -> VerificationManifestGate {
     let receipt_path = workspace_root.join(VERIFICATION_MANIFEST_FILE);
     if !receipt_path.is_file() {
         return VerificationManifestGate::Missing;
@@ -1944,7 +2039,7 @@ pub(crate) fn verification_manifest_gate(workspace_root: &Path) -> VerificationM
             };
         }
     };
-    match validate_verification_manifest(&workspace_root, &receipt_path, &receipt) {
+    match validate_verification_manifest(&workspace_root, &receipt_path, &receipt, objective) {
         Ok(()) => VerificationManifestGate::Ok,
         Err(reason) => VerificationManifestGate::Invalid { reason },
     }
@@ -1957,8 +2052,9 @@ mod verification_manifest_contract_tests {
     #[test]
     fn receipt_binds_final_tex_mutation_and_warning_free_pages() {
         let dir = tempfile::tempdir().unwrap();
+        let objective = "Complete every requirement in requirements.txt.";
         assert_eq!(
-            verification_manifest_gate(dir.path()),
+            verification_manifest_gate(dir.path(), objective),
             VerificationManifestGate::Missing
         );
         let write = |name: &str, body: &[u8]| {
@@ -1972,8 +2068,11 @@ mod verification_manifest_contract_tests {
         let artifact_hash = manifest_sha256(&artifact).unwrap();
         write(
             "verify.out",
-            format!("artifact_sha256={artifact_hash}\nCHECK R1: PASS\n{VERIFIER_PASS_SENTINEL}\n")
-                .as_bytes(),
+            format!(
+                "artifact_sha256={artifact_hash}\nCHECK OBJECTIVE: PASS\n\
+                 CHECK R1: PASS\n{VERIFIER_PASS_SENTINEL}\n"
+            )
+            .as_bytes(),
         );
         write(
             "mutation.out",
@@ -1993,24 +2092,39 @@ mod verification_manifest_contract_tests {
             b"PAGE 1: inspected\nPAGE 2: inspected\n",
         );
         let receipt = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "requirements": {
-                "source_path": "requirements.txt",
-                "source_sha256": manifest_sha256(&requirements).unwrap(),
-                "total": 1,
-                "verified": 1,
-                "coverage": [{
-                    "id": "R1",
-                    "source_locator": "requirements.txt:1",
-                    "artifact_locator": "answer.tex:1",
-                    "verifier_check": "boxed result"
-                }]
+                "objective_sha256": manifest_sha256_text(objective),
+                "sources": [{
+                    "path": "requirements.txt",
+                    "sha256": manifest_sha256(&requirements).unwrap()
+                }],
+                "total": 2,
+                "verified": 2,
+                "coverage": [
+                    {
+                        "id": "OBJECTIVE",
+                        "source_path": "OBJECTIVE",
+                        "source_locator": "Complete every requirement",
+                        "requirement": "complete the named requirements source",
+                        "artifact_locator": "answer.tex:1",
+                        "verifier_check": "artifact is the completed answer"
+                    },
+                    {
+                        "id": "R1",
+                        "source_path": "requirements.txt",
+                        "source_locator": "requirements.txt:1",
+                        "requirement": "provide the boxed result",
+                        "artifact_locator": "answer.tex:1",
+                        "verifier_check": "independently check boxed result"
+                    }
+                ]
             },
             "artifact": {"path": "answer.tex", "sha256": artifact_hash},
             "verifier": {
                 "path": "verify.py",
                 "sha256": manifest_sha256(&verifier).unwrap(),
-                "command": "python3 verify.py answer.tex",
+                "command": "python3 verify.py requirements.txt answer.tex",
                 "exit_code": 0,
                 "output_path": "verify.out",
                 "artifact_sha256": artifact_hash
@@ -2038,7 +2152,7 @@ mod verification_manifest_contract_tests {
         )
         .unwrap();
         assert_eq!(
-            verification_manifest_gate(dir.path()),
+            verification_manifest_gate(dir.path(), objective),
             VerificationManifestGate::Ok
         );
 
@@ -2047,7 +2161,7 @@ mod verification_manifest_contract_tests {
             b"Overfull \\hbox\nOutput written on answer.pdf (2 pages, 123 bytes).\n",
         )
         .unwrap();
-        let gate = verification_manifest_gate(dir.path());
+        let gate = verification_manifest_gate(dir.path(), objective);
         assert!(
             matches!(
                 gate,
@@ -2068,7 +2182,7 @@ mod verification_manifest_contract_tests {
         )
         .unwrap();
         std::fs::write(&artifact, b"\\boxed{3}\n").unwrap();
-        let gate = verification_manifest_gate(dir.path());
+        let gate = verification_manifest_gate(dir.path(), objective);
         assert!(
             matches!(
                 gate,
@@ -2095,12 +2209,24 @@ pub(crate) fn objective_suggests_math(objective: &str) -> bool {
         "sympy",
         "\\boxed",
         "boxed answer",
+        "boxed final",
         "solve the equation",
         "differential equation",
         "partial differential",
         "eigenvalue",
         "math completion",
         "mathematical derivation",
+        "mathematical formulation",
+        "quantitative analysis",
+        "quantitative research",
+        "numerical validation",
+        "numerically validate",
+        "scientific computation",
+        "formulate a model",
+        "governing equation",
+        "boundary condition",
+        "initial value problem",
+        "dimensional analysis",
         "adversarial math",
         "compute the integral",
         "evaluate the integral",
@@ -2108,6 +2234,150 @@ pub(crate) fn objective_suggests_math(objective: &str) -> bool {
         "independent recomputation",
     ];
     STRONG.iter().any(|s| o.contains(s))
+}
+
+fn objective_suggests_code_change(objective: &str) -> bool {
+    let o = objective.to_ascii_lowercase();
+    const STRONG: &[&str] = &[
+        "implement ",
+        "fix the bug",
+        "fix a bug",
+        "refactor ",
+        "modify the code",
+        "change the code",
+        "update the code",
+        "source code",
+        "add a feature",
+        "add an endpoint",
+        "rust crate",
+        "cli command",
+    ];
+    STRONG.iter().any(|signal| o.contains(signal))
+}
+
+fn named_local_source_candidates(text: &str) -> Vec<String> {
+    const EXTENSIONS: &[&str] = &[
+        "txt", "md", "rst", "tex", "json", "yaml", "yml", "toml", "csv", "tsv",
+    ];
+
+    let mut candidates = Vec::new();
+    let mut token = String::new();
+    let mut finish_token = |token: &mut String| {
+        let candidate = token
+            .trim_end_matches(|ch: char| matches!(ch, '.' | ':' | '!' | '?'))
+            .to_string();
+        token.clear();
+        let extension = Path::new(&candidate)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase);
+        if extension
+            .as_deref()
+            .is_some_and(|ext| EXTENSIONS.contains(&ext))
+        {
+            candidates.push(candidate);
+        }
+    };
+
+    for ch in text.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+            token.push(ch);
+        } else if !token.is_empty() {
+            finish_token(&mut token);
+        }
+    }
+    candidates
+}
+
+fn resolve_named_source(
+    workspace_root: &Path,
+    base: &Path,
+    raw: &str,
+) -> Option<PathBuf> {
+    let raw_path = Path::new(raw);
+    let mut attempts = Vec::with_capacity(2);
+    if raw_path.is_absolute() {
+        attempts.push(raw_path.to_path_buf());
+    } else {
+        attempts.push(base.join(raw_path));
+        if base != workspace_root {
+            attempts.push(workspace_root.join(raw_path));
+        }
+    }
+    for attempt in attempts {
+        let Ok(path) = std::fs::canonicalize(attempt) else {
+            continue;
+        };
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if path.starts_with(workspace_root) && metadata.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Detect a quantitative source contract even when the literal objective is
+/// only a wrapper such as "start from SPEC.txt". Traversal is workspace-local,
+/// text-only, bounded, and follows named files rather than scanning the tree.
+pub(crate) fn objective_or_named_sources_suggests_math(
+    objective: &str,
+    workspace_root: &Path,
+) -> bool {
+    const MAX_DEPTH: usize = 3;
+    const MAX_FILES: usize = 16;
+    const MAX_FILE_BYTES: u64 = 512 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 2 * 1024 * 1024;
+
+    if objective_suggests_math(objective) {
+        return true;
+    }
+    let Ok(workspace_root) = std::fs::canonicalize(workspace_root) else {
+        return false;
+    };
+    let mut queue = std::collections::VecDeque::new();
+    for raw in named_local_source_candidates(objective) {
+        queue.push_back((workspace_root.clone(), raw, 0_usize));
+    }
+    let mut visited = std::collections::BTreeSet::new();
+    let mut inspected = 0_usize;
+    let mut total_bytes = 0_u64;
+    while let Some((base, raw, depth)) = queue.pop_front() {
+        if inspected >= MAX_FILES {
+            break;
+        }
+        let Some(path) = resolve_named_source(&workspace_root, &base, &raw) else {
+            continue;
+        };
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.len() > MAX_FILE_BYTES
+            || total_bytes.saturating_add(metadata.len()) > MAX_TOTAL_BYTES
+        {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        inspected += 1;
+        total_bytes += metadata.len();
+        if objective_suggests_math(&body) {
+            return true;
+        }
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        let base = path.parent().unwrap_or(&workspace_root).to_path_buf();
+        for child in named_local_source_candidates(&body) {
+            queue.push_back((base.clone(), child, depth + 1));
+        }
+    }
+    false
 }
 
 /// Whether this plan must include the adversarial-math gating contract
@@ -2119,7 +2389,7 @@ pub(crate) fn plan_requires_math_adversarial(objective: &str, plan: &str) -> boo
     match parse_goal_kind(plan) {
         Some(GoalKind::Math) => true,
         Some(GoalKind::CodeChange) => false,
-        _ => objective_suggests_math(objective),
+        _ => objective_suggests_math(objective) || objective_suggests_math(plan),
     }
 }
 
@@ -2894,22 +3164,28 @@ pub(crate) async fn run_verification_stage(
         .as_deref()
         .map(evidence::sanitize_final_response);
 
-    // Select the shared review lens from the plan's `## Goal kind`. Best-effort:
-    // an unreadable or untagged plan yields the generic verifier (empty lens).
-    // Also fall back to Math when the objective is strongly quantitative so
-    // a mis-tagged plan still gets the math lens (plan validation should
-    // have caught this at plan time; this is defence in depth).
-    let goal_kind = match inputs.plan_file {
+    // Select the shared review lens from the plan and retain the body for
+    // source-aware defence in depth. A wrapper objective can name a local
+    // requirements file which names the actual quantitative source.
+    let plan_body = match inputs.plan_file {
         Some(path) => tokio::fs::read_to_string(path)
             .await
-            .ok()
-            .and_then(|body| parse_goal_kind(&body)),
+            .ok(),
         None => None,
     };
-    let goal_kind = match goal_kind {
-        Some(k) => Some(k),
-        None if objective_suggests_math(inputs.objective) => Some(GoalKind::Math),
-        None => None,
+    let planned_kind = plan_body.as_deref().and_then(parse_goal_kind);
+    let direct_math = objective_suggests_math(inputs.objective);
+    let source_math = objective_or_named_sources_suggests_math(
+        inputs.objective,
+        inputs.workspace_root,
+    );
+    let goal_kind = if matches!(planned_kind, Some(GoalKind::Math))
+        || direct_math
+        || (source_math && !objective_suggests_code_change(inputs.objective))
+    {
+        Some(GoalKind::Math)
+    } else {
+        planned_kind
     };
     let kind_lens = kind_lens(goal_kind);
 
@@ -2988,7 +3264,7 @@ pub(crate) async fn run_verification_stage(
     }
 
     if matches!(goal_kind, Some(GoalKind::Math)) {
-        match verification_manifest_gate(inputs.workspace_root) {
+        match verification_manifest_gate(inputs.workspace_root, inputs.objective) {
             VerificationManifestGate::Ok => {}
             gate => {
                 let receipt = inputs.workspace_root.join(VERIFICATION_MANIFEST_FILE);
@@ -5246,6 +5522,36 @@ mod tests {
              Capture transcript to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
         );
         assert!(validate_math_plan_contract(obj, &good).is_ok());
+    }
+
+    #[test]
+    fn quantitative_source_detection_follows_named_text_chain_without_tree_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("AGENT_INSTRUCTIONS.txt"),
+            b"Read research_questions.tex and complete every requested subpart.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("research_questions.tex"),
+            b"Derive the governing equation, state boundary conditions, and perform numerical validation.\n",
+        )
+        .unwrap();
+        assert!(objective_or_named_sources_suggests_math(
+            "Start from AGENT_INSTRUCTIONS.txt and complete all.",
+            dir.path(),
+        ));
+
+        std::fs::write(
+            dir.path().join("README.md"),
+            b"See notes.txt for project release history.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"Release notes only.\n").unwrap();
+        assert!(!objective_or_named_sources_suggests_math(
+            "Summarize README.md.",
+            dir.path(),
+        ));
     }
 
     #[test]

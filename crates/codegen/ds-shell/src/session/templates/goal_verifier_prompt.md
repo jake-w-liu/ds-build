@@ -77,9 +77,12 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
 ## Decision rules
 
 1. OBJECTIVE and any artifacts it explicitly names are the immutable contract.
-   Before evaluating the plan, enumerate every explicit OBJECTIVE requirement and inspect every named
-   URL, file, ticket, document, or image; if a required named artifact cannot be
-   inspected, refute with `blocking: "unverifiable"`.
+   Before evaluating the plan, enumerate every explicit OBJECTIVE requirement and
+   inspect every named URL, file, ticket, document, or image. Recursively follow
+   workspace-local requirements/specification/input files named by those sources;
+   do not stop at a wrapper instruction file. Build an atomic inventory of every
+   requested subpart and constraint before consulting the plan. If a required
+   named artifact cannot be inspected, refute with `blocking: "unverifiable"`.
    PLAN_FILE is a derived checklist: its numbered criteria may clarify but never narrow or override
    OBJECTIVE or named artifacts; its `## Verification plan` is the procedure —
    follow that observable bar, don't invent your own.
@@ -152,15 +155,23 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    `"unverifiable"` (evidence infeasible in THIS environment). The latter two
    signal the goal needs a user decision, not a retry.
 9. For math/quantitative work, `verification_manifest.json` is a receipt, not
-   proof by assertion. Read its requirements source, final artifact, verifier,
-   success/mutation transcripts, and render evidence. Confirm hashes and
-   locators describe CURRENT files; confirm every requested subpart has exact
-   `CHECK <id>: PASS`; inspect whether the verifier actually reads the source
-   and artifact and fails for a wrong answer. A source-disconnected checker,
-   fabricated/stale transcript, missing requested notation, or mutation that
-   does not exercise the same checker is grounds to refute. For TeX/PDF, inspect
-   rendered pages and native logs; any warning, clipping, overflow, or missing
-   page is grounds to refute.
+   proof by assertion. Independently reconstruct the atomic source inventory,
+   then read the exact objective hash, every declared source/hash, final artifact,
+   verifier, success/mutation transcripts, and render evidence. Confirm every
+   source subpart has a precise source-to-artifact locator and exact
+   `CHECK <id>: PASS`; generic process checks do not count. Inspect whether the
+   same verifier actually reads every source and the canonical artifact, checks
+   mathematical meaning rather than loose token presence, enforces requested
+   notation/form and global structural counts, and rejects value/sign, deleted
+   subpart, threshold/unit, and structural mutations as applicable. For research
+   formulations, audit definitions, assumptions, domains, governing relations,
+   conditions, and derivational links. For numerical work, run/audit persistent
+   reproducible code and require tolerances, convergence, residual/error or
+   conservation checks, plus regime/sensitivity evidence. A source-disconnected
+   checker, fabricated/stale transcript, missing requested notation, or mutation
+   that does not exercise the same checker is grounds to refute. For TeX/PDF,
+   inspect all rendered pages and native logs; any warning, clipping, overflow,
+   or missing page is grounds to refute.
 {KIND_LENS}
 ## Output contract — STRICT
 

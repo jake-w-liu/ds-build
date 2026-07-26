@@ -41,19 +41,26 @@ PERSISTENT MATH RECEIPT: scratch proof alone cannot complete a quantitative
 goal. Write `verification_manifest.json` at the WORKSPACE ROOT, LAST, after the
 final artifact and all evidence. Keep the verifier source, success transcript,
 mutation transcript, and render evidence inside the workspace, never only in
-scratch/temp. Schema 1 is:
+scratch/temp. Recursively inspect every workspace-local requirements,
+specification, or input file named by the objective or another named source.
+Schema 2 is:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "requirements": {
-    "source_path": "immutable requirements/input file",
-    "source_sha256": "64 lowercase hex",
+    "objective_sha256": "SHA-256 of the exact objective text",
+    "sources": [{
+      "path": "workspace-local immutable requirements/input file",
+      "sha256": "64 lowercase hex"
+    }],
     "total": 1,
     "verified": 1,
     "coverage": [{
       "id": "stable requirement id",
+      "source_path": "OBJECTIVE or exact declared source path",
       "source_locator": "exact source line/phrase",
+      "requirement": "one atomic requested subpart or constraint",
       "artifact_locator": "final artifact line/section",
       "verifier_check": "specific independent check"
     }]
@@ -62,7 +69,7 @@ scratch/temp. Schema 1 is:
   "verifier": {
     "path": "persistent verifier source",
     "sha256": "64 lowercase hex",
-    "command": "command naming verifier and final artifact",
+    "command": "command naming verifier, every source, and final artifact",
     "exit_code": 0,
     "output_path": "fresh persistent transcript",
     "artifact_sha256": "same hash as artifact.sha256"
@@ -76,12 +83,20 @@ scratch/temp. Schema 1 is:
 }
 ```
 
-Coverage must contain exactly `total` unique entries and `verified == total`.
+Coverage must contain exactly `total` unique atomic entries and
+`verified == total`; it must cover `OBJECTIVE` and every declared source.
+Every artifact locator must name the canonical artifact. Inventory every
+requested subpart, assumption, definition, domain, boundary/initial condition,
+notation/form constraint, structural count, and validation request. Grouped
+plan criteria do not permit sampled or generic process-only coverage.
 The success transcript must cite the final artifact hash, contain exact
 `CHECK <id>: PASS` for EVERY id, then `FINAL_VERIFICATION_PASS`. Deliberately
-corrupt a substantive answer in a copy; the SAME verifier must exit nonzero
-with exact `CHECK <id>: FAIL` and `MUTATION_REJECTED`. An unconditional-pass
-checker fails.
+run a mutation portfolio against copies: corrupt a value/sign, delete a
+requested subpart, alter a threshold/unit when applicable, and violate a
+requested structural constraint. The SAME source-aware verifier must exit
+nonzero with exact `CHECK <id>: FAIL` and `MUTATION_REJECTED`. An
+unconditional-pass, source-disconnected, token-presence-only, or self-authored
+expectation checker fails.
 
 For canonical `.tex`/`.pdf`, replace `render: null` with `pdf_path`,
 `pdf_sha256`, `log_path`, `command`, `exit_code`, `page_count`,
@@ -95,7 +110,16 @@ Preserve the source's exact symbols and requested form: aliases may supplement
 but never replace it. Explicitly distinguish signed value from magnitude, row
 from column, strict threshold from equality, and standard deviation from
 variance. Give every requested subpart its own source/artifact locator and PASS
-marker.
+marker. Enforce requested global counts per item (for example exactly one final
+result) by counting, not by checking mere presence.
+
+GENERAL RESEARCH STANDARD: a formulation must state definitions, assumptions,
+domains, governing relations, boundary/initial conditions, and derivational
+support appropriate to the claim. Numerical validation must be reproducible
+from persistent code/data, declare tolerances and convergence controls, report
+residual/error/conservation checks, and exercise relevant regimes and
+sensitivity. Do not substitute plausible numbers or prose for executable
+validation.
 
 TEST PROACTIVELY: run targeted tests after every change, not just at the end.
 Before calling `{GOAL_TOOL}(completed: true)`, run the test suite relevant to

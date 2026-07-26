@@ -12,8 +12,12 @@ concrete, and unambiguous.
   arrives as a forked conversation prefix (`<background_context>`), not here.
 
 Inspect files named in OBJECTIVE/CONTEXT with your
-`{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}` tools to clarify scope. Do NOT modify
-the workspace; your only write is `{PLAN_FILE}`.
+`{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}` tools to clarify scope, then follow
+workspace-local text files named by those sources until you have read the
+requirements/specification/input closure. Do not stop at a wrapper instruction
+file. Choose the goal kind and build the contract from the source contents, not
+only from the literal OBJECTIVE. Do NOT modify the workspace; your only write is
+`{PLAN_FILE}`.
 
 When the OBJECTIVE names something with an established canon or spec — a named
 game or "classic X", a named algorithm/protocol/format, a "clone of <a specific
@@ -49,10 +53,12 @@ from best knowledge.
 - `code-change` — modify the workspace; the diff is the evidence.
 - `analysis` — understand existing code; deliverable is prose, diff may be empty.
 - `research` — gather external info; deliverable is a summary, diff may be empty.
-- `math` — mathematical derivation, proof, closed form, or quantitative result;
-  correctness (not structure) is the gate. Use this whenever the objective asks
-  to derive, prove, solve, integrate, or produce a boxed/numerical answer — even
-  if the writeup lives in a Markdown file (do NOT pick `analysis` for that).
+- `math` — mathematical/physical formulation, derivation, proof, closed form,
+  scientific computation, or quantitative/numerical validation; correctness
+  (not structure) is the gate. Use this whenever the objective or its named
+  sources ask to formulate, derive, prove, solve, integrate, simulate, validate,
+  or produce a boxed/numerical result — even if the writeup lives in a Markdown
+  file (do NOT pick `analysis` for that).
 
 ## Specify OUTCOMES, not architecture
 
@@ -188,6 +194,13 @@ criterion — it is a prerequisite. Correctness is the criterion. If the objecti
 substantive output (a derivation, a result, a proof), the acceptance criteria MUST require
 proving that output is correct, never merely that it exists.
 
+For a quantitative task driven by named sources, first create an atomic
+source-requirement inventory: every requested subpart, notation/form constraint,
+assumption, domain, boundary/initial condition, structural count, and numerical
+validation request. The 3-5 acceptance criteria may group that inventory, but the
+persistent verification receipt MUST retain one source-to-artifact entry per
+atomic requirement. Grouping is never permission to sample or omit.
+
 **Verification plan** — the shared procedure the implementer and the verifiers
 both follow, so all judge by the SAME observable bar; cover every criterion.
 Tag each step `gating` (decides pass/fail) or `evidence` (best-effort
@@ -221,12 +234,22 @@ under each — **not a sample of 5 problems**:
 ## tool-transcript
 ```
 
+- **source contract** — bind the exact OBJECTIVE and every recursively named
+  workspace-local requirements/specification/input source by SHA-256. The same
+  verifier must read those sources and the canonical final artifact, then emit
+  one PASS marker for every atomic source requirement.
 - **equality-checks** — numerically or symbolically verify EVERY displayed
   equality in the deliverable (plug random admissible values / SymPy).
 - **dimensional-checks** — recompute dimensions for EVERY units claim.
 - **edge-cases** — evaluate 0/±/critical/limit regimes for EVERY formula.
 - **count-consistency** — verify stated counts (\"n=5 variables\") against lists.
 - **tool-transcript** — commands run and outputs (no head-only claims).
+
+For research-grade formulations, verify definitions, assumptions, domains,
+governing equations, conditions, derivation links, and requested notation. For
+numerical work, require persistent reproducible code/data, declared tolerances
+and convergence controls, residual/error or conservation checks, and relevant
+regime/sensitivity tests. Plausible output values are not a correctness check.
 
 A plan whose only correctness check is a single spot-check, or that omits that
 log path / these sections, is an INVALID plan. Structural well-formedness
