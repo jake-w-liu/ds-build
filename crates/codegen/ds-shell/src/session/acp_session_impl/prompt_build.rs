@@ -665,6 +665,40 @@ impl SessionActor {
         original_user_message: String,
         images: &[agent_client_protocol::ImageContent],
     ) -> Result<String, acp::Error> {
+        self.transcribe_images(
+            original_user_message,
+            images,
+            crate::session::image_describe::ImageDescribeSource::UserAttachment,
+            "",
+        )
+        .await
+    }
+
+    /// Convert images returned by a tool into text through the configured
+    /// image-description model. This keeps text-only provider histories valid
+    /// while preserving visual evidence for subsequent research steps.
+    pub(super) async fn transcribe_tool_images(
+        &self,
+        original_tool_message: String,
+        images: &[agent_client_protocol::ImageContent],
+        path_key: &str,
+    ) -> Result<String, acp::Error> {
+        self.transcribe_images(
+            original_tool_message,
+            images,
+            crate::session::image_describe::ImageDescribeSource::ToolResult,
+            path_key,
+        )
+        .await
+    }
+
+    async fn transcribe_images(
+        &self,
+        original_user_message: String,
+        images: &[agent_client_protocol::ImageContent],
+        source: crate::session::image_describe::ImageDescribeSource,
+        path_key: &str,
+    ) -> Result<String, acp::Error> {
         let prior = self.chat_state_handle.get_conversation().await;
         let outline = crate::session::image_describe::build_conversation_outline(&prior);
         let session_dir = crate::session::persistence::session_dir(&crate::session::info::Info {
@@ -722,8 +756,8 @@ impl SessionActor {
                         &p.mime_type,
                         outline.as_deref(),
                         &current_query,
-                        crate::session::image_describe::ImageDescribeSource::UserAttachment,
-                        "",
+                        source,
+                        path_key,
                     )
                     .await
                     .map_err(|e| {

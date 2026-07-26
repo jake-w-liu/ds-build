@@ -43,11 +43,11 @@ final artifact and all evidence. Keep the verifier source, success transcript,
 mutation transcript, and render evidence inside the workspace, never only in
 scratch/temp. Recursively inspect every workspace-local requirements,
 specification, or input file named by the objective or another named source.
-Schema 2 is:
+Schema 3 is:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "requirements": {
     "objective_sha256": "SHA-256 of the exact objective text",
     "sources": [{
@@ -65,7 +65,11 @@ Schema 2 is:
       "verifier_check": "specific independent check"
     }]
   },
-  "artifact": {"path": "canonical final artifact", "sha256": "64 lowercase hex"},
+  "artifact": {
+    "path": "canonical final artifact",
+    "sha256": "64 lowercase hex",
+    "baseline": null
+  },
   "verifier": {
     "path": "persistent verifier source",
     "sha256": "64 lowercase hex",
@@ -83,6 +87,13 @@ Schema 2 is:
 }
 ```
 
+When the objective or a named source asks to fill, edit, update, replace,
+preserve, or retain an existing artifact, copy its exact pre-edit bytes to a
+persistent workspace file BEFORE the first edit and replace `baseline: null`
+with `{"path":"pre-edit copy","sha256":"64 lowercase hex"}`. The harness
+compares ordered machine-readable comment markers in the baseline and final
+artifact; deleted, renamed, collapsed, duplicated, or reordered markers fail.
+
 Coverage must contain exactly `total` unique atomic entries and
 `verified == total`; it must cover `OBJECTIVE` and every declared source.
 Every artifact locator must name the canonical artifact. Inventory every
@@ -97,6 +108,13 @@ requested structural constraint. The SAME source-aware verifier must exit
 nonzero with exact `CHECK <id>: FAIL` and `MUTATION_REJECTED`. An
 unconditional-pass, source-disconnected, token-presence-only, or self-authored
 expectation checker fails.
+
+Search the task workspace and enclosing project for a supplied evaluator,
+validator, checker, test runner, schema, or reference implementation. When one
+exists and is runnable, its fresh passing transcript is authoritative and must
+be preserved; a self-authored verifier may supplement it but may not replace or
+weaken it. Record unavailable supplied evaluators and the exact failed command
+instead of silently substituting an easier oracle.
 
 For canonical `.tex`/`.pdf`, replace `render: null` with `pdf_path`,
 `pdf_sha256`, `log_path`, `command`, `exit_code`, `page_count`,

@@ -50,6 +50,16 @@ from best knowledge.
 
 ## Goal kind — pick exactly one
 
+## Existing artifact baseline
+
+If OBJECTIVE or a recursively named source asks to fill, edit, update, replace,
+preserve, or retain an existing output/template, the FIRST implementation step
+must copy its exact bytes to a persistent workspace baseline before any edit.
+Plan a byte-hash check and an ordered comparison of machine-readable comment
+markers between that baseline and the final artifact. Also plan a bounded search
+for project-supplied evaluators/checkers; a runnable supplied oracle is
+authoritative and cannot be replaced by a self-authored verifier.
+
 - `code-change` — modify the workspace; the diff is the evidence.
 - `analysis` — understand existing code; deliverable is prose, diff may be empty.
 - `research` — gather external info; deliverable is a summary, diff may be empty.

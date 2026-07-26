@@ -83,6 +83,13 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    do not stop at a wrapper instruction file. Build an atomic inventory of every
    requested subpart and constraint before consulting the plan. If a required
    named artifact cannot be inspected, refute with `blocking: "unverifiable"`.
+   For an existing fill/edit/update/replace/preserve template, inspect the
+   persistent pre-edit baseline and compare its machine-readable comment markers
+   with the final artifact in exact order; missing, renamed, collapsed,
+   duplicated, or reordered markers are a decisive refute. Search the workspace
+   and enclosing project for supplied evaluators/checkers. A runnable supplied
+   oracle is authoritative: run it and refute on failure; never accept an easier
+   self-authored verifier as a substitute.
    PLAN_FILE is a derived checklist: its numbered criteria may clarify but never narrow or override
    OBJECTIVE or named artifacts; its `## Verification plan` is the procedure —
    follow that observable bar, don't invent your own.

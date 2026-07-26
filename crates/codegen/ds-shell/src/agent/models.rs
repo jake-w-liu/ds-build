@@ -525,6 +525,27 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
+    /// Whether a model is trusted to accept native image content blocks.
+    ///
+    /// The configured image-description model is the explicit vision-capable
+    /// endpoint. Every other or unknown model is treated conservatively as
+    /// text-only; the session transcribes images through that endpoint instead
+    /// of risking a provider-rejected multimodal history.
+    pub fn model_supports_image_input(&self, model_id: &str) -> bool {
+        let configured = self
+            .inner
+            .cfg
+            .read()
+            .image_description_model
+            .clone()
+            .unwrap_or_else(|| crate::models::default_image_description_model().to_owned());
+        let models = self.inner.models.read();
+        resolve_catalog_key(&models, &acp::ModelId::new(model_id))
+            .and_then(|key| models.get(key.0.as_ref()))
+            .map(|entry| entry.info().model == configured)
+            .unwrap_or_else(|| model_id == configured)
+    }
+
     /// Resolved next-prompt-suggestion model pin from the live config
     /// (`env > [models] prompt_suggestion > remote settings`); tracks config
     /// hot-reloads via [`Self::apply_config`]. Consumed catalog-guarded by

@@ -2115,6 +2115,16 @@ impl SessionActor {
             result.prompt_text
         };
         let mut inline_images: Vec<ContentPart> = Vec::new();
+        let supports_image_input = self.models_manager.model_supports_image_input(
+            self.models_manager.current_model_id().0.as_ref(),
+        );
+        let tool_image_path = tool_parsed_args
+            .get("target_file")
+            .or_else(|| tool_parsed_args.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        let mut images_to_transcribe: Vec<agent_client_protocol::ImageContent> = Vec::new();
         let extraction = if !self.is_cursor_harness()
             && !matches!(
                 result.output,
@@ -2158,13 +2168,20 @@ impl SessionActor {
                     );
                 }
                 InlineAttachVerdict::Attach => {
-                    let url = format!(
-                        "data:{};base64,{}",
-                        image_content.mime_type, image_content.data
-                    );
-                    inline_images.push(ContentPart::Image {
-                        url: std::sync::Arc::<str>::from(url),
-                    });
+                    if supports_image_input {
+                        let url = format!(
+                            "data:{};base64,{}",
+                            image_content.mime_type, image_content.data
+                        );
+                        inline_images.push(ContentPart::Image {
+                            url: std::sync::Arc::<str>::from(url),
+                        });
+                    } else {
+                        images_to_transcribe.push(agent_client_protocol::ImageContent::new(
+                            image_content.data.clone(),
+                            image_content.mime_type.clone(),
+                        ));
+                    }
                     prompt_text = format!("Read image file: {path}");
                 }
             }
@@ -2173,10 +2190,17 @@ impl SessionActor {
             && let ToolsToolOutput::ReadFile(ReadFileOutput::PdfPageImages(ref pdf)) = result.output
         {
             for page in &pdf.pages {
-                let url = format!("data:{};base64,{}", page.mime_type, page.data);
-                inline_images.push(ContentPart::Image {
-                    url: std::sync::Arc::<str>::from(url),
-                });
+                if supports_image_input {
+                    let url = format!("data:{};base64,{}", page.mime_type, page.data);
+                    inline_images.push(ContentPart::Image {
+                        url: std::sync::Arc::<str>::from(url),
+                    });
+                } else {
+                    images_to_transcribe.push(agent_client_protocol::ImageContent::new(
+                        page.data.clone(),
+                        page.mime_type.clone(),
+                    ));
+                }
             }
             let path = tool_parsed_args
                 .get("target_file")
@@ -2188,6 +2212,30 @@ impl SessionActor {
                 pdf.pages.len(),
                 pdf.total_pages,
             );
+        }
+        if !images_to_transcribe.is_empty() {
+            match self
+                .transcribe_tool_images(
+                    prompt_text.clone(),
+                    &images_to_transcribe,
+                    &tool_image_path,
+                )
+                .await
+            {
+                Ok(transcribed) => prompt_text = transcribed,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = % self.session_info.id,
+                        path = %tool_image_path,
+                        ?error,
+                        "tool image transcription failed; retaining provider-safe text result",
+                    );
+                    prompt_text.push_str(&format!(
+                        "\n\n[Visual content from {tool_image_path} could not be transcribed. \
+                         The image was intentionally omitted from this text-only model's history.]"
+                    ));
+                }
+            }
         }
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
@@ -2231,12 +2279,43 @@ impl SessionActor {
                 self.send_ds_notification(DsSessionUpdate::ImageDropped { notes })
                     .await;
             }
-            for norm in norm_result.images {
-                let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
-                let mut image_msg =
-                    ConversationItem::user("[Image extracted from tool result above]");
-                image_msg.add_image(url);
-                deferred_followups.push(image_msg);
+            if supports_image_input {
+                for norm in norm_result.images {
+                    let url = format!("data:{};base64,{}", norm.mime_type, norm.data);
+                    let mut image_msg =
+                        ConversationItem::user("[Image extracted from tool result above]");
+                    image_msg.add_image(url);
+                    deferred_followups.push(image_msg);
+                }
+            } else if !norm_result.images.is_empty() {
+                let images: Vec<agent_client_protocol::ImageContent> = norm_result
+                    .images
+                    .into_iter()
+                    .map(|norm| {
+                        agent_client_protocol::ImageContent::new(norm.data, norm.mime_type)
+                    })
+                    .collect();
+                let message = match self
+                    .transcribe_tool_images(
+                        "[Images extracted from tool result above]".to_owned(),
+                        &images,
+                        "extracted-tool-result",
+                    )
+                    .await
+                {
+                    Ok(transcribed) => transcribed,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = % self.session_info.id,
+                            ?error,
+                            "extracted tool image transcription failed; retaining provider-safe notice",
+                        );
+                        "[Images were extracted from the tool result but could not be transcribed; \
+                         they were intentionally omitted from this text-only model's history.]"
+                            .to_owned()
+                    }
+                };
+                deferred_followups.push(ConversationItem::user(message));
             }
         }
         Ok(deferred_followups)

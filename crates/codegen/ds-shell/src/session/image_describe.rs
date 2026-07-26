@@ -274,6 +274,7 @@ pub fn content_fingerprint(bytes: &[u8]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImageDescribeSource {
     UserAttachment,
+    ToolResult,
 }
 /// Session-scoped cache for auxiliary image outputs: keyed by source, stable
 /// path label, content hash, and prompt fingerprint.

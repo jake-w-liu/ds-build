@@ -1471,7 +1471,7 @@ pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
 
 /// Workspace-root, durable receipt required for quantitative deliverables.
 pub(crate) const VERIFICATION_MANIFEST_FILE: &str = "verification_manifest.json";
-const VERIFICATION_MANIFEST_SCHEMA_VERSION: u64 = 2;
+const VERIFICATION_MANIFEST_SCHEMA_VERSION: u64 = 3;
 const VERIFIER_PASS_SENTINEL: &str = "FINAL_VERIFICATION_PASS";
 const MUTATION_REJECTED_SENTINEL: &str = "MUTATION_REJECTED";
 
@@ -1631,6 +1631,56 @@ fn command_mentions(command: &str, path: &Path) -> bool {
         .is_some_and(|name| command.contains(name))
 }
 
+fn source_requires_artifact_baseline(text: &str, artifact_name: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    let artifact_name = artifact_name.to_ascii_lowercase();
+    text.contains(&artifact_name)
+        && [
+            "fill ",
+            "complete ",
+            "edit ",
+            "update ",
+            "replace ",
+            "preserve ",
+            "retain ",
+        ]
+        .iter()
+        .any(|verb| text.contains(verb))
+}
+
+fn machine_marker_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            (line.starts_with("%<") && line.ends_with('>'))
+                || (line.starts_with("<!--") && line.ends_with("-->"))
+        })
+        .collect()
+}
+
+fn verify_template_markers(baseline: &str, artifact: &str) -> Result<(), String> {
+    let expected = machine_marker_lines(baseline);
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let actual = machine_marker_lines(artifact);
+    if actual == expected {
+        return Ok(());
+    }
+    let first_difference = expected
+        .iter()
+        .zip(&actual)
+        .position(|(left, right)| left != right)
+        .unwrap_or_else(|| expected.len().min(actual.len()));
+    Err(format!(
+        "canonical artifact changed ordered machine-readable template markers at index {} \
+         (baseline {}, artifact {})",
+        first_difference + 1,
+        expected.len(),
+        actual.len()
+    ))
+}
+
 fn validate_verification_manifest(
     workspace_root: &Path,
     receipt_path: &Path,
@@ -1711,6 +1761,52 @@ fn validate_verification_manifest(
             "final artifact {} is newer than {VERIFICATION_MANIFEST_FILE}; rerun verification and write the manifest last",
             artifact.display()
         ));
+    }
+    let baseline_required = source_requires_artifact_baseline(objective, artifact_name)
+        || declared_sources.values().any(|source| {
+            std::fs::read_to_string(source)
+                .ok()
+                .is_some_and(|text| source_requires_artifact_baseline(&text, artifact_name))
+        });
+    let baseline_receipt = receipt
+        .pointer("/artifact/baseline")
+        .filter(|value| !value.is_null());
+    if baseline_required && baseline_receipt.is_none() {
+        return Err(format!(
+            "/artifact/baseline is required because the objective or a declared source asks to \
+             fill/edit/replace/preserve the existing artifact {artifact_name:?}"
+        ));
+    }
+    if let Some(baseline_receipt) = baseline_receipt {
+        let baseline_raw = baseline_receipt
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "/artifact/baseline/path must be non-empty".to_string())?;
+        let baseline = manifest_path(
+            workspace_root,
+            baseline_raw,
+            "pre-edit artifact baseline",
+            false,
+        )?;
+        if baseline == artifact {
+            return Err("/artifact/baseline/path must differ from /artifact/path".to_string());
+        }
+        let baseline_hash = baseline_receipt
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "/artifact/baseline/sha256 must be non-empty".to_string())?;
+        verify_manifest_hash("pre-edit artifact baseline", &baseline, baseline_hash)?;
+        let baseline_mtime = manifest_mtime(&baseline, "pre-edit artifact baseline")?;
+        if baseline_mtime > artifact_mtime {
+            return Err(
+                "pre-edit artifact baseline is newer than the canonical artifact".to_string(),
+            );
+        }
+        let baseline_text = manifest_text(&baseline, "pre-edit artifact baseline")?;
+        let artifact_text = manifest_text(&artifact, "canonical artifact template")?;
+        verify_template_markers(&baseline_text, &artifact_text)?;
     }
 
     let total = manifest_json_u64(receipt, "/requirements/total")?;
@@ -2092,7 +2188,7 @@ mod verification_manifest_contract_tests {
             b"PAGE 1: inspected\nPAGE 2: inspected\n",
         );
         let receipt = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "requirements": {
                 "objective_sha256": manifest_sha256_text(objective),
                 "sources": [{
@@ -2191,6 +2287,15 @@ mod verification_manifest_contract_tests {
             ),
             "artifact mutation must invalidate receipt, got {gate:?}"
         );
+    }
+
+    #[test]
+    fn template_marker_contract_rejects_deleted_or_reordered_markers() {
+        let baseline = "%<FORM:BEGIN id=A>\nbody\n%<FORM:END id=A>\n";
+        assert!(verify_template_markers(baseline, baseline).is_ok());
+        let collapsed = "%<FORM:A>\nbody\n";
+        let error = verify_template_markers(baseline, collapsed).unwrap_err();
+        assert!(error.contains("changed ordered machine-readable template markers"));
     }
 }
 

@@ -787,7 +787,11 @@ impl SessionActor {
         self.drain_between_turn_completions().await;
         let user_message = if user_images.is_empty() {
             user_message
-        } else if self.is_cursor_harness() {
+        } else if self.is_cursor_harness()
+            || !self.models_manager.model_supports_image_input(
+                self.models_manager.current_model_id().0.as_ref(),
+            )
+        {
             self.transcribe_user_images(user_message, &user_images)
                 .await?
         } else {
