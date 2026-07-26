@@ -1391,6 +1391,7 @@ Missing any section, empty log, or prose-only content without tool evidence → 
 - Claimed identities never numerically evaluated.\n\
 - Units claims without dimensional recompute.\n\
 - Tool claims without successful tool transcript in `## tool-transcript`.\n\
+- A log that reports a failed/cancelled/unspawnable `attacker-math` run, or substitutes implementer-authored conclusions for that failed independent verifier. Missing independent provenance is a correctness gap, not permission to self-certify.\n\
 - A plan whose only correctness check is structural (grep/markers) without the exhaustive sections above.\n";
 
 /// The review-lens block for `kind` (empty string for `None` — generic verifier).
@@ -4548,6 +4549,10 @@ mod tests {
         assert!(kind_lens(Some(GoalKind::Math)).contains("Dimensional / units"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("Spot-check-only logs"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("## equality-checks"));
+        assert!(
+            kind_lens(Some(GoalKind::Math))
+                .contains("substitutes implementer-authored conclusions")
+        );
         assert_eq!(kind_lens(None), "", "no kind ⇒ generic verifier, no lens");
     }
 

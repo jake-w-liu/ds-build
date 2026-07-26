@@ -988,6 +988,19 @@ impl AgentBuilder {
             tool_config
                 .tools
                 .retain(|tc| !task_deps.contains(&short_tool_name(&tc.id)));
+        }
+        // Background shell execution is valid only when the final, filtered
+        // toolset retains the lifecycle tools that can observe and stop it.
+        // Normalize after every params merge and allow/deny filter: restricted
+        // toolsets such as attacker-math intentionally omit those tools, and a
+        // late global bash-params overlay must not make the agent unbuildable.
+        let has_background_lifecycle = ["get_task_output", "kill_task"].iter().all(|required| {
+            tool_config
+                .tools
+                .iter()
+                .any(|tc| short_tool_name(&tc.id) == *required)
+        });
+        if !has_background_lifecycle {
             for tc in &mut tool_config.tools {
                 if short_tool_name(&tc.id) == "run_terminal_cmd" {
                     let params = tc.params.get_or_insert_with(Default::default);
@@ -1937,6 +1950,39 @@ mod tests {
         .await
         .expect("spawning-blocked agent should normalize background bash params");
         assert_eq!(agent.definition().allowed_subagent_types, Some(vec![]));
+        let applied = agent
+            .tool_bridge()
+            .read_resource::<Params<BashParams>>()
+            .await
+            .expect("bash params should be registered");
+        assert!(!applied.0.enabled_background);
+        assert!(!applied.0.auto_background_on_timeout);
+        assert_eq!(applied.0.max_timeout_secs, Some(36_000.0));
+        assert!(!applied.0.allow_background_operator);
+    }
+    #[tokio::test]
+    async fn attacker_math_build_forces_foreground_shell_without_lifecycle_tools() {
+        use ds_tools::computer::local::LocalTerminalBackend;
+        use ds_tools::implementations::ds_build::bash::BashParams;
+        use ds_tools::notification::ToolNotificationHandle;
+        use ds_tools::types::resources::Params;
+        let bash_params = serde_json::json!(
+            { "max_timeout_secs" : 36_000.0, "enabled_background" : true,
+            "auto_background_on_timeout" : true, "allow_background_operator" : false, }
+        )
+        .as_object()
+        .unwrap()
+        .clone();
+        let agent = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::attacker_math())
+        .with_bash_params(bash_params)
+        .build()
+        .await
+        .expect("attacker-math must remain buildable after global bash params are merged");
         let applied = agent
             .tool_bridge()
             .read_resource::<Params<BashParams>>()

@@ -46,6 +46,10 @@ every displayed equality (numerical/SymPy), every units claim (dimensional), edg
 and count-consistency for \"n=…\" claims. Write `{scratch or goal SCRATCH}/adversarial-math-verify.log`
 with sections equality-checks, dimensional-checks, edge-cases, count-consistency, tool-transcript.
 Head-only recompute or \"checked 5 of N\" is insufficient.
+A successful foreground `attacker-math` run is a prerequisite, not optional evidence. If it fails
+to spawn, is cancelled, or returns without successful recomputation tool calls, retry it and keep
+the task incomplete. Never replace a failed independent verifier with parent-authored conclusions;
+the parent may serialize a successful attacker's cited output into the log, but must not invent it.
 </fable_method>
 
 <action_safety>

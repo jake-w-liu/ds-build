@@ -24,4 +24,8 @@ and inlines any outstanding verifier gaps above. For math/quantitative goals,
 `{scratch_dir}/adversarial-math-verify.log` must include exhaustive sections
 (equality-checks, dimensional-checks, edge-cases, count-consistency,
 tool-transcript) — not a spot-check sample; the harness rejects incomplete logs.
+The log must be grounded in a successful foreground `attacker-math` run. If that
+verifier fails to spawn, is cancelled, or has no successful recomputation tool
+calls, retry it and keep the goal active; never substitute parent-authored
+verification for the failed independent run.
 </system-reminder>
