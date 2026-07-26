@@ -151,6 +151,16 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    `"contradiction"` (objective/plan internally precludes itself), or
    `"unverifiable"` (evidence infeasible in THIS environment). The latter two
    signal the goal needs a user decision, not a retry.
+9. For math/quantitative work, `verification_manifest.json` is a receipt, not
+   proof by assertion. Read its requirements source, final artifact, verifier,
+   success/mutation transcripts, and render evidence. Confirm hashes and
+   locators describe CURRENT files; confirm every requested subpart has exact
+   `CHECK <id>: PASS`; inspect whether the verifier actually reads the source
+   and artifact and fails for a wrong answer. A source-disconnected checker,
+   fabricated/stale transcript, missing requested notation, or mutation that
+   does not exercise the same checker is grounds to refute. For TeX/PDF, inspect
+   rendered pages and native logs; any warning, clipping, overflow, or missing
+   page is grounds to refute.
 {KIND_LENS}
 ## Output contract — STRICT
 

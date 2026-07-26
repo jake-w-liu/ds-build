@@ -1466,6 +1466,620 @@ pub(crate) fn math_verify_artifact_present(implementer_scratch: &Path) -> bool {
     )
 }
 
+/// Workspace-root, durable receipt required for quantitative deliverables.
+pub(crate) const VERIFICATION_MANIFEST_FILE: &str = "verification_manifest.json";
+const VERIFICATION_MANIFEST_SCHEMA_VERSION: u64 = 1;
+const VERIFIER_PASS_SENTINEL: &str = "FINAL_VERIFICATION_PASS";
+const MUTATION_REJECTED_SENTINEL: &str = "MUTATION_REJECTED";
+
+/// Deterministic pre-panel result for [`VERIFICATION_MANIFEST_FILE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum VerificationManifestGate {
+    Ok,
+    Missing,
+    Invalid { reason: String },
+}
+
+fn manifest_json_str<'a>(value: &'a serde_json::Value, pointer: &str) -> Result<&'a str, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("{pointer} must be a non-empty string"))
+}
+
+fn manifest_json_u64(value: &serde_json::Value, pointer: &str) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("{pointer} must be a non-negative integer"))
+}
+
+fn manifest_json_i64(value: &serde_json::Value, pointer: &str) -> Result<i64, String> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("{pointer} must be an integer"))
+}
+
+fn manifest_sha256(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let file = std::fs::File::open(path)
+        .map_err(|err| format!("cannot open {} for hashing: {err}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .map_err(|err| format!("cannot hash {}: {err}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn manifest_path(
+    workspace_root: &Path,
+    raw: &str,
+    label: &str,
+    directory: bool,
+) -> Result<PathBuf, String> {
+    let candidate = Path::new(raw);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace_root.join(candidate)
+    };
+    let canonical = std::fs::canonicalize(&joined)
+        .map_err(|err| format!("{label} {} is unavailable: {err}", joined.display()))?;
+    if !canonical.starts_with(workspace_root) {
+        return Err(format!(
+            "{label} {} escapes workspace {}",
+            canonical.display(),
+            workspace_root.display()
+        ));
+    }
+    let meta = std::fs::metadata(&canonical)
+        .map_err(|err| format!("cannot stat {label} {}: {err}", canonical.display()))?;
+    if (directory && !meta.is_dir()) || (!directory && !meta.is_file()) {
+        return Err(format!(
+            "{label} {} is not a {}",
+            canonical.display(),
+            if directory {
+                "directory"
+            } else {
+                "regular file"
+            }
+        ));
+    }
+    Ok(canonical)
+}
+
+fn verify_manifest_hash(label: &str, path: &Path, expected: &str) -> Result<(), String> {
+    if expected.len() != 64
+        || expected != expected.to_ascii_lowercase()
+        || !expected.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(format!("{label} declares an invalid lowercase SHA-256"));
+    }
+    let actual = manifest_sha256(path)?;
+    if actual != expected {
+        return Err(format!(
+            "{label} SHA-256 mismatch for {}: declared {expected}, actual {actual}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn manifest_mtime(path: &Path, label: &str) -> Result<std::time::SystemTime, String> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .map_err(|err| format!("cannot read {label} mtime for {}: {err}", path.display()))
+}
+
+fn verify_manifest_freshness(
+    path: &Path,
+    label: &str,
+    artifact_mtime: std::time::SystemTime,
+    receipt_mtime: std::time::SystemTime,
+) -> Result<(), String> {
+    let mtime = manifest_mtime(path, label)?;
+    if mtime < artifact_mtime {
+        return Err(format!(
+            "{label} {} is older than the final artifact",
+            path.display()
+        ));
+    }
+    if mtime > receipt_mtime {
+        return Err(format!(
+            "{label} {} is newer than {VERIFICATION_MANIFEST_FILE}; write the manifest last",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn manifest_text(path: &Path, label: &str) -> Result<String, String> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read {label} {}: {err}", path.display()))?;
+    if body.trim().is_empty() {
+        return Err(format!("{label} {} is empty", path.display()));
+    }
+    Ok(body)
+}
+
+fn command_mentions(command: &str, path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| command.contains(name))
+}
+
+fn validate_verification_manifest(
+    workspace_root: &Path,
+    receipt_path: &Path,
+    receipt: &serde_json::Value,
+) -> Result<(), String> {
+    let schema = manifest_json_u64(receipt, "/schema_version")?;
+    if schema != VERIFICATION_MANIFEST_SCHEMA_VERSION {
+        return Err(format!(
+            "/schema_version must be {VERIFICATION_MANIFEST_SCHEMA_VERSION}, got {schema}"
+        ));
+    }
+    let receipt_mtime = manifest_mtime(receipt_path, VERIFICATION_MANIFEST_FILE)?;
+
+    let source_raw = manifest_json_str(receipt, "/requirements/source_path")?;
+    let source = manifest_path(workspace_root, source_raw, "requirements source", false)?;
+    verify_manifest_hash(
+        "requirements source",
+        &source,
+        manifest_json_str(receipt, "/requirements/source_sha256")?,
+    )?;
+    let total = manifest_json_u64(receipt, "/requirements/total")?;
+    let verified = manifest_json_u64(receipt, "/requirements/verified")?;
+    if total == 0 || verified != total {
+        return Err(format!(
+            "/requirements/verified ({verified}) must equal nonzero total ({total})"
+        ));
+    }
+    let coverage = receipt
+        .pointer("/requirements/coverage")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "/requirements/coverage must be an array".to_string())?;
+    if coverage.len() != total as usize {
+        return Err(format!(
+            "/requirements/coverage has {} entries but total is {total}",
+            coverage.len()
+        ));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for (index, item) in coverage.iter().enumerate() {
+        let field = |name: &str| {
+            item.get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| format!("/requirements/coverage/{index}/{name} must be non-empty"))
+        };
+        let id = field("id")?;
+        field("source_locator")?;
+        field("artifact_locator")?;
+        field("verifier_check")?;
+        if !ids.insert(id) {
+            return Err(format!("duplicate requirements coverage id {id:?}"));
+        }
+    }
+
+    let artifact_raw = manifest_json_str(receipt, "/artifact/path")?;
+    let artifact = manifest_path(workspace_root, artifact_raw, "final artifact", false)?;
+    let artifact_hash = manifest_json_str(receipt, "/artifact/sha256")?;
+    verify_manifest_hash("final artifact", &artifact, artifact_hash)?;
+    let artifact_mtime = manifest_mtime(&artifact, "final artifact")?;
+    if artifact_mtime > receipt_mtime {
+        return Err(format!(
+            "final artifact {} is newer than {VERIFICATION_MANIFEST_FILE}; rerun verification and write the manifest last",
+            artifact.display()
+        ));
+    }
+
+    let verifier_raw = manifest_json_str(receipt, "/verifier/path")?;
+    let verifier = manifest_path(workspace_root, verifier_raw, "verifier source", false)?;
+    verify_manifest_hash(
+        "verifier source",
+        &verifier,
+        manifest_json_str(receipt, "/verifier/sha256")?,
+    )?;
+    if manifest_json_i64(receipt, "/verifier/exit_code")? != 0 {
+        return Err("/verifier/exit_code must be 0".to_string());
+    }
+    if manifest_json_str(receipt, "/verifier/artifact_sha256")? != artifact_hash {
+        return Err("/verifier/artifact_sha256 must equal /artifact/sha256".to_string());
+    }
+    let verifier_command = manifest_json_str(receipt, "/verifier/command")?;
+    if !command_mentions(verifier_command, &verifier)
+        || !command_mentions(verifier_command, &artifact)
+    {
+        return Err(
+            "/verifier/command must name both the persistent verifier and final artifact"
+                .to_string(),
+        );
+    }
+    let verifier_output = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/verifier/output_path")?,
+        "verifier output",
+        false,
+    )?;
+    let verifier_transcript = manifest_text(&verifier_output, "verifier output")?;
+    if !verifier_transcript.contains(VERIFIER_PASS_SENTINEL)
+        || !verifier_transcript.contains(artifact_hash)
+    {
+        return Err(format!(
+            "verifier output must cite the final artifact SHA-256 and contain {VERIFIER_PASS_SENTINEL}"
+        ));
+    }
+    for id in &ids {
+        let marker = format!("CHECK {id}: PASS");
+        if !verifier_transcript.contains(&marker) {
+            return Err(format!(
+                "verifier output is not exhaustive: missing {marker:?}"
+            ));
+        }
+    }
+    verify_manifest_freshness(
+        &verifier_output,
+        "verifier output",
+        artifact_mtime,
+        receipt_mtime,
+    )?;
+
+    if manifest_json_i64(receipt, "/mutation_test/exit_code")? == 0 {
+        return Err("/mutation_test/exit_code must be nonzero".to_string());
+    }
+    let mutation_command = manifest_json_str(receipt, "/mutation_test/command")?;
+    if !command_mentions(mutation_command, &verifier) {
+        return Err("/mutation_test/command must run the persistent verifier".to_string());
+    }
+    let mutation_output = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/mutation_test/output_path")?,
+        "mutation output",
+        false,
+    )?;
+    let mutation_transcript = manifest_text(&mutation_output, "mutation output")?;
+    if !mutation_transcript.contains(MUTATION_REJECTED_SENTINEL)
+        || !ids
+            .iter()
+            .any(|id| mutation_transcript.contains(&format!("CHECK {id}: FAIL")))
+    {
+        return Err(format!(
+            "mutation output must contain CHECK <id>: FAIL and {MUTATION_REJECTED_SENTINEL}"
+        ));
+    }
+    verify_manifest_freshness(
+        &mutation_output,
+        "mutation output",
+        artifact_mtime,
+        receipt_mtime,
+    )?;
+
+    let visual = artifact
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex") || ext.eq_ignore_ascii_case("pdf"));
+    if !visual {
+        return Ok(());
+    }
+    if manifest_json_i64(receipt, "/render/exit_code")? != 0 {
+        return Err("/render/exit_code must be 0".to_string());
+    }
+    let render_command = manifest_json_str(receipt, "/render/command")?;
+    if !command_mentions(render_command, &artifact) {
+        return Err("/render/command must name the final TeX/PDF artifact".to_string());
+    }
+    let page_count = manifest_json_u64(receipt, "/render/page_count")?;
+    let pages_inspected = manifest_json_u64(receipt, "/render/pages_inspected")?;
+    if page_count == 0 || pages_inspected != page_count {
+        return Err(format!(
+            "/render/pages_inspected ({pages_inspected}) must equal nonzero page_count ({page_count})"
+        ));
+    }
+    let pdf = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/render/pdf_path")?,
+        "rendered PDF",
+        false,
+    )?;
+    verify_manifest_hash(
+        "rendered PDF",
+        &pdf,
+        manifest_json_str(receipt, "/render/pdf_sha256")?,
+    )?;
+    if artifact
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex"))
+        && artifact.file_stem() != pdf.file_stem()
+    {
+        return Err("rendered PDF stem must match the final TeX artifact stem".to_string());
+    }
+    let log = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/render/log_path")?,
+        "native render log",
+        false,
+    )?;
+    let log_body = manifest_text(&log, "native render log")?;
+    if let Some(warning) = log_body.lines().find(|line| {
+        line.contains("Overfull \\")
+            || line.contains("Underfull \\")
+            || line.contains("LaTeX Warning:")
+            || (line.contains("Package ") && line.contains(" Warning:"))
+            || line.to_ascii_lowercase().contains("undefined references")
+    }) {
+        return Err(format!(
+            "native render log contains a warning: {}",
+            warning.trim()
+        ));
+    }
+    if artifact
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex"))
+    {
+        let flat_log = log_body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let marker = format!("({page_count} pages");
+        if !flat_log.contains(&marker) {
+            return Err(format!(
+                "native TeX log does not confirm page count with {marker:?}"
+            ));
+        }
+    }
+
+    let images_dir = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/render/images_dir")?,
+        "rendered-pages directory",
+        true,
+    )?;
+    let mut images = Vec::new();
+    for entry in std::fs::read_dir(&images_dir)
+        .map_err(|err| format!("cannot list {}: {err}", images_dir.display()))?
+    {
+        let path = entry
+            .map_err(|err| format!("cannot inspect rendered page: {err}"))?
+            .path();
+        let image = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("png")
+                    || ext.eq_ignore_ascii_case("jpg")
+                    || ext.eq_ignore_ascii_case("jpeg")
+            });
+        if image {
+            let path = std::fs::canonicalize(&path)
+                .map_err(|err| format!("cannot resolve rendered page: {err}"))?;
+            if !path.starts_with(workspace_root)
+                || std::fs::metadata(&path)
+                    .map(|meta| !meta.is_file() || meta.len() == 0)
+                    .unwrap_or(true)
+            {
+                return Err(format!(
+                    "rendered page {} is unsafe, missing, or empty",
+                    path.display()
+                ));
+            }
+            images.push(path);
+        }
+    }
+    if images.len() < page_count as usize {
+        return Err(format!(
+            "rendered-pages directory has {} images for {page_count} pages",
+            images.len()
+        ));
+    }
+    let visual_audit = manifest_path(
+        workspace_root,
+        manifest_json_str(receipt, "/render/visual_audit_path")?,
+        "visual audit",
+        false,
+    )?;
+    let audit_body = manifest_text(&visual_audit, "visual audit")?;
+    for page in 1..=page_count {
+        let marker = format!("PAGE {page}:");
+        if !audit_body.contains(&marker) {
+            return Err(format!("visual audit is missing {marker:?}"));
+        }
+    }
+    for (path, label) in [
+        (&pdf, "rendered PDF"),
+        (&log, "native render log"),
+        (&visual_audit, "visual audit"),
+    ] {
+        verify_manifest_freshness(path, label, artifact_mtime, receipt_mtime)?;
+    }
+    for image in &images {
+        verify_manifest_freshness(image, "rendered page", artifact_mtime, receipt_mtime)?;
+    }
+    Ok(())
+}
+
+/// Validate the persistent receipt against current workspace bytes and mtimes.
+pub(crate) fn verification_manifest_gate(workspace_root: &Path) -> VerificationManifestGate {
+    let receipt_path = workspace_root.join(VERIFICATION_MANIFEST_FILE);
+    if !receipt_path.is_file() {
+        return VerificationManifestGate::Missing;
+    }
+    let workspace_root = match std::fs::canonicalize(workspace_root) {
+        Ok(path) => path,
+        Err(err) => {
+            return VerificationManifestGate::Invalid {
+                reason: format!("cannot resolve workspace root: {err}"),
+            };
+        }
+    };
+    let receipt_path = match manifest_path(
+        &workspace_root,
+        VERIFICATION_MANIFEST_FILE,
+        "manifest",
+        false,
+    ) {
+        Ok(path) => path,
+        Err(reason) => return VerificationManifestGate::Invalid { reason },
+    };
+    let body = match manifest_text(&receipt_path, "manifest") {
+        Ok(body) => body,
+        Err(reason) => return VerificationManifestGate::Invalid { reason },
+    };
+    let receipt: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(receipt) => receipt,
+        Err(err) => {
+            return VerificationManifestGate::Invalid {
+                reason: format!("manifest JSON is invalid: {err}"),
+            };
+        }
+    };
+    match validate_verification_manifest(&workspace_root, &receipt_path, &receipt) {
+        Ok(()) => VerificationManifestGate::Ok,
+        Err(reason) => VerificationManifestGate::Invalid { reason },
+    }
+}
+
+#[cfg(test)]
+mod verification_manifest_contract_tests {
+    use super::*;
+
+    #[test]
+    fn receipt_binds_final_tex_mutation_and_warning_free_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            verification_manifest_gate(dir.path()),
+            VerificationManifestGate::Missing
+        );
+        let write = |name: &str, body: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let requirements = write("requirements.txt", b"R1: boxed answer\n");
+        let artifact = write("answer.tex", b"\\boxed{2}\n");
+        let verifier = write("verify.py", b"import sys\nsys.exit(0)\n");
+        let artifact_hash = manifest_sha256(&artifact).unwrap();
+        write(
+            "verify.out",
+            format!("artifact_sha256={artifact_hash}\nCHECK R1: PASS\n{VERIFIER_PASS_SENTINEL}\n")
+                .as_bytes(),
+        );
+        write(
+            "mutation.out",
+            format!("CHECK R1: FAIL\n{MUTATION_REJECTED_SENTINEL}\n").as_bytes(),
+        );
+        let pdf = write("answer.pdf", b"%PDF-test");
+        let log = write(
+            "answer.log",
+            b"Output written on answer.pdf (2 pages, 123 bytes).\n",
+        );
+        let images = dir.path().join("rendered-pages");
+        std::fs::create_dir(&images).unwrap();
+        std::fs::write(images.join("page-1.png"), b"page one").unwrap();
+        std::fs::write(images.join("page-2.png"), b"page two").unwrap();
+        write(
+            "visual-audit.txt",
+            b"PAGE 1: inspected\nPAGE 2: inspected\n",
+        );
+        let receipt = serde_json::json!({
+            "schema_version": 1,
+            "requirements": {
+                "source_path": "requirements.txt",
+                "source_sha256": manifest_sha256(&requirements).unwrap(),
+                "total": 1,
+                "verified": 1,
+                "coverage": [{
+                    "id": "R1",
+                    "source_locator": "requirements.txt:1",
+                    "artifact_locator": "answer.tex:1",
+                    "verifier_check": "boxed result"
+                }]
+            },
+            "artifact": {"path": "answer.tex", "sha256": artifact_hash},
+            "verifier": {
+                "path": "verify.py",
+                "sha256": manifest_sha256(&verifier).unwrap(),
+                "command": "python3 verify.py answer.tex",
+                "exit_code": 0,
+                "output_path": "verify.out",
+                "artifact_sha256": artifact_hash
+            },
+            "mutation_test": {
+                "command": "python3 verify.py mutated-answer.tex",
+                "exit_code": 1,
+                "output_path": "mutation.out"
+            },
+            "render": {
+                "pdf_path": "answer.pdf",
+                "pdf_sha256": manifest_sha256(&pdf).unwrap(),
+                "log_path": "answer.log",
+                "command": "pdflatex answer.tex && pdftoppm answer.pdf rendered-pages/page",
+                "exit_code": 0,
+                "page_count": 2,
+                "pages_inspected": 2,
+                "images_dir": "rendered-pages",
+                "visual_audit_path": "visual-audit.txt"
+            }
+        });
+        std::fs::write(
+            dir.path().join(VERIFICATION_MANIFEST_FILE),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verification_manifest_gate(dir.path()),
+            VerificationManifestGate::Ok
+        );
+
+        std::fs::write(
+            &log,
+            b"Overfull \\hbox\nOutput written on answer.pdf (2 pages, 123 bytes).\n",
+        )
+        .unwrap();
+        let gate = verification_manifest_gate(dir.path());
+        assert!(
+            matches!(
+                gate,
+                VerificationManifestGate::Invalid { ref reason }
+                    if reason.contains("native render log contains a warning")
+            ),
+            "warning must invalidate receipt, got {gate:?}"
+        );
+
+        std::fs::write(
+            &log,
+            b"Output written on answer.pdf (2 pages, 123 bytes).\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join(VERIFICATION_MANIFEST_FILE),
+            serde_json::to_vec_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&artifact, b"\\boxed{3}\n").unwrap();
+        let gate = verification_manifest_gate(dir.path());
+        assert!(
+            matches!(
+                gate,
+                VerificationManifestGate::Invalid { ref reason }
+                    if reason.contains("SHA-256 mismatch")
+            ),
+            "artifact mutation must invalidate receipt, got {gate:?}"
+        );
+    }
+}
+
 /// Strong objective signals that the deliverable is mathematical /
 /// quantitative (derivation, proof, closed form) rather than code or
 /// generic research prose. Conservative — avoids "calculus history" style
@@ -2365,6 +2979,58 @@ pub(crate) async fn run_verification_stage(
                             "{PAUSE_GROUP_FIXABLE}:\nincomplete adversarial-math-verify.log ({reason})"
                         ),
                         gap_fingerprint: fp,
+                    },
+                    skeptic0_session_id: None,
+                    panel_ran: false,
+                };
+            }
+        }
+    }
+
+    if matches!(goal_kind, Some(GoalKind::Math)) {
+        match verification_manifest_gate(inputs.workspace_root) {
+            VerificationManifestGate::Ok => {}
+            gate => {
+                let receipt = inputs.workspace_root.join(VERIFICATION_MANIFEST_FILE);
+                let reason = match gate {
+                    VerificationManifestGate::Missing => {
+                        format!("missing workspace-root {}", receipt.display())
+                    }
+                    VerificationManifestGate::Invalid { reason } => reason,
+                    VerificationManifestGate::Ok => unreachable!(),
+                };
+                let gap = format!(
+                    "- [harness] invalid persistent verification receipt at {} — {}. \
+                     Rebuild evidence after the final artifact edit and write \
+                     {VERIFICATION_MANIFEST_FILE} last.",
+                    receipt.display(),
+                    reason
+                );
+                let body = format!(
+                    "# Goal verification — Not Achieved\n\n\
+                     ## Gaps to fix\n\n{gap}\n\n\
+                     ## Reason\n\n\
+                     Quantitative completion requires a workspace-local receipt binding \
+                     requirements, final artifact, verifier, exhaustive PASS transcript, \
+                     rejected mutation, and warning-free all-page TeX/PDF evidence. \
+                     The harness short-circuited the skeptic panel.\n"
+                );
+                write_details_file(&details_path, &body).await;
+                let latency_ms = started.elapsed().as_millis() as u64;
+                emit_event(Event::GoalClassifierVerdict {
+                    verdict: GoalClassifierVerdict::NotAchieved.into(),
+                    attempt: inputs.attempt,
+                    latency_ms,
+                });
+                let fingerprint = gap_fingerprint(&[&gap]);
+                return VerificationStageResult {
+                    outcome: GoalClassifierOutcome::NotAchieved {
+                        details_path: details_raw,
+                        gaps_summary: gap,
+                        pause_summary: format!(
+                            "{PAUSE_GROUP_FIXABLE}:\ninvalid {VERIFICATION_MANIFEST_FILE} ({reason})"
+                        ),
+                        gap_fingerprint: fingerprint,
                     },
                     skeptic0_session_id: None,
                     panel_ran: false,
@@ -5256,7 +5922,9 @@ mod tests {
         let result = run_verification_stage(spawner, inputs, &emit).await;
         assert!(!result.panel_ran, "must not spawn skeptics without the log");
         assert_eq!(
-            observed.spawn_count.load(std::sync::atomic::Ordering::Relaxed),
+            observed
+                .spawn_count
+                .load(std::sync::atomic::Ordering::Relaxed),
             0,
             "no skeptic spawns on math artifact short-circuit"
         );
@@ -5269,7 +5937,8 @@ mod tests {
             }
             other => panic!("expected NotAchieved, got {other:?}"),
         }
-        // With the artifact present, the panel is allowed to run (N=1).
+        // The scratch artifact alone is no longer sufficient: the durable
+        // workspace receipt is a second deterministic pre-panel gate.
         let spawner2 = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
         let observed2 = spawner2.clone();
         let spawner2: Arc<dyn GoalClassifierSpawner> = spawner2;
@@ -5291,17 +5960,25 @@ mod tests {
         inputs2.plan_file = Some(&plan_path);
         inputs2.implementer_scratch_dir = scratch.path();
         let result2 = run_verification_stage(spawner2, inputs2, &emit).await;
-        assert!(result2.panel_ran);
+        assert!(
+            !result2.panel_ran,
+            "must not spawn skeptics without the persistent receipt"
+        );
         assert_eq!(
             observed2
                 .spawn_count
                 .load(std::sync::atomic::Ordering::Relaxed),
-            1
+            0
         );
-        assert!(matches!(
-            result2.outcome,
-            GoalClassifierOutcome::Achieved { .. }
-        ));
+        match result2.outcome {
+            GoalClassifierOutcome::NotAchieved { gaps_summary, .. } => {
+                assert!(
+                    gaps_summary.contains(VERIFICATION_MANIFEST_FILE),
+                    "gaps must name the missing receipt: {gaps_summary}"
+                );
+            }
+            other => panic!("expected NotAchieved, got {other:?}"),
+        }
     }
 
     #[tokio::test]

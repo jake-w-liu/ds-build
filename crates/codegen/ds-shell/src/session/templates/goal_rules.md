@@ -37,6 +37,66 @@ equality, every units claim, and edge regimes; count-lint stated \"n=…\" claim
 The harness refuses completion when the log is missing, empty, or incomplete —
 checklist `[x]` and 5-problem spot-checks are not enough.
 
+PERSISTENT MATH RECEIPT: scratch proof alone cannot complete a quantitative
+goal. Write `verification_manifest.json` at the WORKSPACE ROOT, LAST, after the
+final artifact and all evidence. Keep the verifier source, success transcript,
+mutation transcript, and render evidence inside the workspace, never only in
+scratch/temp. Schema 1 is:
+
+```json
+{
+  "schema_version": 1,
+  "requirements": {
+    "source_path": "immutable requirements/input file",
+    "source_sha256": "64 lowercase hex",
+    "total": 1,
+    "verified": 1,
+    "coverage": [{
+      "id": "stable requirement id",
+      "source_locator": "exact source line/phrase",
+      "artifact_locator": "final artifact line/section",
+      "verifier_check": "specific independent check"
+    }]
+  },
+  "artifact": {"path": "canonical final artifact", "sha256": "64 lowercase hex"},
+  "verifier": {
+    "path": "persistent verifier source",
+    "sha256": "64 lowercase hex",
+    "command": "command naming verifier and final artifact",
+    "exit_code": 0,
+    "output_path": "fresh persistent transcript",
+    "artifact_sha256": "same hash as artifact.sha256"
+  },
+  "mutation_test": {
+    "command": "same verifier against a mutated copy",
+    "exit_code": 1,
+    "output_path": "fresh persistent rejection transcript"
+  },
+  "render": null
+}
+```
+
+Coverage must contain exactly `total` unique entries and `verified == total`.
+The success transcript must cite the final artifact hash, contain exact
+`CHECK <id>: PASS` for EVERY id, then `FINAL_VERIFICATION_PASS`. Deliberately
+corrupt a substantive answer in a copy; the SAME verifier must exit nonzero
+with exact `CHECK <id>: FAIL` and `MUTATION_REJECTED`. An unconditional-pass
+checker fails.
+
+For canonical `.tex`/`.pdf`, replace `render: null` with `pdf_path`,
+`pdf_sha256`, `log_path`, `command`, `exit_code`, `page_count`,
+`pages_inspected`, `images_dir`, and `visual_audit_path`. Run the native build
+after the FINAL edit. The log must contain no Overfull, Underfull,
+LaTeX/package warning, or undefined-reference warning. Render every page to a
+non-empty PNG/JPG and write exact `PAGE 1:`, `PAGE 2:`, ... audit lines;
+`pages_inspected` must equal `page_count`.
+
+Preserve the source's exact symbols and requested form: aliases may supplement
+but never replace it. Explicitly distinguish signed value from magnitude, row
+from column, strict threshold from equality, and standard deviation from
+variance. Give every requested subpart its own source/artifact locator and PASS
+marker.
+
 TEST PROACTIVELY: run targeted tests after every change, not just at the end.
 Before calling `{GOAL_TOOL}(completed: true)`, run the test suite relevant to
 what you changed (the touched packages/modules — the whole repo suite only when
