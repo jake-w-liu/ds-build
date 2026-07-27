@@ -240,3 +240,35 @@ Perform a source-first audit before trusting the candidate manifest, claim ledge
 5. Treat numerical, symbolic, build, render, and mutation tests as scoped evidence only. They do not prove untested derivations, explanations, named methods, regimes, limiting cases, uncertainty, limitations, citations, visual semantics, or formatting constraints.
 
 Terminal success is forbidden until the independently derived atomic ledger has a one-to-one source -> artifact -> verifier mapping with zero missing or merged obligations. Report every mismatch as a blocking finding even when all candidate-authored checks pass.
+
+## Semantic witness attack (blocking)
+
+For every independently reconstructed atomic obligation, quote the smallest
+source clause and the exact final-artifact text that allegedly satisfies it.
+Reject a row when its evidence is only an external recomputation, expected
+value, log assertion, whole-file locator, or candidate-written paraphrase that
+was never found in the artifact.
+
+Check all of the following before accepting an atomic row:
+
+1. The artifact witness is present inside the correct final container and is
+   current for the final artifact hash.
+2. The witness fulfills the source's operative verb and qualifiers. A result
+   alone does not prove a requested derivation, proof, formulation, comparison,
+   validation, limitation, citation, or explanation.
+3. Source-requested terminology and symbols are preserved. Standard technical
+   names and conventional canonical forms are present when the source leaves
+   them implicit; alternative notation is acceptable only with an explicit,
+   correct mapping or equivalence.
+4. Prose and equations agree: a label without the defining relation, or an
+   unexplained equivalent formula whose meaning is ambiguous, fails.
+5. The cited verifier assertion reads this exact witness and tests its semantic
+   claim before independently recomputing or corroborating it.
+
+Run a final terminology-and-representation diff across the source-first ledger.
+Missing named concepts, undefined aliases, notation that hides a requested
+quantity, and noncanonical forms without an explicit equivalence are blocking
+coverage gaps even when numerical outputs agree. Apply this to general research
+artifacts as well as exercises: formulations, methods, data provenance,
+uncertainty, regimes, limitations, citations, and reproducible numerical
+validation each need their own artifact witness when requested.

@@ -336,3 +336,32 @@ Build the coverage universe source-first before doing the work. Parse every auth
 For every atomic obligation, plan all of: a stable ID, exact source locator, expected artifact locator, concrete acceptance condition, and independent verification method. Repeated structures require a per-instance matrix and per-instance cardinality checks. Mathematical or scientific work requires separate obligations for requested formulations, assumptions, derivation steps, results, domain or boundary conditions, limiting regimes, and numerical or symbolic validation. Research deliverables similarly separate data provenance, methods, outputs, sensitivity or uncertainty, limitations, citations, visuals, and reproducibility artifacts when requested.
 
 The execution plan is incomplete if its atomic obligation count can be smaller merely by replacing several source clauses with "complete item" or "verify all requirements". Do not use a candidate-authored verifier or manifest to decide what the source requires; those artifacts may only be mapped to the independently constructed ledger.
+
+## Semantic witness planning (mandatory for math, science, and research)
+
+For each atomic obligation, retain the smallest verbatim source excerpt and its
+operative verb, qualifiers, requested notation, and named concepts. Plan an
+exact final-artifact witness, not merely a section locator. Also identify a
+small family of conventional representations by technical name and canonical
+formula/definition. If the source does not prescribe a method or notation, use
+the standard field-specific name and form while allowing explicitly defined
+equivalents; do not invent benchmark-specific tokens or require one brittle
+spelling.
+
+Every quantitative or research verification plan must order its proof as:
+
+1. read the authoritative source excerpt;
+2. locate and quote the corresponding witness in the final artifact;
+3. verify that the witness performs the requested act (formulation,
+   derivation, proof, comparison, validation, limitation, citation, or result),
+   including all qualifiers and defined symbol mappings;
+4. compare its meaning with conventional canonical forms and state any
+   equivalence used; and
+5. independently recompute or corroborate the claim with appropriate symbolic,
+   numerical, dimensional, provenance, citation, or sensitivity evidence.
+
+A calculation that verifies an expected answer without inspecting the final
+artifact is not coverage. A source-to-section pointer without an exact witness
+is not traceability. Require the persistent manifest/transcript to record the
+source excerpt, artifact witness, canonical-form family, and the result of each
+of these checks for every atomic ID.

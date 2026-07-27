@@ -159,3 +159,38 @@ Completion evidence MUST be atomic and source-bound. Before implementation, deco
 - Numerical agreement establishes only the claims it actually measures. It does not establish an omitted derivation, formulation, named regime, limiting case, explanation, citation, uncertainty statement, or requested presentation element.
 - A self-authored verifier, checklist, manifest, or set of "key claims" is supporting evidence only. It cannot define the coverage universe or certify completeness by checking a subset of the source.
 - Before terminal completion, the foreground attacker must independently rebuild the atomic ledger from the objective and primary source files, then diff it against both the artifact and submitted coverage. Any missing, merged, aggregate-only, sampled, or unverified obligation is a blocking finding.
+
+## Semantic witness and canonical-form gate (mandatory)
+
+For every atomic obligation in math, science, or research work, preserve a
+source-to-artifact semantic witness. Extend each coverage row with:
+`source_excerpt` (the smallest verbatim source clause), `artifact_witness` (an
+exact excerpt in the final artifact), and `canonical_forms` (the conventional
+technical names, symbols, and standard equivalent forms that make the claim
+independently recognizable). These fields supplement, and never replace, the
+precise locators and independent verifier assertion.
+
+- The artifact must use the source's requested terminology and notation. When
+  the source leaves terminology or form implicit, also state the standard
+  field-specific name and a conventional canonical form. Define every alias or
+  symbol mapping explicitly; a mathematically equivalent but unexplained
+  reparameterization is not auditable evidence.
+- Put important results in canonical display form and, where common notation
+  varies, include a short equivalent form or identity. This is research
+  clarity, not keyword stuffing: prose labels without the governing relation do
+  not pass, and a bare formula without its meaning does not pass.
+- The verifier must first locate `artifact_witness` inside the cited final
+  artifact container, then establish that it fulfills the exact source verb
+  (for example formulate, derive, prove, compare, validate, or state), preserves
+  requested qualifiers, and contains the claimed canonical meaning. Only then
+  may independent symbolic, numerical, citation, or source checks corroborate
+  correctness.
+- External recomputation, a hard-coded expected result, or a pass recorded only
+  in a log cannot prove that the final artifact contains the requested
+  formulation or derivation. `CHECK <id>: PASS` is invalid unless its transcript
+  cites both the source excerpt and the artifact witness it inspected.
+- Before completion, run a terminology-and-representation diff over every
+  atomic row. Reject missing named concepts, undefined aliases, noncanonical
+  forms with no explicit equivalence, ambiguous signed/magnitude or
+  row/column/variance distinctions, and witnesses that point only to a whole
+  file or section.
