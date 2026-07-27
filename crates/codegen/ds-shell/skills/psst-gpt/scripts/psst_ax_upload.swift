@@ -1530,12 +1530,6 @@ func runSnapshot(_ input: Input) throws -> [String: Any] {
 }
 
 func run(_ input: Input) throws -> [String: Any] {
-    let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-    let trustOptions = [trustPromptKey: true] as CFDictionary
-    guard AXIsProcessTrustedWithOptions(trustOptions) else {
-        throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
-    }
-
     if input.action == "selfcheckCopyPolicy" {
         let longPrompt = "Reply exactly with OK and nothing else. " + String(repeating: "prompt ", count: 80)
         let observed = "The complete assistant body begins here and contains several distinct words for identity matching."
@@ -1638,6 +1632,12 @@ func run(_ input: Input) throws -> [String: Any] {
             "status": "selfcheck-copy-policy",
             "cases": cases,
         ]
+    }
+
+    let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    let trustOptions = [trustPromptKey: true] as CFDictionary
+    guard AXIsProcessTrustedWithOptions(trustOptions) else {
+        throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
     }
 
     if input.action == "probe" {
