@@ -328,3 +328,11 @@ Done
 ```
 
 No other text — the harness parses this token to detect completion.
+
+## Atomic planning ledger (required before execution)
+
+Build the coverage universe source-first before doing the work. Parse every authoritative input and split each sentence, list, table row, repeated item, and constraint into independently falsifiable obligations. Preserve qualifiers such as "derive", "state", "compare", "validate", "for each", "exactly one", named methods, regimes, limits, uncertainty, and output format; do not collapse them into a single per-file, per-section, or per-item task.
+
+For every atomic obligation, plan all of: a stable ID, exact source locator, expected artifact locator, concrete acceptance condition, and independent verification method. Repeated structures require a per-instance matrix and per-instance cardinality checks. Mathematical or scientific work requires separate obligations for requested formulations, assumptions, derivation steps, results, domain or boundary conditions, limiting regimes, and numerical or symbolic validation. Research deliverables similarly separate data provenance, methods, outputs, sensitivity or uncertainty, limitations, citations, visuals, and reproducibility artifacts when requested.
+
+The execution plan is incomplete if its atomic obligation count can be smaller merely by replacing several source clauses with "complete item" or "verify all requirements". Do not use a candidate-authored verifier or manifest to decide what the source requires; those artifacts may only be mapped to the independently constructed ledger.

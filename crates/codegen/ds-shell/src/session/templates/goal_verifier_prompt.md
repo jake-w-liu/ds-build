@@ -228,3 +228,15 @@ Not Refuted
 
 `Refuted` ⇒ `refuted: true`; `Not Refuted` ⇒ `refuted: false`. The JSON is
 authoritative; the token is the fast-path signal.
+
+## Independent atomic coverage audit (blocking)
+
+Perform a source-first audit before trusting the candidate manifest, claim ledger, verifier, build log, or reported pass count:
+
+1. Independently enumerate every atomic obligation in the objective and authoritative sources. Split coordinated verbs, requested outputs, qualifiers, regimes, limits, validations, and per-item structure into separate rows. Do not use the candidate coverage table to define this universe.
+2. Compare the independent ledger to the candidate coverage. Reject any coarse row such as "complete solution/item/section", any many-to-one row that hides distinct source clauses, any missing source obligation, and any coverage total based on files, sections, or repeated items rather than atomic obligations.
+3. For each atomic row, inspect the cited artifact location and require explicit evidence of that exact obligation. Then inspect the cited verifier assertion and confirm it tests that artifact evidence rather than a hard-coded expected result, a related claim, or the verifier author’s selected subset.
+4. Check repeated containers independently. Requirements such as exactly one result, all fields present, no placeholders, ordering, bounds, captions, citations, or checks must hold within every container; a global count or compensating duplicate is insufficient.
+5. Treat numerical, symbolic, build, render, and mutation tests as scoped evidence only. They do not prove untested derivations, explanations, named methods, regimes, limiting cases, uncertainty, limitations, citations, visual semantics, or formatting constraints.
+
+Terminal success is forbidden until the independently derived atomic ledger has a one-to-one source -> artifact -> verifier mapping with zero missing or merged obligations. Report every mismatch as a blocking finding even when all candidate-authored checks pass.

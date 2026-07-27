@@ -148,3 +148,14 @@ the change is repo-wide).
 verifies what's complete and tells you what's missing on the next nudge.
 Call `{GOAL_TOOL}(blocked_reason: "reason")` only when truly stuck after multiple
 attempts. Call `{GOAL_TOOL}(message: "status note")` to log progress.
+
+## Atomic source-coverage gate (mandatory)
+
+Completion evidence MUST be atomic and source-bound. Before implementation, decompose every authoritative source and the objective into separate obligations for each requested formulation, derivation, named method, parameter or regime, boundary or initial condition, result, validation, uncertainty statement, limitation, citation, artifact, and formatting constraint. Coordinated verbs, lists, qualifiers, and requested checks are separate obligations even when they occur in one sentence or one repeated item.
+
+- One manifest coverage row must represent exactly one atomic obligation and must identify its precise source locator, precise artifact locator, and a verifier assertion that tests that obligation. A row such as "complete this item", "solve this section", "follow all instructions", or another multi-clause summary is not atomic evidence and cannot be counted verified.
+- `requirements.total` and `requirements.verified` count atomic obligations, not files, sections, work items, or solution blocks. Every source obligation must appear exactly once; every coverage row must trace back to a real source obligation.
+- For repeated containers or records, enforce structural invariants separately inside every container. Global totals, averages, sampled items, or compensating extras cannot prove per-container requirements such as exactly-one, nonempty, ordered, bounded, or schema-complete.
+- Numerical agreement establishes only the claims it actually measures. It does not establish an omitted derivation, formulation, named regime, limiting case, explanation, citation, uncertainty statement, or requested presentation element.
+- A self-authored verifier, checklist, manifest, or set of "key claims" is supporting evidence only. It cannot define the coverage universe or certify completeness by checking a subset of the source.
+- Before terminal completion, the foreground attacker must independently rebuild the atomic ledger from the objective and primary source files, then diff it against both the artifact and submitted coverage. Any missing, merged, aggregate-only, sampled, or unverified obligation is a blocking finding.
