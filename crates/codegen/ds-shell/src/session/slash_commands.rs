@@ -275,9 +275,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 "clear" => BuiltinAction::GoalClear,
                 _ => {
                     let (objective, token_budget) = parse_goal_budget(trimmed);
+                    let (objective, structured) = parse_goal_structure(objective);
                     BuiltinAction::GoalSet {
                         objective,
                         token_budget,
+                        structured,
                     }
                 }
             }
@@ -285,7 +287,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "structure",
-        description: "Preprocess an informal prompt into a structured form that enforces system-prompt discipline (CRC, MPR, Fable method, verification gate)",
+        description: "Preprocess an informal prompt into a disciplined, risk-proportional execution request (CRC, MPR, verification)",
         argument_hint: Some("<your informal task or question>"),
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
@@ -319,6 +321,26 @@ fn parse_goal_budget(trimmed: &str) -> (String, Option<i64>) {
         }
     }
     (trimmed.to_string(), None)
+}
+
+/// Recognize `/structure` as an optional modifier immediately after `/goal`.
+///
+/// `/goal /structure do X` should create the goal `do X` and structure the
+/// first inference turn. A bare `/structure` or a lookalike such as
+/// `/structured` remains ordinary objective text rather than creating an empty
+/// or silently altered goal.
+fn parse_goal_structure(objective: String) -> (String, bool) {
+    let Some(rest) = objective.strip_prefix("/structure") else {
+        return (objective, false);
+    };
+    if rest.is_empty() || !rest.starts_with(char::is_whitespace) {
+        return (objective, false);
+    }
+    let task = rest.trim_start();
+    if task.is_empty() {
+        return (objective, false);
+    }
+    (task.to_string(), true)
 }
 
 const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
@@ -738,6 +760,7 @@ pub(super) enum BuiltinAction {
     GoalSet {
         objective: String,
         token_budget: Option<i64>,
+        structured: bool,
     },
     GoalStatus,
     GoalPause,
@@ -1606,6 +1629,7 @@ mod tests {
                 "dream",
                 "memory",
                 "context",
+                "headroom",
                 "hooks-trust",
                 "hooks-list",
                 "hooks-add",
@@ -2076,10 +2100,10 @@ mod tests {
     }
 
     #[test]
-    fn available_commands_plugin_deep_debug_keeps_bare_when_unique() {
+    fn available_commands_plugin_deep_debug_exposes_bare_and_qualified_when_unique() {
         // Plugin skill named deep-debug with plugin_name deep-debug would
-        // format as "deep-debug:deep-debug", but with no bare-name collision
-        // autocomplete should still expose simply "deep-debug".
+        // format as "deep-debug:deep-debug". Plugin dual naming deliberately
+        // exposes both that stable qualified name and the convenient bare name.
         let mut plugin = make_scoped_skill("deep-debug", SkillScope::Plugin);
         plugin.plugin_name = Some("deep-debug".into());
         let commands = available_commands(&[plugin], all_gated());
@@ -2089,8 +2113,8 @@ mod tests {
             "unique plugin skill should advertise bare name, got: {names:?}"
         );
         assert!(
-            !names.contains(&"deep-debug:deep-debug"),
-            "should not force plugin:skill form when bare is unique, got: {names:?}"
+            names.contains(&"deep-debug:deep-debug"),
+            "unique plugin skill should retain its qualified alias, got: {names:?}"
         );
     }
 
@@ -2507,9 +2531,11 @@ mod tests {
             BuiltinAction::GoalSet {
                 objective,
                 token_budget,
+                structured,
             } => {
                 assert_eq!(objective, "implement auth module");
                 assert_eq!(token_budget, None);
+                assert!(!structured);
             }
             other => panic!("expected GoalSet, got {}", other.command_name()),
         }
@@ -2531,9 +2557,11 @@ mod tests {
             BuiltinAction::GoalSet {
                 objective,
                 token_budget,
+                structured,
             } => {
                 assert_eq!(objective, "implement X");
                 assert_eq!(token_budget, Some(500_000));
+                assert!(!structured);
             }
             other => panic!("expected GoalSet, got {}", other.command_name()),
         }
@@ -2550,9 +2578,11 @@ mod tests {
                 BuiltinAction::GoalSet {
                     objective: o,
                     token_budget,
+                    structured,
                 } => {
                     assert_eq!(o, objective);
                     assert_eq!(token_budget, Some(budget), "for {text:?}");
+                    assert!(!structured);
                 }
                 other => panic!("expected GoalSet, got {}", other.command_name()),
             }
@@ -2580,9 +2610,44 @@ mod tests {
                 BuiltinAction::GoalSet {
                     objective,
                     token_budget,
+                    structured,
                 } => {
                     assert_eq!(objective, text, "objective must be preserved verbatim");
                     assert_eq!(token_budget, None, "no budget must be parsed from {text:?}");
+                    assert!(!structured);
+                }
+                other => panic!("expected GoalSet, got {}", other.command_name()),
+            }
+        }
+    }
+
+    #[test]
+    fn goal_structure_modifier_is_activated_and_removed_from_objective() {
+        match resolve_goal("/structure start from AGENT_INSTRUCTIONS.txt --budget 500000") {
+            BuiltinAction::GoalSet {
+                objective,
+                token_budget,
+                structured,
+            } => {
+                assert_eq!(objective, "start from AGENT_INSTRUCTIONS.txt");
+                assert_eq!(token_budget, Some(500_000));
+                assert!(structured);
+            }
+            other => panic!("expected GoalSet, got {}", other.command_name()),
+        }
+    }
+
+    #[test]
+    fn goal_structure_modifier_requires_a_separate_nonempty_task() {
+        for text in ["/structure", "/structure   ", "/structured task"] {
+            match resolve_goal(text) {
+                BuiltinAction::GoalSet {
+                    objective,
+                    structured,
+                    ..
+                } => {
+                    assert_eq!(objective, text.trim());
+                    assert!(!structured);
                 }
                 other => panic!("expected GoalSet, got {}", other.command_name()),
             }
@@ -2599,6 +2664,7 @@ mod tests {
             BuiltinAction::GoalSet {
                 objective: "x".into(),
                 token_budget: None,
+                structured: false,
             }
             .command_name(),
             "goal"
@@ -2611,6 +2677,7 @@ mod tests {
             BuiltinAction::GoalSet {
                 objective: "x".into(),
                 token_budget: None,
+                structured: false,
             }
             .args_provided()
         );

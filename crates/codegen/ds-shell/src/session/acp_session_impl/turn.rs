@@ -349,30 +349,6 @@ impl SessionActor {
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
-        // ── /structure enforcement gate ────────────────────────────────────
-        // If the previous turn was a /structure turn that produced code changes
-        // without spawning subagents, prepend a violation message.
-        let mut prompt_blocks = prompt_blocks;
-        if self.structure_active.get()
-            && self.structure_code_written.get()
-            && !self.structure_subagents_spawned.get()
-        {
-            let enforcement = acp::ContentBlock::Text(acp::TextContent::new(
-                "FABLE ENFORCEMENT VIOLATION: You used /structure in the previous \
-                 turn and wrote code, but you did NOT spawn any subagents. The Fable \
-                 method REQUIRES evidence subagents (Stage 1) and attacker subagents \
-                 (Stage 3). Your previous response is REJECTED.\n\n\
-                 REDO the task with full orchestration:\n\
-                 1. Spawn evidence subagents (read-only explore) to gather context.\n\
-                 2. Execute your plan.\n\
-                 3. Spawn attacker subagents (distinct adversarial lenses) to verify.\n\
-                 4. Report outcome-first.\n\n\
-                 Do not write any code until you have spawned subagents."
-                    .to_string(),
-            ));
-            prompt_blocks.insert(0, enforcement);
-        }
-        self.structure_active.set(false);
         let turn_start_input = ds_agent_lifecycle::TurnStartInput::new(
             super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic(),
         );
@@ -438,6 +414,7 @@ impl SessionActor {
                     BuiltinAction::GoalSet {
                         objective,
                         token_budget,
+                        structured,
                     } => {
                         ds_telemetry::session_ctx::log_event(slash_used);
                         // Expand any `/{skill}` tokens embedded in the goal
@@ -477,7 +454,12 @@ impl SessionActor {
                                 .await;
                         }
                         let reminder = self.setup_goal(&objective, token_budget).await;
-                        vec![text_block(reminder), text_block(objective)]
+                        let task = if structured {
+                            structure_template(&objective)
+                        } else {
+                            objective
+                        };
+                        vec![text_block(reminder), text_block(task)]
                     }
                     BuiltinAction::GoalResume => {
                         ds_telemetry::session_ctx::log_event(slash_used);
@@ -494,9 +476,6 @@ impl SessionActor {
                     }
                     BuiltinAction::Structure { prompt } => {
                         ds_telemetry::session_ctx::log_event(slash_used);
-                        self.structure_active.set(true);
-                        self.structure_subagents_spawned.set(false);
-                        self.structure_code_written.set(false);
                         let template = structure_template(&prompt);
                         vec![text_block(template)]
                     }
@@ -2551,91 +2530,71 @@ impl AuthRetrySchedule {
 fn structure_template(prompt: &str) -> String {
     format!(
         "\
-/structure ACTIVE. The Fable method and full orchestration are ENFORCED for the task below. You WILL execute every stage. None are optional. Do not evaluate whether to apply them — you MUST apply them all.
+<structured_request>
+<original_request>
+{prompt}
+</original_request>
 
----
+Apply the compact define → gather → act → verify → report loop:
 
-## Step 1 — Build the Execution Plan
-
-Fill every section. Infer from context. Mark unknowns with [NEEDS CLARIFICATION] or [AUTO].
-
-```
-Classification: [question | task | plan-first]
-
-Done Criterion: [1-2 sentences describing the SUBSTANTIVE correct outcome and how to prove it.
-  The criterion must test whether the answer is RIGHT, not whether it is COMPLETE.
-  Structural completeness (all sections filled, all markers present) is not a done criterion —
-  it is a prerequisite. Correctness is the criterion.]
-
-Scope: [files, modules, crates, or domains.
-  You may NOT mark correctness auditing as a non-goal.
-  You may NOT claim any verification \"requires human review.\"
-  Stage 3 IS the correctness audit. If you cannot automatically verify correctness,
-  you have not satisfied Stage 3.]
-
-Verification Method: [exact, runnable test or computation that proves substantive correctness.
-  Must be a concrete command or tool call, not a description. Not \"review for errors.\"
-  Not \"check boundary limits.\" The actual computation or test that produces evidence.]
-
-Original Prompt: {prompt}
-```
-
-PLAN AUDIT (before executing): Re-read your plan. Does the Done Criterion describe correctness or just completeness? Does the Scope exclude correctness? Does the Verification Method name an actual runnable test? If any answer is wrong, rewrite the plan.
-
-PLAN-FIRST RULE: If Classification is plan-first, present the plan and STOP. Do not execute. Wait for approval.
-
-## Step 2 — Fable Method Stages (ENFORCED — you WILL execute ALL four)
-
-**Stage 1 — PLAN**: Fan out parallel evidence subagents (read-only explore agents, max 4 per batch). Gather cited evidence with file:line references. Freeze scope. Produce a committed plan.
-
-**Stage 2 — EXECUTE**: Apply the committed plan. Edit surgically. Scope is frozen.
-
-**Stage 3 — VERIFY**: Spawn 1-3 adversarial attacker subagents that independently verify the SUBSTANCE of your work. Structural checks (formatting, compilation, markers, IDs) are INSUFFICIENT — the attackers must verify CORRECTNESS of claims, not their presentation.
-
-Task-type-specific attacker lenses:
-
-FOR MATH/PHYSICS tasks:
-  - Attacker 1: independently COMPUTE answers (run actual calculations, not the prose you wrote). Compare with yours. Flag every mismatch.
-  - Attacker 2: verify DERIVATIONS from first principles. Check boundary limits (→0, →∞, symmetry). Every unverified step is a finding.
-  - Attacker 3: find COUNTEREXAMPLES or edge cases that break your claims. Try degenerate parameters. Test special cases.
-
-FOR CODE tasks:
-  - Attacker 1: diff incompleteness (what logic was missed? what path is untested?)
-  - Attacker 2: runtime breakage (what input crashes it? null/empty/boundary?)
-  - Attacker 3: spec contradiction (what requirement is violated? what does the spec actually say?)
-
-FOR RESEARCH/QUESTION tasks:
-  - Attacker 1: independently verify every cited fact or formula against primary sources.
-  - Attacker 2: surface every UNSTATED assumption and test whether the conclusion survives without it.
-  - Attacker 3: find contradictory evidence or alternative explanations you did not address.
-
-FABRICATED VERIFICATION IS A VIOLATION: Claiming you ran a computation when you did not is a lie. Claiming you checked a boundary limit without computing it is a lie. Every verification claim in your output MUST be backed by an actual tool execution — a numerical run, a symbolic computation, a source file read, a test execution. If you cannot verify something, do not claim you did. Label it as unverified.
-
-Surviving findings → fix → re-verify. MAX 3 cycles. The adversarial review must find REAL issues — if all three attackers find nothing, you did not look hard enough.
-
-**Stage 4 — REPORT**: Outcome-first. What was done. What verification found. Honest caveats. Self-refuted claims listed.
-
-## Step 3 — System-Prompt Rules (ENFORCED)
-
-CRC: bug-free logic, trace edge cases, handle realistic inputs, production-grade, never ship wrong code.
-
-MPR: derive from first principles, verify boundaries, surface assumptions, reduce to known cases.
-
-Verification Gate: never present a claim as correct without verifying by reading source, running code, or checking with a tool. \"I checked\" is not verification — show the check.
-
-Claim Discipline: any bug/root-cause claim REQUIRES a decisive test. Run it first. Fail → REFUTED.
-
-Adversarial Review: re-read your diff with a hostile lens. What did you miss?
-
-## BOUNDS OVERRIDE
-
-The Fable method's BOUNDS section says \"SOLO when: single-area OR tools faster than agents.\" This override DOES NOT APPLY under /structure. /structure REQUIRES subagents for evidence gathering AND adversarial verification. 
-
-## COMPLIANCE CHECK
-
-After you finish, the shell will verify that you spawned evidence and attacker subagents. If you wrote code without spawning subagents, your turn will be REJECTED and you will be forced to redo it with proper orchestration.\
+- Recover the actual contract from the request and every named local source.
+  State the observable done condition, assumptions, and scope. Do not replace
+  correctness with formatting, marker counts, or another structural proxy.
+- Inspect the relevant evidence, then execute the request. Stop after a plan
+  only when the original request asks for plan-only work.
+- Verify the actual final artifact with checks proportional to its risk and
+  size. Use direct tools when they are the clearest evidence; use foreground
+  critics when an independent review would materially reduce uncertainty.
+  Subagent counts and fixed evidence rituals are not completion criteria.
+- For math, physics, and quantitative research, preserve definitions, domains,
+  conventions, governing relations, branches, units, and BC/IC as applicable.
+  Challenge every requested result and the consequential reasoning behind it
+  with suitable independent checks: re-derivation, residual/substitution,
+  dimensions, special or limiting regimes, conservation, or reproducible
+  numerical computation. Accept equivalent valid methods and notation when
+  their mapping is clear.
+- For factual research, verify material claims against primary sources. For
+  code, apply CRC and exercise the changed behavior through the real path.
+- Report the outcome first. Claim only checks actually performed; label any
+  residual uncertainty or unverified assumption.
+</structured_request>\
         "
     )
+}
+
+#[cfg(test)]
+mod structure_template_tests {
+    use super::structure_template;
+
+    #[test]
+    fn structure_prompt_is_risk_proportional_and_preserves_the_request() {
+        let rendered = structure_template("derive the threshold from model.tex");
+
+        for required in [
+            "derive the threshold from model.tex",
+            "actual final artifact",
+            "named",
+            "risk",
+            "equivalent",
+        ] {
+            assert!(
+                rendered.to_ascii_lowercase().contains(required),
+                "missing required structure contract phrase {required:?}: {rendered}",
+            );
+        }
+
+        for overreach in [
+            "REQUIRES subagents",
+            "will be REJECTED",
+            "you did not look hard enough",
+            "Every unverified step is a finding",
+        ] {
+            assert!(
+                !rendered.contains(overreach),
+                "structure prompt must not mandate test-theater behavior {overreach:?}",
+            );
+        }
+    }
 }
 
 #[cfg(test)]

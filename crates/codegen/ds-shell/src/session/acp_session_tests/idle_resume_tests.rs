@@ -305,9 +305,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 subagent_token_records: parking_lot::Mutex::new(HashMap::new()),
                 workspace_ops: ds_workspace::WorkspaceOps::for_test(),
                 trace_config_template: std::cell::RefCell::new(None),
-                structure_active: std::cell::Cell::new(false),
-                structure_subagents_spawned: std::cell::Cell::new(false),
-                structure_code_written: std::cell::Cell::new(false),
             };
             let eleven_minutes_ago_ms = chrono::Utc::now().timestamp_millis() - (11 * 60 * 1000);
             actor

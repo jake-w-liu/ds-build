@@ -1595,19 +1595,99 @@ pub(crate) fn validate_math_plan_contract(
     Ok(())
 }
 
-/// True when the verification plan mentions a gating adversarial /
-/// independent recomputation step (case-insensitive substring scan).
+/// True when one numbered/bulleted item in `## Verification plan` is both
+/// gating and an independent mathematical check.
+///
+/// Keeping the signals in one list item prevents unrelated prose elsewhere in
+/// the plan—or an `evidence`-only check—from satisfying the completion gate.
 fn plan_has_adversarial_math_gate(plan: &str) -> bool {
-    let lower = plan.to_ascii_lowercase();
-    let has_gating = lower.contains("gating");
-    let has_adversarial = lower.contains("adversarial")
-        || lower.contains("independent re")
-        || lower.contains("re-deriv")
-        || lower.contains("rederiv")
-        || lower.contains("recompute")
-        || lower.contains("sympy")
-        || lower.contains("attacker-math");
-    has_gating && has_adversarial
+    let mut in_verification_plan = false;
+    let mut items: Vec<String> = Vec::new();
+
+    for raw_line in plan.lines() {
+        let line = raw_line.trim();
+        if !in_verification_plan {
+            if line.eq_ignore_ascii_case("## Verification plan") {
+                in_verification_plan = true;
+            }
+            continue;
+        }
+        if line.starts_with("## ") {
+            break;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if is_markdown_list_item(line) {
+            items.push(line.to_ascii_lowercase());
+        } else if let Some(item) = items.last_mut() {
+            item.push(' ');
+            item.push_str(&line.to_ascii_lowercase());
+        }
+    }
+
+    items.iter().any(|item| {
+        let has_gating_tag = item.split_whitespace().take(3).any(|token| {
+            token
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+                == "gating"
+        });
+        let uses_math_attacker = item.contains("attacker-math");
+        let explicitly_rechecks = [
+            "recompute",
+            "re-compute",
+            "recomputation",
+            "recalculate",
+            "re-calculat",
+            "recalculation",
+            "re-derive",
+            "rederive",
+        ]
+        .iter()
+        .any(|signal| item.contains(signal));
+        let establishes_independence = ["independent", "adversarial", "alternative", "separate"]
+            .iter()
+            .any(|signal| item.contains(signal));
+        let performs_math = [
+            "comput",
+            "calculat",
+            "deriv",
+            "residual",
+            "substitut",
+            "numerical",
+            "symbolic",
+            "solve",
+            "proof",
+        ]
+        .iter()
+        .any(|signal| item.contains(signal));
+        let has_independent_check =
+            uses_math_attacker || explicitly_rechecks || (establishes_independence && performs_math);
+        has_gating_tag && has_independent_check
+    })
+}
+
+fn is_markdown_list_item(line: &str) -> bool {
+    let line = line.trim_start();
+    if ["- ", "* ", "+ "]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let digit_count = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return false;
+    }
+    let rest = &line[digit_count..];
+    let Some(rest) = rest
+        .strip_prefix('.')
+        .or_else(|| rest.strip_prefix(')'))
+    else {
+        return false;
+    };
+    rest.chars().next().is_some_and(char::is_whitespace)
 }
 
 /// Delta-focused resume prompt for skeptic 0 when it is RESUMED across
@@ -4554,6 +4634,50 @@ mod tests {
         let good = "## Goal kind\nmath\n## Verification plan\n\
                     1. gating: attacker-math independently recomputes the requested results\n";
         assert!(validate_math_plan_contract(obj, good).is_ok());
+
+        let signals_outside_verification =
+            "## Goal kind\nmath\n## Verification plan\n1. gating: compile the artifact\n\
+             ## Risks / Contradictions\n- independent adversarial recomputation may be expensive\n";
+        assert!(
+            validate_math_plan_contract(obj, signals_outside_verification).is_err(),
+            "keywords outside the verification section must not satisfy the gate",
+        );
+
+        let split_steps = "## Goal kind\nmath\n## Verification plan\n\
+                           1. gating: compile the artifact\n\
+                           2. evidence: attacker-math independently recomputes the results\n";
+        assert!(
+            validate_math_plan_contract(obj, split_steps).is_err(),
+            "gating and independent recomputation must belong to the same verification step",
+        );
+
+        let wrapped_good = "## Goal kind\nmath\n## Verification plan\n\
+                            1. gating: direct independent computation against the actual\n\
+                               final artifact, including residuals and limiting cases\n\
+                            ## Non-goals\n- preferred notation\n";
+        assert!(validate_math_plan_contract(obj, wrapped_good).is_ok());
+
+        for equivalent_check in [
+            "independent recomputation of every requested result",
+            "separately substitute the final expressions into the governing equations",
+            "an alternative derivation of the threshold and branches",
+            "adversarial numerical validation of the reported values",
+        ] {
+            let plan = format!(
+                "## Goal kind\nmath\n## Verification plan\n1. **gating**: {equivalent_check}\n"
+            );
+            assert!(
+                validate_math_plan_contract(obj, &plan).is_ok(),
+                "equivalent independent-check wording must be accepted: {equivalent_check}",
+            );
+        }
+
+        let sympy_name_only =
+            "## Goal kind\nmath\n## Verification plan\n1. gating: record the SymPy version\n";
+        assert!(
+            validate_math_plan_contract(obj, sympy_name_only).is_err(),
+            "mentioning a tool is not independent recomputation",
+        );
     }
 
     #[test]
