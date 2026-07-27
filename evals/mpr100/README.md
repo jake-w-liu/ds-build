@@ -19,6 +19,12 @@ equivalent notation can produce a false negative; the grader prints the exact
 criterion that was not recognized so an auditor can decide whether the
 submission or the notation recognizer is at fault.
 
+`score_submission.py` is a task-specific development diagnostic, not an
+official semantic MPR grader or a product completion contract. Do not change
+general-purpose prompts or runtime gates merely to satisfy its lexical
+recognizer; judge equivalent mathematics against the task and verified
+reference.
+
 ## Files
 
 - `mpr100_answer_sheet_verified.tex`: completed auditable reference answers.
@@ -78,4 +84,3 @@ python3 evals/mpr100/score_submission.py \
 For every miss, inspect the transcript and identify the first unsupported or
 incorrect step before changing the harness. A harness change is justified only
 by a reproduced behavior and must be followed by a fresh clean workspace.
-

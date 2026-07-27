@@ -50,15 +50,14 @@ from best knowledge.
 
 ## Goal kind — pick exactly one
 
-## Existing artifact baseline
+## Named sources and supplied checks
 
-If OBJECTIVE or a recursively named source asks to fill, edit, update, replace,
-preserve, or retain an existing output/template, the FIRST implementation step
-must copy its exact bytes to a persistent workspace baseline before any edit.
-Plan a byte-hash check and an ordered comparison of machine-readable comment
-markers between that baseline and the final artifact. Also plan a bounded search
-for project-supplied evaluators/checkers; a runnable supplied oracle is
-authoritative and cannot be replaced by a self-authored verifier.
+Follow named local sources far enough to recover the real requirements, then
+stop; do not scan unrelated files. If an existing artifact has required markers
+or structure, plan to preserve and compare those directly. Search for
+task-provided evaluators or build commands and include them as evidence, while
+keeping OBJECTIVE and its authoritative sources—not a checker implementation—as
+the contract.
 
 - `code-change` — modify the workspace; the diff is the evidence.
 - `analysis` — understand existing code; deliverable is prose, diff may be empty.
@@ -204,13 +203,6 @@ criterion — it is a prerequisite. Correctness is the criterion. If the objecti
 substantive output (a derivation, a result, a proof), the acceptance criteria MUST require
 proving that output is correct, never merely that it exists.
 
-For a quantitative task driven by named sources, first create an atomic
-source-requirement inventory: every requested subpart, notation/form constraint,
-assumption, domain, boundary/initial condition, structural count, and numerical
-validation request. The 3-5 acceptance criteria may group that inventory, but the
-persistent verification receipt MUST retain one source-to-artifact entry per
-atomic requirement. Grouping is never permission to sample or omit.
-
 **Verification plan** — the shared procedure the implementer and the verifiers
 both follow, so all judge by the SAME observable bar; cover every criterion.
 Tag each step `gating` (decides pass/fail) or `evidence` (best-effort
@@ -219,52 +211,24 @@ hold, must NOT deny completion). Every gating step must check SUBSTANTIVE CORREC
 of the deliverable's output, not merely its structural well-formedness. A step that
 only checks that something exists, compiles, or parses is evidence, not gating.
 
-**Adversarial correctness gating (MANDATORY for math, science, derivation, or
-quantitative tasks).** When the deliverable contains mathematical derivations,
-scientific computations, proofs, numerical results, or any claim that can be
-independently verified by computation, set `## Goal kind` to `math` and the
-verification plan MUST include at
-least one `gating` step that performs adversarial independent verification of
-EVERY substantive claim in the deliverable — never just one spot-check.
-The method: spawn `attacker-math` (or perform the check directly with shell)
-that independently re-derives each result from first principles using
-computational tools (SymPy, numerical integration, dimensional analysis,
-limiting-case checks). Flag every mismatch as a defect. **Machine-auditable
-artifact (required):** write exhaustive tool-backed checks to the literal path
-`{SCRATCH}/adversarial-math-verify.log`. The harness refuses `completed: true`
-when this file is missing, empty, **or missing required sections**. The log
-MUST contain ALL of these headers (case-insensitive) with real tool evidence
-under each — **not a sample of 5 problems**:
+**Math/physics research correctness.** When the deliverable contains
+mathematical derivations, physical formulations, simulations, proofs, or
+quantitative results, set `## Goal kind` to `math`. Include one `gating` step
+that uses `attacker-math` or direct independent computation against the
+actual final artifact. It must cover every requested result and the consequential
+reasoning whose failure could change those results, then select checks suited to
+the claim: residual/substitution, dimensions, BC/IC, signs and branches,
+special or limiting regimes, conservation, numerical convergence/error, or an
+independent derivation.
 
-```
-## equality-checks
-## dimensional-checks
-## edge-cases
-## count-consistency
-## tool-transcript
-```
-
-- **source contract** — bind the exact OBJECTIVE and every recursively named
-  workspace-local requirements/specification/input source by SHA-256. The same
-  verifier must read those sources and the canonical final artifact, then emit
-  one PASS marker for every atomic source requirement.
-- **equality-checks** — numerically or symbolically verify EVERY displayed
-  equality in the deliverable (plug random admissible values / SymPy).
-- **dimensional-checks** — recompute dimensions for EVERY units claim.
-- **edge-cases** — evaluate 0/±/critical/limit regimes for EVERY formula.
-- **count-consistency** — verify stated counts (\"n=5 variables\") against lists.
-- **tool-transcript** — commands run and outputs (no head-only claims).
-
-For research-grade formulations, verify definitions, assumptions, domains,
-governing equations, conditions, derivation links, and requested notation. For
-numerical work, require persistent reproducible code/data, declared tolerances
-and convergence controls, residual/error or conservation checks, and relevant
-regime/sensitivity tests. Plausible output values are not a correctness check.
-
-A plan whose only correctness check is a single spot-check, or that omits that
-log path / these sections, is an INVALID plan. Structural well-formedness
-checks (grep, compilation, marker presence) MUST be tagged `evidence`, never
-`gating` — only the adversarial correctness step earns the `gating` tag.
+Scale the depth to the task. A short closed derivation may justify checking each
+step; a long research report should prioritize conclusions, governing
+relations, sensitive assumptions, and high-risk numerical or physical links
+instead of mechanically testing every line. Require reproducible code/data and
+tolerances when material to numerical claims. Structural checks such as
+compilation and marker preservation remain supporting evidence. Do not require
+a fixed manifest, mutation portfolio, transcript schema, preferred derivation,
+or canonical spelling unless OBJECTIVE or a named source asks for it.
 
 Each step gives the **action** (run the tests,
 exercise the entry point, read the artifact) and the
@@ -294,14 +258,10 @@ re-implementation) PLUS the captured run output under `{SCRATCH}`. A gating
 criterion proven only by prose, or with no captured evidence, will be refuted.
 
 **Non-goals** — items not asked for that a reader might assume in scope; include
-at least one. You may NOT mark correctness auditing as a non-goal. You may NOT claim
-any verification "requires human review." The verifiers WILL audit correctness; if you
-cannot specify how correctness is automatically verifiable, you have not written a valid
-verification plan. The adversarial correctness gating step IS the correctness audit — it
-is not optional, cannot be deferred to the verifier, and must appear in every plan for a
-math/science/derivation task. If a correctness check is genuinely
-out of reach for automation (a visual aesthetic judgment, an interactive game feel), state
-exactly why and what the best automatable proxy is — but the answer is never "human review."
+at least one. Correctness auditing is never a non-goal. Use the strongest
+available automated or tool-backed evidence, but do not invent a brittle oracle
+for a claim that cannot be decided mechanically. State the residual uncertainty
+and the best observable proxy explicitly.
 
 **Assumed scope** — specific files/modules/deps you expect to touch; do not
 restate OBJECTIVE.
@@ -328,40 +288,3 @@ Done
 ```
 
 No other text — the harness parses this token to detect completion.
-
-## Atomic planning ledger (required before execution)
-
-Build the coverage universe source-first before doing the work. Parse every authoritative input and split each sentence, list, table row, repeated item, and constraint into independently falsifiable obligations. Preserve qualifiers such as "derive", "state", "compare", "validate", "for each", "exactly one", named methods, regimes, limits, uncertainty, and output format; do not collapse them into a single per-file, per-section, or per-item task.
-
-For every atomic obligation, plan all of: a stable ID, exact source locator, expected artifact locator, concrete acceptance condition, and independent verification method. Repeated structures require a per-instance matrix and per-instance cardinality checks. Mathematical or scientific work requires separate obligations for requested formulations, assumptions, derivation steps, results, domain or boundary conditions, limiting regimes, and numerical or symbolic validation. Research deliverables similarly separate data provenance, methods, outputs, sensitivity or uncertainty, limitations, citations, visuals, and reproducibility artifacts when requested.
-
-The execution plan is incomplete if its atomic obligation count can be smaller merely by replacing several source clauses with "complete item" or "verify all requirements". Do not use a candidate-authored verifier or manifest to decide what the source requires; those artifacts may only be mapped to the independently constructed ledger.
-
-## Semantic witness planning (mandatory for math, science, and research)
-
-For each atomic obligation, retain the smallest verbatim source excerpt and its
-operative verb, qualifiers, requested notation, and named concepts. Plan an
-exact final-artifact witness, not merely a section locator. Also identify a
-small family of conventional representations by technical name and canonical
-formula/definition. If the source does not prescribe a method or notation, use
-the standard field-specific name and form while allowing explicitly defined
-equivalents; do not invent benchmark-specific tokens or require one brittle
-spelling.
-
-Every quantitative or research verification plan must order its proof as:
-
-1. read the authoritative source excerpt;
-2. locate and quote the corresponding witness in the final artifact;
-3. verify that the witness performs the requested act (formulation,
-   derivation, proof, comparison, validation, limitation, citation, or result),
-   including all qualifiers and defined symbol mappings;
-4. compare its meaning with conventional canonical forms and state any
-   equivalence used; and
-5. independently recompute or corroborate the claim with appropriate symbolic,
-   numerical, dimensional, provenance, citation, or sensitivity evidence.
-
-A calculation that verifies an expected answer without inspecting the final
-artifact is not coverage. A source-to-section pointer without an exact witness
-is not traceability. Require the persistent manifest/transcript to record the
-source excerpt, artifact witness, canonical-form family, and the result of each
-of these checks for every atomic ID.

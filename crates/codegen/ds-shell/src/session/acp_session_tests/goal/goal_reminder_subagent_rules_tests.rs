@@ -891,7 +891,7 @@ fn render_goal_task_discipline_substitutes_custom_todo_tool() {
     assert!(!rendered.contains("{TODO_TOOL}"));
 }
 /// Direct unit test for [`render_goal_rules`] covering the slim
-/// slim template: every placeholder is substituted, the four
+/// template: every placeholder is substituted, the four
 /// bullets (TRACKING / WORKING / VERIFY / TEST PROACTIVELY) survive,
 /// no per-goal verdict path is published, and no `{VERIFIER_ID}`
 /// substitution remains in the template.
@@ -937,6 +937,18 @@ fn render_goal_rules_substitutes_all_placeholders_in_slim_template() {
         !body.contains("COMPLETION AUDIT"),
         "slim template must drop the COMPLETION AUDIT ceremony:\n{body}",
     );
+    for legacy_math_artifact in [
+        "adversarial-math-verify.log",
+        "verification_manifest.json",
+        "MUTATION_REJECTED",
+        "Atomic source-coverage gate",
+        "Semantic witness and canonical-form gate",
+    ] {
+        assert!(
+            !body.contains(legacy_math_artifact),
+            "slim template must drop legacy math artifact `{legacy_math_artifact}`:\n{body}",
+        );
+    }
     assert!(
         !body.contains("/tmp/goal-verifier-"),
         "slim template must not publish a per-goal verdict file path:\n{body}",

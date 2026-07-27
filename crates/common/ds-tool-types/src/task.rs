@@ -847,30 +847,28 @@ pub const ATTACKER_MATH_PROMPT: &str = concat!(
     "=== NO FILE EDITS ===\n",
     "You have NO file editing tools. Do not create, modify, or delete workspace files.\n",
     "You MAY run shell commands (Python/SymPy, numerical checks) to recompute independently.\n\n",
-    "=== EXHAUSTIVE, NOT SAMPLED ===\n",
-    "Do NOT spot-check a handful of problems. Walk the FULL deliverable.\n",
-    "Mandatory mechanical passes via ${{ tools.by_kind.execute }} where possible:\n",
-    "1. EQUALITY CHAINS — for EVERY displayed algebraic/numerical equality, plug random\n",
-    "   admissible numbers (or SymPy simplify) and confirm both sides match. Catches sign\n",
-    "   errors and false intermediates that look right in prose.\n",
-    "2. DIMENSIONAL / UNITS — for EVERY units claim, recompute SI dimensions.\n",
-    "3. EDGE / REGIME PARAMS — for EVERY formula, evaluate 0, ±, critical thresholds,\n",
-    "   and claimed limits (e.g. c→∞). Catches false asymptotic claims.\n",
-    "4. COUNT / CONSISTENCY — when text says \"n=k variables/cases\", count listed items.\n",
-    "5. INDEPENDENT RECOMPUTE — re-derive boxed/primary results; residual-substitute.\n",
-    "6. DOMAIN / ADMISSIBILITY — -/0/+, strict vs non-strict, BC/IC, normalization.\n\n",
+    "=== REVIEW THE FULL DELIVERABLE, PROPORTIONAL TO RISK ===\n",
+    "Do not sample only convenient sections. Check every requested result and the\n",
+    "consequential reasoning whose failure could change a conclusion. For a short\n",
+    "closed derivation this may mean every step; for a long research artifact,\n",
+    "prioritize governing equations, sensitive assumptions, primary conclusions,\n",
+    "and high-risk numerical or physical links rather than mechanically testing\n",
+    "every line.\n\n",
     "Lenses (apply ALL that fit):\n",
-    "- Independent recomputation of critical steps and the final claim\n",
-    "- Residuals / special cases / conservation / sign and branch errors\n",
-    "- Convention switches (silent redefinition of dimensionless numbers)\n\n",
+    "- EQUALITY / RESIDUALS — independently recompute critical steps and primary results\n",
+    "- DIMENSIONS / UNITS — check governing relations and material unit claims\n",
+    "- DOMAIN / REGIMES — signs, branches, BC/IC, admissibility, thresholds, and limits\n",
+    "- NUMERICS — tolerances, convergence, residual/error, conservation, and sensitivity\n",
+    "- CONSISTENCY — convention switches, contradictions, and requested counts/structure\n\n",
     "Guidelines:\n",
     "- Prefer ${{ tools.by_kind.execute }} for recomputation; use ${{ tools.by_kind.search }}/",
     "${{ tools.by_kind.read }}/${{ tools.by_kind.list }} for artifacts\n",
+    "- Read the actual final artifact and authoritative task sources; do not verify a retyped surrogate\n",
     "- Cite equation labels, problem IDs, or file:line for artifact-backed work\n",
     "- Do not accept a remembered formula without checking hypotheses\n",
     "- Tool claims require successful tool evidence in the current task trace\n",
-    "- Head-only recomputation without tool evidence is NOT sufficient\n",
-    "- \"I checked 5 of N\" is a finding (gap), not a pass, when N claims exist\n\n",
+    "- Accept valid alternative derivations and clearly defined equivalent notation\n",
+    "- Report only confirmed defects or requested claims that remain materially unsupported\n\n",
     attacker_output_contract!(),
 );
 
@@ -1411,9 +1409,11 @@ mod tests {
         assert!(ATTACKER_MATH_PROMPT.contains("NO FINDINGS"));
         assert!(ATTACKER_MATH_PROMPT.contains("NO FILE EDITS"));
         assert!(ATTACKER_MATH_PROMPT.contains("tools.by_kind.execute"));
-        assert!(ATTACKER_MATH_PROMPT.contains("EXHAUSTIVE, NOT SAMPLED"));
-        assert!(ATTACKER_MATH_PROMPT.contains("EQUALITY CHAINS"));
-        assert!(ATTACKER_MATH_PROMPT.contains("DIMENSIONAL / UNITS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("REVIEW THE FULL DELIVERABLE"));
+        assert!(ATTACKER_MATH_PROMPT.contains("PROPORTIONAL TO RISK"));
+        assert!(ATTACKER_MATH_PROMPT.contains("EQUALITY / RESIDUALS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("DIMENSIONS / UNITS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("actual final artifact"));
         assert!(!ATTACKER_MATH_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(ATTACKER_RESEARCH_PROMPT.contains("NO FINDINGS"));
         assert!(!GENERAL_PURPOSE_PROMPT.contains("READ-ONLY"));

@@ -492,10 +492,9 @@ pub(crate) async fn run_goal_planner(
         );
     }
 
-    // Static math/adversarial contract: quantitative objectives must ship
-    // kind=math, a gating independent-recomputation step, and the named
-    // adversarial-math-verify.log artifact. Delete the invalid plan so a
-    // resume can replan rather than skipping on "plan already present".
+    // Static math contract: quantitative objectives must use kind=math and
+    // include a gating independent-recomputation step. Delete an invalid plan
+    // so a resume can replan rather than skipping on "plan already present".
     match tokio::fs::read_to_string(inputs.plan_file).await {
         Ok(body) => {
             if let Err(reason) =
@@ -1240,20 +1239,17 @@ mod tests {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("observations that MUST be"));
     }
 
-    /// Math goals must use kind `math`, require adversarial gating, and
-    /// name the machine-auditable adversarial-math-verify.log artifact.
+    /// Math goals must use kind `math` and require independent verification
+    /// of the actual deliverable without imposing a receipt-file schema.
     #[test]
-    fn planner_prompt_pins_math_kind_and_adversarial_artifact() {
+    fn planner_prompt_pins_math_kind_and_proportional_independent_checks() {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("`math`"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("adversarial-math-verify.log"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Adversarial correctness gating"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Math/physics research correctness"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("attacker-math"));
-        // Exhaustive verification sections (not spot-check-only).
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## equality-checks"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## dimensional-checks"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## edge-cases"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## count-consistency"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("## tool-transcript"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("actual final artifact"));
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Scale the depth to the task"));
+        assert!(!GOAL_PLANNER_PROMPT_TEMPLATE.contains("adversarial-math-verify.log"));
+        assert!(!GOAL_PLANNER_PROMPT_TEMPLATE.contains("verification_manifest.json"));
     }
 
     /// A math objective with an incomplete plan is fail-closed and the
@@ -1261,12 +1257,10 @@ mod tests {
     #[tokio::test]
     async fn math_plan_missing_contract_fails_closed_and_deletes_plan() {
         use crate::session::events::GoalPlannerFailClosedReason;
-        use crate::session::goal_classifier::ADVERSARIAL_MATH_VERIFY_LOG;
-
         let dir = tempfile::tempdir().unwrap();
         let plan_file = dir.path().join("plan.md");
-        // Planner writes a math-tagged plan WITHOUT the artifact path.
-        let bad_body = b"## Goal kind\nmath\n## Verification plan\n1. gating: adversarial recompute with SymPy\n";
+        // Planner writes a math-tagged plan without independent recomputation.
+        let bad_body = b"## Goal kind\nmath\n## Verification plan\n1. evidence: output file exists\n";
         let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, bad_body));
         let tool_names = RoleToolNames::inherit_defaults();
         let outcome = run_goal_planner(
@@ -1295,11 +1289,8 @@ mod tests {
             "invalid plan must be deleted so resume can replan"
         );
         // Control: a complete math plan succeeds.
-        let good = format!(
-            "## Goal kind\nmath\n## Verification plan\n\
-             1. gating: adversarial independent recompute every claim with SymPy\n\
-             Capture to {{SCRATCH}}/{ADVERSARIAL_MATH_VERIFY_LOG}\n"
-        );
+        let good = "## Goal kind\nmath\n## Verification plan\n\
+                    1. gating: attacker-math independently recomputes the requested results from the final artifact\n";
         let plan_file2 = dir.path().join("plan2.md");
         let spawner2 = Arc::new(MockSpawner::ok_writes(&plan_file2, good.as_bytes()));
         let outcome2 = run_goal_planner(
