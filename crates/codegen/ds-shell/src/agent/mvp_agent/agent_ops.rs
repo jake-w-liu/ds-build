@@ -1162,6 +1162,7 @@ impl MvpAgent {
             user_id,
         );
         config.origin_client = origin_client;
+        crate::chatgpt::attach_bearer_resolver(&mut config);
         config
     }
     /// Resolve sampling config for a model by ID, falling back to the global
@@ -1412,6 +1413,7 @@ impl MvpAgent {
         models_manager: crate::agent::models::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
+        crate::chatgpt::start_background_sync(models_manager.clone());
         let sampling_config = models_manager.sampling_config();
         crate::upload::trace::spawn_purge_stale_upload_scratch();
         let storage_mode = cfg.storage_mode;

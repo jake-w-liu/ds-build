@@ -15,10 +15,18 @@ impl SlashCommand for LogoutCommand {
     }
 
     fn usage(&self) -> &str {
-        "/logout"
+        "/logout [chatgpt]"
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::Logout)
+    fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "" => CommandResult::Action(Action::Logout),
+            "chatgpt" | "openai" => CommandResult::Action(Action::ChatgptLogout),
+            _ => CommandResult::Error("Usage: /logout [chatgpt]".into()),
+        }
     }
 }

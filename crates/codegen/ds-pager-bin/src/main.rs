@@ -1759,9 +1759,14 @@ async fn async_main() -> Result<()> {
                 oauth,
                 device_auth,
                 devbox,
+                chatgpt,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = ds_telemetry::otel_layer::otel_guard();
+                if chatgpt {
+                    ds_shell::chatgpt::run_cli_login().await?;
+                    ds_shell::instrumentation::finalize_and_exit(0);
+                }
                 let config = ds_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -1770,8 +1775,12 @@ async fn async_main() -> Result<()> {
                 println!();
                 ds_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout => {
+            Command::Logout { chatgpt } => {
                 init_tracing_simple("cli");
+                if chatgpt {
+                    ds_shell::chatgpt::run_cli_logout()?;
+                    ds_shell::instrumentation::finalize_and_exit(0);
+                }
                 let config = ds_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)

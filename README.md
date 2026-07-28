@@ -39,7 +39,7 @@ project re-vendors and rebrands that work as **DS** for DeepSeek:
 
 First-party product analytics (Mixpanel), Sentry crash reporting, and internal
 telemetry phone-home are **off** by default. The only intended network traffic
-is your DeepSeek (or other BYOK) API calls.
+is your selected DeepSeek, ChatGPT-subscription, or other BYOK API traffic.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
@@ -111,6 +111,23 @@ export DEEPSEEK_API_KEY="sk-..."
 
 **C. Manual `~/.ds/config.toml`** — see [`config.example.toml`](config.example.toml)
 and [`DEEPSEEK.md`](DEEPSEEK.md). Use singular `[model....]`, not `[models....]`.
+
+**Optional ChatGPT subscription models**
+
+```sh
+ds login --chatgpt
+# then select a namespaced live-catalog model:
+ds --model openai/<model>
+
+ds logout --chatgpt
+```
+
+The ChatGPT OAuth tokens and model cache live in dedicated
+`~/.ds/openai-codex-*` files. These provider-qualified commands do not change
+DeepSeek credentials, endpoints, defaults, or bare `ds login` / `ds logout`
+behavior. In the TUI, use `/login chatgpt`, `/model`, and `/logout chatgpt`.
+Model names, context windows, and supported reasoning settings come from the
+signed-in account's Codex catalog rather than a hardcoded list.
 
 ### 4. Verify
 

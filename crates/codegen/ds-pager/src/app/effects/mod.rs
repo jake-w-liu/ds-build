@@ -81,6 +81,14 @@ pub(crate) fn execute(
                     TaskResult::LogoutComplete
                 });
         }
+        Effect::ChatgptLogin => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { send_chatgpt_auth(&tx, true).await });
+        }
+        Effect::ChatgptLogout => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move { send_chatgpt_auth(&tx, false).await });
+        }
         Effect::CheckSubscription { verify } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move { send_check_subscription(&tx, verify).await });

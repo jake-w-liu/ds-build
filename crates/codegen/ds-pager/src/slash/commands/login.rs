@@ -15,10 +15,18 @@ impl SlashCommand for LoginCommand {
     }
 
     fn usage(&self) -> &str {
-        "/login"
+        "/login [chatgpt]"
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::Login)
+    fn takes_args(&self) -> bool {
+        true
+    }
+
+    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+        match args.trim().to_ascii_lowercase().as_str() {
+            "" => CommandResult::Action(Action::Login),
+            "chatgpt" | "openai" => CommandResult::Action(Action::ChatgptLogin),
+            _ => CommandResult::Error("Usage: /login [chatgpt]".into()),
+        }
     }
 }

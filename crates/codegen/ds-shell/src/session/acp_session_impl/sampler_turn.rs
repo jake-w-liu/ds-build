@@ -307,7 +307,7 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
-        SamplingConfig {
+        let mut config = SamplingConfig {
             api_key: creds.api_key,
             base_url: cfg.base_url,
             model: cfg.model,
@@ -350,7 +350,9 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
-        }
+        };
+        crate::chatgpt::attach_bearer_resolver(&mut config);
+        config
     }
     /// Install auto-mode permission classifier with a live LLM side-query
     /// (laziness-classifier pattern: `prepare_chat_completion` +

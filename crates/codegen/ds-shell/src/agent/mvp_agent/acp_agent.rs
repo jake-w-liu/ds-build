@@ -3165,6 +3165,9 @@ impl acp::Agent for MvpAgent {
             "ds.cli/getApiKey" | "ds.cli/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
             }
+            "ds.cli/chatgpt/login" | "ds.cli/chatgpt/logout" => {
+                crate::extensions::chatgpt::handle(self, &args).await
+            }
             "ds.cli/session/info" | "ds.cli/session/close" | "ds.cli/session/list"
             | "ds.cli/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await

@@ -20,6 +20,15 @@ pub(super) fn dispatch_logout(_app: &mut AppView) -> Vec<Effect> {
     vec![Effect::Logout]
 }
 
+pub(super) fn dispatch_chatgpt_login(app: &mut AppView) -> Vec<Effect> {
+    app.show_toast("Opening ChatGPT sign-in\u{2026}");
+    vec![Effect::ChatgptLogin]
+}
+
+pub(super) fn dispatch_chatgpt_logout(_app: &mut AppView) -> Vec<Effect> {
+    vec![Effect::ChatgptLogout]
+}
+
 /// Ensure `login_method_id` is populated from stored auth methods.
 /// On the eager-auth path (cached token), login_method_id is never set
 /// because the user skipped the login screen.

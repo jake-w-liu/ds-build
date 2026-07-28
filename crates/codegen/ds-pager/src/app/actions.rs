@@ -595,6 +595,10 @@ pub enum Action {
     SwitchAccount,
     /// User pressed login on the welcome screen.
     Login,
+    /// Sign in to the additive ChatGPT provider.
+    ChatgptLogin,
+    /// Sign out of the additive ChatGPT provider.
+    ChatgptLogout,
     /// Cancel an in-progress login that was started from inside a session
     /// (`/login` or a 401 re-auth prompt) and return to the previous view.
     /// Distinct from `Quit`: abandoning a mid-session re-auth must not exit
@@ -1862,6 +1866,10 @@ pub enum Effect {
     },
     /// Log out via `ds.cli/auth/logout` (shell clears auth.json + in-memory state).
     Logout,
+    /// Run provider-qualified ChatGPT OAuth without changing DeepSeek auth.
+    ChatgptLogin,
+    /// Clear only ChatGPT credentials and models.
+    ChatgptLogout,
     /// Re-check subscription status via `ds.cli/auth/check_subscription`.
     /// `verify` scopes the result to a deferred-gate verification (see
     /// [`crate::app::subscription`]); `None` for generic checks.
@@ -2539,6 +2547,11 @@ pub enum TaskResult {
     },
     /// Shell acknowledged logout (auth cleared).
     LogoutComplete,
+    /// ChatGPT provider login/logout finished.
+    ChatgptAuthComplete {
+        ok: bool,
+        message: String,
+    },
     /// Shell responded to `ds.cli/auth/check_subscription`. `verify` echoes
     /// the generation from `Effect::CheckSubscription` for deferred-gate
     /// verifications.

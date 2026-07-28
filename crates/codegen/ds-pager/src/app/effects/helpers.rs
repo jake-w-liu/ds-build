@@ -639,6 +639,40 @@ pub(super) async fn send_logout(tx: &AcpAgentTx) {
         tracing::warn!(error = % e, "logout failed");
     }
 }
+pub(super) async fn send_chatgpt_auth(tx: &AcpAgentTx, login: bool) -> TaskResult {
+    let method = if login {
+        "ds.cli/chatgpt/login"
+    } else {
+        "ds.cli/chatgpt/logout"
+    };
+    let req = acp::ExtRequest::new(
+        method,
+        serde_json::value::to_raw_value(&serde_json::json!({}))
+            .expect("serialize ChatGPT auth params")
+            .into(),
+    );
+    match acp_send(req, tx).await {
+        Ok(response) => {
+            let value: serde_json::Value =
+                serde_json::from_str(response.0.get()).unwrap_or_default();
+            let ok = value.get("ok").and_then(|value| value.as_bool()).unwrap_or(false);
+            let message = value
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or(if login {
+                    "ChatGPT sign-in completed."
+                } else {
+                    "ChatGPT sign-out completed."
+                })
+                .to_owned();
+            TaskResult::ChatgptAuthComplete { ok, message }
+        }
+        Err(error) => TaskResult::ChatgptAuthComplete {
+            ok: false,
+            message: sanitize_user_error(&error.to_string()),
+        },
+    }
+}
 pub(super) async fn send_check_subscription(
     tx: &AcpAgentTx,
     verify: Option<u64>,

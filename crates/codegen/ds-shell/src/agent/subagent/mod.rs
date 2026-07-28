@@ -1031,7 +1031,7 @@ fn resolve_model_override_to_config(
     let mut credentials = resolve_credentials(&entry, session_key);
     credentials.auth_type = subagent_auth_type(Some(&entry), &ctx.auth_method_id);
     let resolved_auth_type = credentials.auth_type;
-    let config = sampling_config_for_model(
+    let mut config = sampling_config_for_model(
         &entry,
         credentials,
         ctx.alpha_test_key.clone(),
@@ -1039,6 +1039,7 @@ fn resolve_model_override_to_config(
         ctx.sampling_config.deployment_id.clone(),
         ctx.sampling_config.user_id.clone(),
     );
+    crate::chatgpt::attach_bearer_resolver(&mut config);
     ds_telemetry::unified_log::debug(
         "subagent resolve_model_override_to_config",
         None,

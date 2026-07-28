@@ -21,7 +21,11 @@ pub enum Command {
         json: bool,
     },
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Sign out of ChatGPT only; DeepSeek credentials are unchanged.
+        #[arg(long)]
+        chatgpt: bool,
+    },
     /// Sign in to DS
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
@@ -44,6 +48,9 @@ pub enum Command {
         /// `devbox-login` is enabled (`arg(skip)` otherwise → always false).
         #[arg(skip)]
         devbox: bool,
+        /// Sign in with a ChatGPT subscription; DeepSeek credentials are unchanged.
+        #[arg(long, conflicts_with_all = ["oauth", "device_auth"])]
+        chatgpt: bool,
     },
     /// Manage MCP server configurations
     Mcp(crate::mcp_cmd::McpArgs),
@@ -1162,8 +1169,40 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["ds", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Logout { chatgpt: false })
+        ));
         assert!(args.prompt.is_none());
+    }
+    #[test]
+    fn chatgpt_login_logout_are_provider_qualified() {
+        let login =
+            PagerArgs::try_parse_from(["ds", "login", "--chatgpt"]).expect("ChatGPT login parses");
+        assert!(matches!(
+            login.command,
+            Some(Command::Login {
+                chatgpt: true,
+                oauth: false,
+                device_auth: false,
+                ..
+            })
+        ));
+        let logout = PagerArgs::try_parse_from(["ds", "logout", "--chatgpt"])
+            .expect("ChatGPT logout parses");
+        assert!(matches!(
+            logout.command,
+            Some(Command::Logout { chatgpt: true })
+        ));
+
+        let deepseek = PagerArgs::try_parse_from(["ds", "login"]).expect("bare login parses");
+        assert!(matches!(
+            deepseek.command,
+            Some(Command::Login {
+                chatgpt: false,
+                ..
+            })
+        ));
     }
     #[test]
     fn positional_prompt_conflicts_with_headless_single() {

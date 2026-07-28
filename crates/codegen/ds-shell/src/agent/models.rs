@@ -105,6 +105,9 @@ pub struct ModelsManager {
 
 struct Inner {
     prefetched: RwLock<Option<IndexMap<String, ModelEntry>>>,
+    /// Optional ChatGPT-subscription models, kept separate so DeepSeek catalog
+    /// fetching, filtering, defaults, and cache semantics remain unchanged.
+    chatgpt_models: RwLock<IndexMap<String, ModelEntry>>,
     models: RwLock<IndexMap<String, ModelEntry>>,
     current_model_id: RwLock<acp::ModelId>,
     current_reasoning_effort: RwLock<Option<ReasoningEffort>>,
@@ -176,6 +179,7 @@ impl ModelsManager {
         Self {
             inner: Arc::new(Inner {
                 prefetched: RwLock::new(prefetched),
+                chatgpt_models: RwLock::new(IndexMap::new()),
                 models: RwLock::new(models),
                 current_model_id: RwLock::new(current_model_id),
                 current_reasoning_effort: RwLock::new(current_reasoning_effort),
@@ -283,7 +287,7 @@ impl ModelsManager {
             return;
         }
         let prefetched = self.inner.prefetched.read().clone();
-        let new_catalog = resolve_model_catalog(&new_config, prefetched);
+        let new_catalog = self.catalog_with_chatgpt(&new_config, prefetched);
         let has_real_catalog = *self.inner.has_fetched_real_catalog.read();
         if has_real_catalog && let Err(e) = validate_selectable(&new_config, &new_catalog) {
             tracing::error!(error = %e, "ignoring config reload: allowed_models excludes all models");
@@ -576,8 +580,49 @@ impl ModelsManager {
 
     // ── Mutations ───────────────────────────────────────────────────
 
+    fn catalog_with_chatgpt(
+        &self,
+        cfg: &config::Config,
+        prefetched: Option<IndexMap<String, ModelEntry>>,
+    ) -> IndexMap<String, ModelEntry> {
+        let mut catalog = resolve_model_catalog(cfg, prefetched);
+        let mut chatgpt = self.inner.chatgpt_models.read().clone();
+        apply_chatgpt_catalog_policies(cfg, &mut chatgpt);
+        for (id, entry) in chatgpt {
+            // User-defined entries retain precedence if they intentionally use
+            // the reserved-looking `openai/*` key.
+            catalog.entry(id).or_insert(entry);
+        }
+        catalog
+    }
+
     fn rebuild(&self, cfg: &config::Config, prefetched: Option<IndexMap<String, ModelEntry>>) {
-        *self.inner.models.write() = resolve_model_catalog(cfg, prefetched);
+        *self.inner.models.write() = self.catalog_with_chatgpt(cfg, prefetched);
+    }
+
+    /// Replace only the additive ChatGPT catalog projection.
+    pub(crate) fn install_chatgpt_models(&self, models: IndexMap<String, ModelEntry>) {
+        *self.inner.chatgpt_models.write() = models;
+        let cfg = self.inner.cfg.read().clone();
+        let prefetched = self.inner.prefetched.read().clone();
+        self.rebuild(&cfg, prefetched);
+        let preferred_is_chatgpt = cfg.models.default.as_deref().is_some_and(|preferred| {
+            let models = self.inner.models.read();
+            config::find_model_by_id(&models, preferred)
+                .is_some_and(|entry| crate::chatgpt::is_chatgpt_base_url(&entry.info.base_url))
+        });
+        if preferred_is_chatgpt {
+            self.reselect_default_model(&cfg);
+        } else {
+            self.reselect_current_model_if_missing(&cfg);
+        }
+        self.notify_models_updated();
+    }
+
+    /// Remove only ChatGPT models. DeepSeek state and settings are rebuilt from
+    /// the exact same sources they used before the provider was added.
+    pub(crate) fn remove_chatgpt_models(&self) {
+        self.install_chatgpt_models(IndexMap::new());
     }
 
     /// Refresh models when the etag changes.
@@ -939,7 +984,7 @@ impl ModelsManager {
     /// Wipe in-memory state so a previous identity's catalog doesn't leak.
     fn clear(&self) {
         *self.inner.prefetched.write() = None;
-        *self.inner.models.write() = IndexMap::new();
+        *self.inner.models.write() = self.inner.chatgpt_models.read().clone();
         *self.inner.etag.write() = None;
         *self.inner.has_fetched_real_catalog.write() = false;
         self.inner
@@ -971,7 +1016,7 @@ impl ModelsManager {
         let credentials =
             resolve_credentials(current_model, session_auth.as_ref().map(|a| a.key.as_str()));
 
-        sampling_config_for_model(
+        let mut sampling_config = sampling_config_for_model(
             current_model,
             credentials,
             config.endpoints.alpha_test_key.clone(),
@@ -980,7 +1025,9 @@ impl ModelsManager {
                 config.endpoints.deployment_key.as_deref(),
             ),
             None,
-        )
+        );
+        crate::chatgpt::attach_bearer_resolver(&mut sampling_config);
+        sampling_config
     }
 
     /// Disk-cache origin key for this manager's current endpoints/auth shape
@@ -1844,6 +1891,60 @@ impl ModelGlobSet {
     }
 }
 
+/// Apply the existing model-policy surface to the additive provider overlay.
+/// Keeping this separate from [`resolve_model_catalog`] avoids changing the
+/// DeepSeek catalog's source/merge logic while still honoring managed/user
+/// allow, disable, hide, and effort constraints for every selectable model.
+fn apply_chatgpt_catalog_policies(
+    cfg: &config::Config,
+    catalog: &mut IndexMap<String, ModelEntry>,
+) {
+    if let Ok(Some(disabled)) = ModelGlobSet::compile(cfg.models.disabled_models.as_ref()) {
+        catalog.retain(|key, entry| !disabled.matches(key, &entry.info.model));
+    }
+
+    match ModelGlobSet::compile(cfg.models.allowed_models.as_ref()) {
+        Ok(None) => {
+            for entry in catalog.values_mut() {
+                entry.info.user_selectable = true;
+            }
+        }
+        Ok(Some(allowed)) => {
+            for (key, entry) in catalog.iter_mut() {
+                entry.info.user_selectable = allowed.matches(key, &entry.info.model);
+            }
+        }
+        Err(_) => {
+            for entry in catalog.values_mut() {
+                entry.info.user_selectable = false;
+            }
+        }
+    }
+
+    if let Ok(Some(hidden)) = ModelGlobSet::compile(cfg.models.hidden_models.as_ref()) {
+        for (key, entry) in catalog.iter_mut() {
+            if hidden.matches(key, &entry.info.model) {
+                entry.info.hidden = true;
+            }
+        }
+    }
+
+    if let Some(effort) = cfg.models.default_reasoning_effort
+        && let Some(default_id) = cfg.models.default.as_deref()
+        && let Some(entry) = catalog.get_mut(default_id)
+        && model_offers_reasoning_effort(&entry.info, effort)
+    {
+        entry.info.reasoning_effort = Some(effort);
+    }
+    if let Some(effort) = cfg.reasoning_effort_override {
+        for entry in catalog.values_mut() {
+            if model_offers_reasoning_effort(&entry.info, effort) {
+                entry.info.reasoning_effort = Some(effort);
+            }
+        }
+    }
+}
+
 /// Single source of truth for the catalog. Applies, in order: `disabled_models`
 /// (remove), `allowed_models` (mark `user_selectable`), `hidden_models` (mark
 /// `hidden`). Special/internal models (web_search, subagents, …) resolve via
@@ -2025,6 +2126,42 @@ mod tests {
 
     fn config_from_toml(toml: &str) -> config::Config {
         config::Config::new_from_toml_cfg(&toml::from_str(toml).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn chatgpt_overlay_does_not_mutate_deepseek_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(
+            tmp.path(),
+            DsComConfig::default(),
+        ));
+        let cfg = config::Config::default();
+        let manager = ModelsManager::from_config(&cfg, None, auth_manager).unwrap();
+        let deepseek_before = serde_json::to_value(manager.models()).unwrap();
+
+        let mut openai = IndexMap::new();
+        let mut entry = ModelEntry::fallback("gpt-test", &cfg.endpoints);
+        entry.info.id = Some("openai/gpt-test".into());
+        entry.info.base_url = "https://chatgpt.com/backend-api/codex".into();
+        openai.insert("openai/gpt-test".into(), entry);
+        manager.install_chatgpt_models(openai);
+
+        let with_overlay = manager.models();
+        assert!(with_overlay.contains_key("openai/gpt-test"));
+        let deepseek_after = with_overlay
+            .into_iter()
+            .filter(|(id, _)| !id.starts_with("openai/"))
+            .collect::<IndexMap<_, _>>();
+        assert_eq!(
+            serde_json::to_value(deepseek_after).unwrap(),
+            deepseek_before
+        );
+
+        manager.remove_chatgpt_models();
+        assert_eq!(
+            serde_json::to_value(manager.models()).unwrap(),
+            deepseek_before
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub(crate) mod auth_gate;
 pub mod billing;
 pub mod bundle;
 pub mod chat_conversation_history;
+pub mod chatgpt;
 pub mod code_nav;
 pub mod debug;
 pub mod feedback;

@@ -10,6 +10,7 @@ pub use ds_tracing_macros::{teprintln, timed, tprintln};
 pub mod active_sessions;
 pub mod agent;
 pub mod auth;
+pub mod chatgpt;
 pub mod builtin;
 pub mod bundle;
 pub mod claude_import;

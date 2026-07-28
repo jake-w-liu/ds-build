@@ -29,6 +29,13 @@ pub fn bootstrap(
     cfg.validate_model_filters()?;
     init_process(&cfg, auth_manager);
     let models_manager = ModelsManager::from_config(&cfg, prefetched, auth_manager.clone())?;
+    match crate::chatgpt::cached_model_entries() {
+        Ok(models) if !models.is_empty() => models_manager.install_chatgpt_models(models),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not load cached ChatGPT model catalog");
+        }
+    }
 
     // Refresh on every auth refresh — the FSEvents watcher can silently die after
     // macOS sleep, stranding the catalog on bundled defaults.
