@@ -11,6 +11,7 @@ members = [
     "crates/codegen/ds-chat-state",
     "crates/codegen/ds-headroom",
     "crates/codegen/ds-codebase-graph",
+    "crates/codegen/ds-graphify",
     "crates/codegen/ds-crash-handler",
     "crates/codegen/ds-fast-worktree",
     "crates/codegen/ds-file-utils",

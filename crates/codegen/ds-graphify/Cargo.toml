@@ -1,0 +1,36 @@
+[package]
+license = "Apache-2.0"
+name = "ds-graphify"
+version = "0.1.56"
+edition.workspace = true
+description = "Native Graphify-compatible knowledge graph: AST extract, cluster, report, query"
+
+[[bin]]
+name = "graphify"
+path = "src/bin/graphify.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+dunce = { workspace = true }
+ignore = { workspace = true }
+petgraph = { workspace = true }
+rayon = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+tracing = { workspace = true }
+
+# Tree-sitter AST extractors (same stack as ds-codebase-graph)
+tree-sitter = "0.25.10"
+tree-sitter-rust = "0.24.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

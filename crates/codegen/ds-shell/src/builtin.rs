@@ -16,6 +16,7 @@ const SILENCE_SKILL_MD: &str = include_str!("../skills/silence/SKILL.md");
 const FABLE_SKILL_MD: &str = include_str!("../skills/fable/SKILL.md");
 const FABLE_LOOP_SKILL_MD: &str = include_str!("../skills/fable-loop/SKILL.md");
 const PSST_GPT_SKILL_MD: &str = include_str!("../skills/psst-gpt/SKILL.md");
+const GRAPHIFY_SKILL_MD: &str = include_str!("../skills/graphify/SKILL.md");
 
 /// Extra files shipped beside a skill's SKILL.md (e.g. scripts).
 /// Path is relative to `skills/<name>/`.
@@ -128,6 +129,7 @@ const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("fable", FABLE_SKILL_MD),
     ("fable-loop", FABLE_LOOP_SKILL_MD),
     ("psst-gpt", PSST_GPT_SKILL_MD),
+    ("graphify", GRAPHIFY_SKILL_MD),
 ];
 
 /// True when a discovered skill is the copy `extract_bundled_files` wrote to

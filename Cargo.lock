@@ -3160,6 +3160,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-graphify"
+version = "0.1.56"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dunce",
+ "ignore",
+ "petgraph 0.6.5",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
 name = "ds-headroom"
 version = "0.1.56"
 dependencies = [
