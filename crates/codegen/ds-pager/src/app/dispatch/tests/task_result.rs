@@ -1225,6 +1225,39 @@ fn available_commands_refreshed_empty_is_noop() {
     );
 }
 
+#[test]
+fn chatgpt_auth_completion_applies_response_model_catalog() {
+    let mut app = test_app_with_agent();
+    let chatgpt_id = acp::ModelId::new(Arc::from("openai/gpt-test"));
+    let model_state = acp::SessionModelState::new(
+        chatgpt_id.clone(),
+        vec![acp::ModelInfo::new(
+            chatgpt_id.clone(),
+            "ChatGPT · GPT Test",
+        )],
+    );
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::ChatgptAuthComplete {
+            ok: true,
+            message: "signed in".into(),
+            models: Some(model_state),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(app.models.available.contains_key(&chatgpt_id));
+    assert!(
+        app.agents[&AgentId(0)]
+            .session
+            .models
+            .available
+            .contains_key(&chatgpt_id),
+        "the requester must not depend on an independently delivered notification"
+    );
+}
+
 // -- Session deletion from the /resume picker -----------------------
 
 #[test]

@@ -116,6 +116,12 @@ mod tests {
         assert!(config.user_id.is_none());
         assert!(config.deployment_id.is_none());
         assert!(config.bearer_resolver.is_some());
+        assert!(
+            config
+                .bearer_resolver
+                .as_ref()
+                .is_some_and(|resolver| { resolver.responses_system_as_instructions() })
+        );
     }
 
     #[test]

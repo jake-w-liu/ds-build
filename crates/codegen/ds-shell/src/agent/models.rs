@@ -400,6 +400,13 @@ impl ModelsManager {
         self.inner.current_model_id.read().clone()
     }
 
+    pub(crate) fn session_model_state(&self) -> acp::SessionModelState {
+        acp::SessionModelState::new(
+            self.current_model_id(),
+            self.available().values().cloned().collect(),
+        )
+    }
+
     pub fn set_current_model_id(&self, id: acp::ModelId) {
         // Only bump the model-switch generation on a real change.
         // The pager's `/model` handler can call this with the

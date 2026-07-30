@@ -137,6 +137,10 @@ impl ds_sampler::BearerResolver for ChatgptBearerResolver {
             _ => Some("invalidated".to_owned()),
         }
     }
+
+    fn responses_system_as_instructions(&self) -> bool {
+        true
+    }
 }
 
 pub(crate) fn load_tokens() -> anyhow::Result<Option<Tokens>> {

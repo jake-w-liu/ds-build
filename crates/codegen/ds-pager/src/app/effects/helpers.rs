@@ -665,11 +665,26 @@ pub(super) async fn send_chatgpt_auth(tx: &AcpAgentTx, login: bool) -> TaskResul
                     "ChatGPT sign-out completed."
                 })
                 .to_owned();
-            TaskResult::ChatgptAuthComplete { ok, message }
+            let models = match value.get("modelState").cloned() {
+                Some(value) => match serde_json::from_value(value) {
+                    Ok(models) => Some(models),
+                    Err(error) => {
+                        tracing::warn!(%error, "ChatGPT auth response contained invalid modelState");
+                        None
+                    }
+                },
+                None => None,
+            };
+            TaskResult::ChatgptAuthComplete {
+                ok,
+                message,
+                models,
+            }
         }
         Err(error) => TaskResult::ChatgptAuthComplete {
             ok: false,
             message: sanitize_user_error(&error.to_string()),
+            models: None,
         },
     }
 }

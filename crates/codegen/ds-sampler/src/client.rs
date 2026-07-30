@@ -22,10 +22,10 @@ use serde::Serialize;
 
 use ds_sampling_types::error::{parse_error_bytes, try_parse_stream_error};
 use ds_sampling_types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationItem,
+    ConversationRequest, ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER,
+    MessagesRequestWrapper, ResponseModelMetadata, Result, SamplingError, build_messages_request,
+    is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
@@ -315,7 +315,31 @@ struct ClientDefaults {
     api_backend: ApiBackend,
     auth_scheme: AuthScheme,
     stream_tool_calls: bool,
+    responses_system_as_instructions: bool,
     doom_loop_recovery: Option<ds_sampling_types::DoomLoopRecoveryPolicy>,
+}
+
+/// Remove system-role input items and preserve their ordered content in the
+/// Responses API `instructions` field.
+///
+/// The ChatGPT Codex backend rejects `role: "system"` inside `input`. Joining
+/// multiple system items with a blank line retains their order and separation
+/// without changing the generic Responses conversion used by DeepSeek.
+fn take_system_messages_as_instructions(request: &mut ConversationRequest) -> Option<String> {
+    let mut instructions = Vec::new();
+    request.items.retain(|item| {
+        if let ConversationItem::System(system) = item {
+            instructions.push(system.content.as_ref().to_owned());
+            false
+        } else {
+            true
+        }
+    });
+    if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions.join("\n\n"))
+    }
 }
 
 // =============================================================================
@@ -519,6 +543,10 @@ impl SamplingClient {
             has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
         );
 
+        let responses_system_as_instructions = config
+            .bearer_resolver
+            .as_ref()
+            .is_some_and(|resolver| resolver.responses_system_as_instructions());
         let defaults = ClientDefaults {
             model: config.model,
             max_completion_tokens: config.max_completion_tokens,
@@ -527,6 +555,7 @@ impl SamplingClient {
             api_backend: config.api_backend,
             auth_scheme: config.auth_scheme,
             stream_tool_calls: config.stream_tool_calls,
+            responses_system_as_instructions,
             doom_loop_recovery: config.doom_loop_recovery,
         };
 
@@ -1850,7 +1879,7 @@ impl SamplingClient {
         // (e.g., x_search). These are injected as raw JSON after serialization.
         let extra_tools = ds_sampling_types::extra_raw_tools(&request.hosted_tools);
 
-        let responses_request: rs::CreateResponse = (&request).into();
+        let responses_request = self.prepare_responses_request(&mut request);
 
         let mut wrapper = CreateResponseWrapper::new(responses_request);
         wrapper.x_ds_conv_id = x_ds_conv_id;
@@ -1883,7 +1912,7 @@ impl SamplingClient {
         let x_ds_turn_idx = request.x_ds_turn_idx.clone();
         let x_ds_agent_id = request.x_ds_agent_id.clone();
 
-        let responses_request: rs::CreateResponse = (&request).into();
+        let responses_request = self.prepare_responses_request(&mut request);
 
         let mut wrapper = CreateResponseWrapper::new(responses_request);
         wrapper.x_ds_conv_id = x_ds_conv_id;
@@ -1897,6 +1926,19 @@ impl SamplingClient {
         }
 
         self.create_response(wrapper).await
+    }
+
+    fn prepare_responses_request(&self, request: &mut ConversationRequest) -> rs::CreateResponse {
+        let instructions = self
+            .defaults
+            .responses_system_as_instructions
+            .then(|| take_system_messages_as_instructions(request))
+            .flatten();
+        let mut response: rs::CreateResponse = (&*request).into();
+        if instructions.is_some() {
+            response.instructions = instructions;
+        }
+        response
     }
 
     /// Send a conversation request using the Anthropic Messages API (streaming).
@@ -2043,6 +2085,56 @@ mod tests {
             doom_loop_recovery: None,
             header_injector: None,
         }
+    }
+
+    #[test]
+    fn chatgpt_response_shape_moves_system_messages_to_instructions() {
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::system("primary system prompt"),
+            ConversationItem::user("hello"),
+            ConversationItem::system("late system constraint"),
+        ]);
+        let instructions = take_system_messages_as_instructions(&mut request);
+
+        assert_eq!(
+            instructions.as_deref(),
+            Some("primary system prompt\n\nlate system constraint")
+        );
+        assert!(
+            request
+                .items
+                .iter()
+                .all(|item| !matches!(item, ConversationItem::System(_))),
+            "the ChatGPT wire input must contain no system-role messages"
+        );
+        assert_eq!(request.items.len(), 1);
+
+        #[derive(Debug)]
+        struct InstructionsResolver;
+        impl crate::config::BearerResolver for InstructionsResolver {
+            fn current_bearer(&self) -> Option<String> {
+                None
+            }
+
+            fn responses_system_as_instructions(&self) -> bool {
+                true
+            }
+        }
+
+        let mut config = minimal_config();
+        config.api_backend = ApiBackend::Responses;
+        config.bearer_resolver = Some(std::sync::Arc::new(InstructionsResolver));
+        let client = SamplingClient::new(config).expect("client");
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::system("system prompt"),
+            ConversationItem::user("hello"),
+        ]);
+        let wire = client.prepare_responses_request(&mut request);
+        assert_eq!(wire.instructions.as_deref(), Some("system prompt"));
+        let rs::InputParam::Items(items) = wire.input else {
+            panic!("expected item input");
+        };
+        assert_eq!(items.len(), 1, "system input must be absent from the wire");
     }
 
     /// Verify the serialized shape of StreamingChatRequest matches the

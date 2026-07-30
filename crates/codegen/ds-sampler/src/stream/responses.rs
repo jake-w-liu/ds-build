@@ -120,6 +120,8 @@ pub fn stream_responses<'a>(
         let mut chunk_index: u64 = 0;
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
+        let mut text_acc = String::new();
+        let mut refusal_acc = String::new();
         let mut reasoning_acc = String::new();
         let mut last_content_chunk_at = Instant::now();
 
@@ -128,6 +130,10 @@ pub fn stream_responses<'a>(
         // later `ResponseFunctionCallArgumentsDelta` events
         // look up `output_index` here to find the matching `tool_index`.
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
+        // ChatGPT's Codex endpoint can omit `response.output` from the
+        // terminal frame, so retain the streamed function-call state as a
+        // lossless fallback for the final ConversationResponse.
+        let mut streamed_tool_calls: BTreeMap<u32, rs::FunctionToolCall> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
 
         let mut stream = raw_stream;
@@ -194,10 +200,54 @@ pub fn stream_responses<'a>(
                         chunk_timestamps.push(Instant::now());
                         chunk_index += 1;
                         message_chunk_count += 1;
+                        text_acc.push_str(&delta);
                         yield SamplingEvent::ChannelToken {
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Text,
                             text: delta,
+                            chunk_index,
+                        };
+                    }
+                }
+
+                ResponseStreamEvent::ResponseRefusalDelta(refusal_event) => {
+                    let delta = refusal_event.delta;
+                    if !delta.is_empty() {
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_timestamps.push(Instant::now());
+                        chunk_index += 1;
+                        message_chunk_count += 1;
+                        refusal_acc.push_str(&delta);
+                        yield SamplingEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: SamplingChannel::Text,
+                            text: delta,
+                            chunk_index,
+                        };
+                    }
+                }
+
+                ResponseStreamEvent::ResponseRefusalDone(refusal_event) => {
+                    if refusal_acc.is_empty() && !refusal_event.refusal.is_empty() {
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_timestamps.push(Instant::now());
+                        chunk_index += 1;
+                        message_chunk_count += 1;
+                        refusal_acc = refusal_event.refusal.clone();
+                        yield SamplingEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: SamplingChannel::Text,
+                            text: refusal_event.refusal,
                             chunk_index,
                         };
                     }
@@ -249,12 +299,15 @@ pub fn stream_responses<'a>(
                         let tool_index = next_tool_index;
                         next_tool_index += 1;
                         output_to_tool_index.insert(added_event.output_index, tool_index);
+                        let call_id = fc.call_id.clone();
+                        let name = fc.name.clone();
+                        streamed_tool_calls.insert(added_event.output_index, fc);
 
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
-                            id: Some(fc.call_id),
-                            name: Some(fc.name),
+                            id: Some(call_id),
+                            name: Some(name),
                             arguments_delta: None,
                         };
                     }
@@ -268,6 +321,9 @@ pub fn stream_responses<'a>(
                         && let Some(&tool_index) =
                             output_to_tool_index.get(&args_event.output_index)
                     {
+                        if let Some(call) = streamed_tool_calls.get_mut(&args_event.output_index) {
+                            call.arguments.push_str(&delta);
+                        }
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
@@ -275,6 +331,15 @@ pub fn stream_responses<'a>(
                             name: None,
                             arguments_delta: Some(delta),
                         };
+                    }
+                }
+
+                ResponseStreamEvent::ResponseFunctionCallArgumentsDone(args_event) => {
+                    if let Some(call) = streamed_tool_calls.get_mut(&args_event.output_index) {
+                        call.arguments = args_event.arguments;
+                        if let Some(name) = args_event.name {
+                            call.name = name;
+                        }
                     }
                 }
 
@@ -348,6 +413,9 @@ pub fn stream_responses<'a>(
                 // For CustomToolCall this includes x_search results.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
                     match &done_event.item {
+                        rs::OutputItem::FunctionCall(fc) => {
+                            streamed_tool_calls.insert(done_event.output_index, fc.clone());
+                        }
                         rs::OutputItem::WebSearchCall(ws) => {
                             let result = serde_json::to_value(ws).ok();
                             yield SamplingEvent::BackendToolCallCompleted {
@@ -456,6 +524,24 @@ pub fn stream_responses<'a>(
             .and_then(|s| s.parse::<i64>().ok());
 
         let status = response.status.clone();
+        if refusal_acc.is_empty() {
+            refusal_acc = response
+                .output
+                .iter()
+                .flat_map(|item| match item {
+                    rs::OutputItem::Message(message) => message.content.as_slice(),
+                    _ => &[],
+                })
+                .filter_map(|content| match content {
+                    rs::OutputMessageContent::Refusal(refusal) => {
+                        Some(refusal.refusal.as_str())
+                    }
+                    _ => None,
+                })
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
 
         // Convert to ConversationItem(s); patch in accumulated reasoning
         // text as a fallback when the final response lacks `content` /
@@ -463,14 +549,53 @@ pub fn stream_responses<'a>(
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
         let mut items = ds_sampling_types::response_to_conversation_items(response);
         ds_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
+        if !text_acc.is_empty()
+            && let Some(ConversationItem::Assistant(assistant)) = items
+                .iter_mut()
+                .rev()
+                .find(|item| matches!(item, ConversationItem::Assistant(_)))
+            && assistant.content.is_empty()
+        {
+            assistant.content = std::sync::Arc::<str>::from(text_acc);
+        }
+        if !refusal_acc.is_empty()
+            && let Some(ConversationItem::Assistant(assistant)) = items
+                .iter_mut()
+                .rev()
+                .find(|item| matches!(item, ConversationItem::Assistant(_)))
+            && assistant.content.is_empty()
+        {
+            assistant.content = std::sync::Arc::<str>::from(refusal_acc.clone());
+        }
+        if !streamed_tool_calls.is_empty()
+            && let Some(ConversationItem::Assistant(assistant)) = items
+                .iter_mut()
+                .rev()
+                .find(|item| matches!(item, ConversationItem::Assistant(_)))
+            && assistant.tool_calls.is_empty()
+        {
+            assistant.tool_calls = streamed_tool_calls
+                .into_values()
+                .map(|call| ds_sampling_types::ToolCall {
+                    id: std::sync::Arc::<str>::from(call.call_id),
+                    name: call.name,
+                    arguments: std::sync::Arc::<str>::from(call.arguments),
+                })
+                .collect();
+        }
 
         let has_tool_calls = items.iter().any(|i| match i {
             ConversationItem::Assistant(a) => !a.tool_calls.is_empty(),
             _ => false,
         });
 
+        // A tool call remains actionable even if the same response also
+        // carries refusal text. Preserve it as the terminal reason so the
+        // agent loop executes the tool instead of stopping early.
         let stop_reason = if has_tool_calls {
             Some(StopReason::ToolCalls)
+        } else if !refusal_acc.is_empty() {
+            Some(StopReason::ContentFilter)
         } else {
             match status {
                 Status::Completed => Some(StopReason::Stop),
@@ -504,7 +629,7 @@ pub fn stream_responses<'a>(
             cost_usd_ticks,
             message_chunks_emitted: message_chunk_count,
             doom_loop_signals,
-            stop_message: None, // not reported on the Responses API
+            stop_message: (!refusal_acc.is_empty()).then_some(refusal_acc),
         };
 
         yield SamplingEvent::Completed {
@@ -594,6 +719,36 @@ mod tests {
         })
     }
 
+    fn completed_refusal_event(refusal: &str) -> rs::ResponseStreamEvent {
+        let mut response = empty_completed_response();
+        response.output.push(rs_types::OutputItem::Message(
+            rs_types::OutputMessage {
+                content: vec![rs_types::OutputMessageContent::Refusal(
+                    rs_types::RefusalContent {
+                        refusal: refusal.into(),
+                    },
+                )],
+                id: "item-1".into(),
+                role: rs_types::AssistantRole::Assistant,
+                status: rs_types::OutputStatus::Completed,
+            },
+        ));
+        rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+            response,
+            sequence_number: 0,
+        })
+    }
+
+    fn refusal_delta_event(delta: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseRefusalDelta(rs_types::ResponseRefusalDeltaEvent {
+            sequence_number: 0,
+            item_id: "item-1".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: delta.into(),
+        })
+    }
+
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
         let mut out = Vec::new();
         let mut s = pin!(s);
@@ -653,6 +808,61 @@ mod tests {
         match events.last().unwrap() {
             SamplingEvent::Completed { response, .. } => {
                 assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                assert_eq!(
+                    response.assistant_text(),
+                    "hello",
+                    "streamed text must survive when the terminal response omits output"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_delta_then_completed_is_visible_and_terminal() {
+        let raw =
+            stream::iter(vec![Ok(refusal_delta_event("cannot comply")), Ok(completed_event())])
+                .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "cannot comply");
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(response.stop_message.as_deref(), Some("cannot comply"));
+                assert_eq!(response.message_chunks_emitted, 1);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_refusal_without_deltas_uses_fallback_content() {
+        let raw =
+            stream::iter(vec![Ok(completed_refusal_event("terminal refusal"))]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "terminal refusal");
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(response.stop_message.as_deref(), Some("terminal refusal"));
+                assert_eq!(response.message_chunks_emitted, 0);
+                assert_eq!(response.fallback_text().as_deref(), Some("terminal refusal"));
             }
             other => panic!("expected Completed, got {other:?}"),
         }
@@ -847,6 +1057,44 @@ mod tests {
         assert_eq!(deltas[1].2, None);
         assert_eq!(deltas[1].3.as_deref(), Some("{\"x\":"));
         assert_eq!(deltas[2].3.as_deref(), Some("1}"));
+
+        let SamplingEvent::Completed { response, .. } = evs.last().unwrap() else {
+            panic!("expected completed response");
+        };
+        let calls = response.tool_calls();
+        assert_eq!(
+            calls.len(),
+            1,
+            "streamed function calls must survive when the terminal response omits output"
+        );
+        assert_eq!(calls[0].id.as_ref(), "call_xyz");
+        assert_eq!(calls[0].name, "do_thing");
+        assert_eq!(calls[0].arguments.as_ref(), "{\"x\":1}");
+    }
+
+    #[tokio::test]
+    async fn function_call_takes_terminal_precedence_over_refusal_text() {
+        let raw = stream::iter(vec![
+            Ok(function_call_added_event(0, "call_xyz", "do_thing")),
+            Ok(refusal_delta_event("cannot answer directly")),
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let evs = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        let SamplingEvent::Completed { response, .. } = evs.last().unwrap() else {
+            panic!("expected completed response");
+        };
+        assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.stop_message.as_deref(), Some("cannot answer directly"));
     }
 
     #[tokio::test]

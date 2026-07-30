@@ -165,6 +165,12 @@ impl Default for SamplerConfig {
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].
 pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     fn current_bearer(&self) -> Option<String>;
+
+    /// Whether this provider requires Responses API system messages to be
+    /// carried in the top-level `instructions` field.
+    fn responses_system_as_instructions(&self) -> bool {
+        false
+    }
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;

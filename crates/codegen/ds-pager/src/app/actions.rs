@@ -2551,6 +2551,7 @@ pub enum TaskResult {
     ChatgptAuthComplete {
         ok: bool,
         message: String,
+        models: Option<acp::SessionModelState>,
     },
     /// Shell responded to `ds.cli/auth/check_subscription`. `verify` echoes
     /// the generation from `Effect::CheckSubscription` for deferred-gate

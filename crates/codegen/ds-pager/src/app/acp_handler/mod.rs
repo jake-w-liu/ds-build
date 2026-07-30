@@ -47,6 +47,7 @@ mod queue;
 mod routing;
 mod session_notification;
 mod settings;
+pub(crate) use settings::apply_models_update;
 mod subagent_activity;
 
 #[cfg(test)]

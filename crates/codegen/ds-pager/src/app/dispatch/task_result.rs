@@ -957,7 +957,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.welcome_prompt_focused = false;
             effects
         }
-        TaskResult::ChatgptAuthComplete { ok, message } => {
+        TaskResult::ChatgptAuthComplete {
+            ok,
+            message,
+            models,
+        } => {
+            if let Some(models) = models {
+                crate::app::acp_handler::apply_models_update(models, app);
+            }
             let message = if ok {
                 message
             } else {
