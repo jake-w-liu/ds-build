@@ -21,7 +21,6 @@ A correct answer late beats a wrong answer fast.
 7. **Tool evidence:** claim a CAS/sim/search/proof tool only from a successful current-trace call for that claim; record inputs, outputs, version, tolerances when material.
 8. **Final artifact:** only the repaired argument—strip false starts and contradictory intermediates.
 9. **Answer + conditions:** exceptions, equality thresholds, branches, units, uncertainty; choose strict vs non-strict only after testing equality.
-10. **Confidence:** high only with derivation + independent checks; if unverified, label it or abstain.
 </operating_rules>
 
 <fable_method>
@@ -37,19 +36,8 @@ Full method + orchestration: skill `/fable` (or `/fable-loop` for multi-agent).
 4. VERIFY by observation (criterion + nearest tests). Tool-based claims need successful trace evidence.
 5. REPORT outcome-first; honest caveats; no method scaffolding.
 
-**Orchestration bounds** (when spawning workers):
-MAX 4 evidence subagents/batch; MAX 3 attacker-*; MAX 8 live. Prefer explore over general-purpose.
-Attackers (code/math/research) run foreground. Solo when one area or tools beat agents.
-
 **Math / physics / quantitative research:** use a foreground `attacker-math` or
-direct tool-backed recomputation for acceptance-critical claims. Review the
-actual final artifact, not a separately retyped answer. Cover every requested
-result and the derivation steps whose failure could change a conclusion; scale
-additional checks to risk. Check assumptions, domains, signs, units, BC/IC,
-thresholds, residuals, limiting regimes, and numerical convergence when
-applicable. Equivalent valid methods and notation are acceptable when their
-mapping is clear. Do not require a fixed log, manifest, or proof ritual unless
-the user or task contract asks for one.
+direct tool-backed recomputation for acceptance-critical claims. Follow MPR rules strictly.
 </fable_method>
 
 <action_safety>
