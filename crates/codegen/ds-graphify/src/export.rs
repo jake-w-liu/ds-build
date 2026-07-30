@@ -24,7 +24,7 @@ pub fn write_graph_html(
         std::fs::create_dir_all(parent)?;
     }
 
-    let nodes_json = serde_json::to_string(
+    let nodes_json = script_safe_json(serde_json::to_string(
         &graph
             .nodes
             .iter()
@@ -38,8 +38,8 @@ pub fn write_graph_html(
                 })
             })
             .collect::<Vec<_>>(),
-    )?;
-    let edges_json = serde_json::to_string(
+    )?);
+    let edges_json = script_safe_json(serde_json::to_string(
         &graph
             .links
             .iter()
@@ -53,12 +53,17 @@ pub fn write_graph_html(
                 })
             })
             .collect::<Vec<_>>(),
-    )?;
+    )?);
 
     let legend: Vec<String> = analysis
         .community_labels
         .iter()
-        .map(|(cid, lab)| format!("<li><span class=\"swatch g{cid}\"></span>{lab}</li>"))
+        .map(|(cid, lab)| {
+            format!(
+                "<li><span class=\"swatch g{cid}\"></span>{}</li>",
+                html_escape(lab)
+            )
+        })
         .collect();
 
     let html = format!(
@@ -143,4 +148,53 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn script_safe_json(json: String) -> String {
+    json.replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{FileType, Node};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn graph_html_escapes_labels_in_markup_and_inline_scripts() {
+        let payload = "</script><script>globalThis.graphifyPwned=true</script>";
+        let graph = GraphJson {
+            directed: false,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: vec![Node {
+                id: "payload".into(),
+                label: payload.into(),
+                file_type: FileType::Concept,
+                source_file: "semantic".into(),
+                source_location: None,
+                community: Some(0),
+                origin_file: None,
+            }],
+            links: Vec::new(),
+        };
+        let analysis = Analysis {
+            communities: BTreeMap::from([(0, vec!["payload".into()])]),
+            community_labels: BTreeMap::from([(0, payload.into())]),
+            ..Analysis::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("graph.html");
+
+        write_graph_html(&graph, &analysis, &path, "test").unwrap();
+        let html = std::fs::read_to_string(path).unwrap();
+
+        assert!(!html.contains(payload));
+        assert!(html.contains("&lt;/script&gt;"));
+        assert!(html.contains("\\u003c/script\\u003e"));
+    }
 }

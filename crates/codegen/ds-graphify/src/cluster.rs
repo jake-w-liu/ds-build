@@ -61,16 +61,37 @@ pub fn cluster(graph: &mut GraphJson, resolution: f64) -> Analysis {
         .iter()
         .map(|n| (n.id.clone(), n.label.clone()))
         .collect();
+    let node_comm: HashMap<String, u32> = partition
+        .iter()
+        .map(|(idx, cid)| (idx_to_id[idx].clone(), *cid))
+        .collect();
+
+    // Count unique internal node pairs in one edge pass. Scanning every edge
+    // separately for every community makes this phase O(communities × edges).
+    let mut internal_pairs = std::collections::HashSet::new();
+    for edge in &graph.links {
+        let Some(&source_community) = node_comm.get(&edge.source) else {
+            continue;
+        };
+        if node_comm.get(&edge.target) != Some(&source_community) || edge.source == edge.target {
+            continue;
+        }
+        let pair = if edge.source <= edge.target {
+            (source_community, edge.source.as_str(), edge.target.as_str())
+        } else {
+            (source_community, edge.target.as_str(), edge.source.as_str())
+        };
+        internal_pairs.insert(pair);
+    }
+    let mut internal_counts: HashMap<u32, usize> = HashMap::new();
+    for (community, _, _) in internal_pairs {
+        *internal_counts.entry(community).or_default() += 1;
+    }
 
     for (cid, members) in &communities {
         let hub = members
             .iter()
-            .max_by(|a, b| {
-                degrees
-                    .get(*a)
-                    .cmp(&degrees.get(*b))
-                    .then_with(|| a.cmp(b))
-            })
+            .max_by(|a, b| degrees.get(*a).cmp(&degrees.get(*b)).then_with(|| a.cmp(b)))
             .cloned();
         let label = hub
             .as_ref()
@@ -79,30 +100,18 @@ pub fn cluster(graph: &mut GraphJson, resolution: f64) -> Analysis {
             .unwrap_or_else(|| format!("Community {cid}"));
         community_labels.insert(*cid, label);
 
-        // Cohesion: internal edges / possible pairs
-        let member_set: std::collections::HashSet<&str> =
-            members.iter().map(|s| s.as_str()).collect();
-        let mut internal = 0usize;
-        for e in &graph.links {
-            if member_set.contains(e.source.as_str()) && member_set.contains(e.target.as_str()) {
-                internal += 1;
-            }
-        }
+        // Cohesion: unique internal node pairs / possible pairs.
         let n = members.len().max(1);
-        let possible = n * n.saturating_sub(1) / 2;
+        let possible = n.saturating_mul(n.saturating_sub(1)) / 2;
         let score = if possible == 0 {
             0.0
         } else {
-            internal as f64 / possible as f64
+            internal_counts.get(cid).copied().unwrap_or(0) as f64 / possible as f64
         };
         cohesion.insert(*cid, score);
     }
 
     // Write community onto nodes
-    let node_comm: HashMap<String, u32> = partition
-        .iter()
-        .map(|(idx, cid)| (idx_to_id[idx].clone(), *cid))
-        .collect();
     for n in &mut graph.nodes {
         if let Some(&cid) = node_comm.get(&n.id) {
             n.community = Some(cid);
@@ -137,11 +146,14 @@ fn louvain(g: &UnGraph<String, f64>, resolution: f64) -> HashMap<NodeIndex, u32>
         degrees.insert(idx, d);
     }
 
+    let mut sigma_tot: HashMap<u32, f64> = HashMap::new();
+    for (&idx, &community) in &comm {
+        *sigma_tot.entry(community).or_default() += degrees[&idx];
+    }
+
     let mut improved = true;
-    let mut pass = 0;
-    while improved && pass < 20 {
+    while improved {
         improved = false;
-        pass += 1;
         let mut nodes: Vec<NodeIndex> = g.node_indices().collect();
         nodes.sort_by_key(|i| g[*i].clone());
 
@@ -163,44 +175,53 @@ fn louvain(g: &UnGraph<String, f64>, resolution: f64) -> HashMap<NodeIndex, u32>
                 continue;
             }
 
-            // Total degree of each community
-            let mut sigma_tot: HashMap<u32, f64> = HashMap::new();
-            for (nidx, &c) in &comm {
-                *sigma_tot.entry(c).or_default() += degrees[nidx];
-            }
-
+            // Evaluate insertion after first removing the node from its
+            // current community. Including the node in `sigma_tot[cur]`
+            // overstates the benefit of moving and can make partitions
+            // oscillate while decreasing actual modularity.
+            *sigma_tot.entry(cur).or_default() -= k_i;
             let mut best_c = cur;
-            let mut best_gain = 0.0;
+            let current_in = neigh_w.get(&cur).copied().unwrap_or(0.0);
+            let mut best_gain = current_in
+                - resolution * sigma_tot.get(&cur).copied().unwrap_or(0.0) * k_i / (2.0 * m);
             for (&c, &k_i_in) in &neigh_w {
                 let sigma = sigma_tot.get(&c).copied().unwrap_or(0.0);
-                // ΔQ ≈ [k_i_in / m - resolution * sigma_tot * k_i / (2m²)]
-                let gain = k_i_in / m - resolution * (sigma * k_i) / (2.0 * m * m);
-                let cur_in = neigh_w.get(&cur).copied().unwrap_or(0.0);
-                let cur_sigma = sigma_tot.get(&cur).copied().unwrap_or(0.0);
-                let cur_gain = cur_in / m - resolution * (cur_sigma * k_i) / (2.0 * m * m);
-                let delta = gain - cur_gain;
-                if delta > best_gain + 1e-12 || (delta > best_gain - 1e-12 && c < best_c) {
-                    best_gain = delta;
+                // Scaled modularity insertion gain. The omitted positive
+                // 1/m factor does not affect which community is best.
+                let gain = k_i_in - resolution * sigma * k_i / (2.0 * m);
+                if gain > best_gain + 1e-12 {
+                    best_gain = gain;
                     best_c = c;
                 }
             }
-            if best_c != cur && best_gain > 1e-12 {
+            *sigma_tot.entry(best_c).or_default() += k_i;
+            if best_c != cur {
                 comm.insert(idx, best_c);
                 improved = true;
             }
         }
     }
 
-    // Renumber communities to 0..k-1
-    let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut next = 0u32;
-    for &c in comm.values() {
-        remap.entry(c).or_insert_with(|| {
-            let v = next;
-            next += 1;
-            v
-        });
+    // Renumber communities to 0..k-1 by their lexicographically smallest
+    // member. Iterating HashMap values here would randomize persisted IDs.
+    let mut smallest_member: HashMap<u32, String> = HashMap::new();
+    for (&idx, &community) in &comm {
+        smallest_member
+            .entry(community)
+            .and_modify(|smallest| {
+                if g[idx] < *smallest {
+                    *smallest = g[idx].clone();
+                }
+            })
+            .or_insert_with(|| g[idx].clone());
     }
+    let mut ordered: Vec<(u32, String)> = smallest_member.into_iter().collect();
+    ordered.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let remap: HashMap<u32, u32> = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(new, (old, _))| (old, new as u32))
+        .collect();
     for c in comm.values_mut() {
         *c = remap[c];
     }
@@ -242,7 +263,14 @@ mod tests {
                 origin_file: None,
             });
         }
-        for (s, t) in [("a1", "a2"), ("a2", "a3"), ("a1", "a3"), ("b1", "b2"), ("b2", "b3"), ("b1", "b3")] {
+        for (s, t) in [
+            ("a1", "a2"),
+            ("a2", "a3"),
+            ("a1", "a3"),
+            ("b1", "b2"),
+            ("b2", "b3"),
+            ("b1", "b3"),
+        ] {
             links.push(Edge {
                 source: s.into(),
                 target: t.into(),
@@ -263,5 +291,137 @@ mod tests {
         };
         let analysis = cluster(&mut g, 1.0);
         assert!(analysis.communities.len() >= 2);
+    }
+
+    #[test]
+    fn community_ids_are_stable_and_lexically_ordered() {
+        for _ in 0..100 {
+            let mut g = GraphJson {
+                directed: false,
+                multigraph: false,
+                graph: BTreeMap::new(),
+                nodes: ["a", "b", "c", "d"]
+                    .into_iter()
+                    .map(|id| Node {
+                        id: id.into(),
+                        label: id.into(),
+                        file_type: FileType::Code,
+                        source_file: "t".into(),
+                        source_location: None,
+                        community: None,
+                        origin_file: None,
+                    })
+                    .collect(),
+                links: [("a", "b"), ("c", "d")]
+                    .into_iter()
+                    .map(|(source, target)| Edge {
+                        source: source.into(),
+                        target: target.into(),
+                        relation: "uses".into(),
+                        confidence: Confidence::Extracted,
+                        source_file: "t".into(),
+                        source_location: None,
+                        weight: Some(1.0),
+                        context: None,
+                    })
+                    .collect(),
+            };
+            cluster(&mut g, 1.0);
+            let communities: BTreeMap<_, _> = g
+                .nodes
+                .iter()
+                .map(|n| (n.id.as_str(), n.community.unwrap()))
+                .collect();
+            assert_eq!(communities["a"], 0);
+            assert_eq!(communities["b"], 0);
+            assert_eq!(communities["c"], 1);
+            assert_eq!(communities["d"], 1);
+        }
+    }
+
+    #[test]
+    fn cohesion_is_bounded_for_multiple_relations_on_one_pair() {
+        let mut g = GraphJson {
+            directed: false,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: ["a", "b"]
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: id.into(),
+                    file_type: FileType::Code,
+                    source_file: "t".into(),
+                    source_location: None,
+                    community: None,
+                    origin_file: None,
+                })
+                .collect(),
+            links: ["calls", "references"]
+                .into_iter()
+                .map(|relation| Edge {
+                    source: "a".into(),
+                    target: "b".into(),
+                    relation: relation.into(),
+                    confidence: Confidence::Extracted,
+                    source_file: "t".into(),
+                    source_location: None,
+                    weight: Some(1.0),
+                    context: None,
+                })
+                .collect(),
+        };
+
+        let analysis = cluster(&mut g, 1.0);
+        assert!(
+            analysis
+                .cohesion
+                .values()
+                .all(|score| (0.0..=1.0).contains(score)),
+            "cohesion must be a normalized score: {:?}",
+            analysis.cohesion
+        );
+    }
+
+    #[test]
+    fn greedy_modularity_does_not_split_a_triangle() {
+        let mut g = GraphJson {
+            directed: false,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: ["a", "b", "c"]
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: id.into(),
+                    file_type: FileType::Code,
+                    source_file: "t".into(),
+                    source_location: None,
+                    community: None,
+                    origin_file: None,
+                })
+                .collect(),
+            links: [("a", "b"), ("a", "c"), ("b", "c")]
+                .into_iter()
+                .map(|(source, target)| Edge {
+                    source: source.into(),
+                    target: target.into(),
+                    relation: "uses".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: "t".into(),
+                    source_location: None,
+                    weight: Some(1.0),
+                    context: None,
+                })
+                .collect(),
+        };
+
+        let analysis = cluster(&mut g, 1.0);
+
+        assert_eq!(
+            analysis.communities.len(),
+            1,
+            "a clique has higher modularity as one community"
+        );
     }
 }

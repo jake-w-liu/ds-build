@@ -2,7 +2,7 @@
 //! Headings, wiki links, markdown links — Graphify-compatible.
 
 use crate::ids::make_id;
-use crate::schema::{Confidence, Extraction, FileType, Node, Edge};
+use crate::schema::{Confidence, Edge, Extraction, FileType, Node};
 use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -11,8 +11,7 @@ static HEADING_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(#{1,6})\s+(.+?)\s*$").unwrap());
 static MD_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]*)\]\(([^)]+)\)").unwrap());
-static WIKI_LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+static WIKI_LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 static RATIONALE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^\s*(?://|#|--)\s*(NOTE|WHY|HACK|TODO|FIXME):\s*(.+)$").unwrap()
 });
@@ -68,28 +67,30 @@ pub fn extract_markdown(path: &Path, source_key: &str) -> Extraction {
         if let Some(cap) = HEADING_RE.captures(line) {
             let level = cap[1].len();
             let title = cap[2].trim().to_string();
-            let hid = make_id(&[&file_nid, &title]);
-            if seen.insert(hid.clone()) {
-                nodes.push(Node {
-                    id: hid.clone(),
-                    label: title.clone(),
-                    file_type: FileType::Document,
-                    source_file: path_str.clone(),
-                    source_location: Some(format!("L{line_num}")),
-                    community: None,
-                    origin_file: None,
-                });
-            }
-            while heading_stack
-                .last()
-                .is_some_and(|(l, _)| *l >= level)
-            {
+            while heading_stack.last().is_some_and(|(l, _)| *l >= level) {
                 heading_stack.pop();
             }
             let parent = heading_stack
                 .last()
                 .map(|(_, id)| id.clone())
                 .unwrap_or_else(|| file_nid.clone());
+            let base_id = make_id(&[&parent, &title]);
+            let mut hid = base_id.clone();
+            let mut occurrence = 2usize;
+            while seen.contains(&hid) {
+                hid = make_id(&[&base_id, &occurrence.to_string()]);
+                occurrence += 1;
+            }
+            seen.insert(hid.clone());
+            nodes.push(Node {
+                id: hid.clone(),
+                label: title.clone(),
+                file_type: FileType::Document,
+                source_file: path_str.clone(),
+                source_location: Some(format!("L{line_num}")),
+                community: None,
+                origin_file: None,
+            });
             edges.push(Edge {
                 source: parent,
                 target: hid.clone(),
@@ -112,7 +113,9 @@ pub fn extract_markdown(path: &Path, source_key: &str) -> Extraction {
                 &file_nid,
                 line_num,
                 &path_str,
+                &mut nodes,
                 &mut edges,
+                &mut seen,
                 &mut linked,
             );
         }
@@ -130,7 +133,9 @@ pub fn extract_markdown(path: &Path, source_key: &str) -> Extraction {
                 &file_nid,
                 line_num,
                 &path_str,
+                &mut nodes,
                 &mut edges,
+                &mut seen,
                 &mut linked,
             );
         }
@@ -152,7 +157,9 @@ fn add_doc_link(
     file_nid: &str,
     line: usize,
     path_str: &str,
+    nodes: &mut Vec<Node>,
     edges: &mut Vec<Edge>,
+    seen: &mut std::collections::HashSet<String>,
     linked: &mut std::collections::HashSet<String>,
 ) {
     let target = raw.split(['#', '?']).next().unwrap_or(raw).trim();
@@ -163,27 +170,61 @@ fn add_doc_link(
     {
         return;
     }
+    let portable_target = target.replace('\\', "/");
+    if portable_target.starts_with('/')
+        || portable_target
+            .as_bytes()
+            .get(1)
+            .is_some_and(|byte| *byte == b':')
+    {
+        return;
+    }
     // Prefer a portable relative key (sibling of source_key) so the edge
     // target id matches the linked file's own node id after extract_many.
-    let rel_key = if Path::new(target).is_absolute() {
-        target.replace('\\', "/")
-    } else {
+    let rel_key = {
         let parent = Path::new(source_key)
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let joined = if parent.is_empty() {
-            target.to_string()
+            portable_target.clone()
         } else {
-            format!("{parent}/{target}")
+            format!("{parent}/{portable_target}")
         };
         // Normalize ./ and // without requiring the target to exist on disk.
         normalize_rel_path(&joined)
     };
-    let _ = source_path; // fs path reserved for existence checks if needed later
+    if rel_key == ".." || rel_key.starts_with("../") {
+        return;
+    }
     let tgt_nid = make_id(&[&rel_key]);
     if tgt_nid == file_nid || !linked.insert(tgt_nid.clone()) {
         return;
+    }
+    if seen.insert(tgt_nid.clone()) {
+        let disk_path = source_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(&portable_target);
+        let exists = disk_path.is_file();
+        let label = Path::new(&rel_key)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&rel_key)
+            .to_string();
+        nodes.push(Node {
+            id: tgt_nid.clone(),
+            label,
+            file_type: linked_file_type(&rel_key),
+            source_file: if exists {
+                rel_key.clone()
+            } else {
+                String::new()
+            },
+            source_location: None,
+            community: None,
+            origin_file: (!exists).then(|| path_str.to_string()),
+        });
     }
     edges.push(Edge {
         source: file_nid.to_string(),
@@ -197,6 +238,26 @@ fn add_doc_link(
     });
 }
 
+fn linked_file_type(path: &str) -> FileType {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "md" | "mdx" | "qmd" | "txt" | "rst" | "html" => FileType::Document,
+        "pdf" => FileType::Paper,
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => FileType::Image,
+        "rs" | "py" | "pyi" | "go" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts"
+        | "cts" | "java" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "rb" | "cs" | "kt"
+        | "kts" | "scala" | "php" | "swift" | "lua" | "zig" | "ex" | "exs" | "jl" | "vue"
+        | "svelte" | "astro" | "dart" | "sql" | "sh" | "bash" | "json" | "toml" | "yaml"
+        | "yml" => FileType::Code,
+        _ => FileType::Concept,
+    }
+}
+
 fn normalize_rel_path(p: &str) -> String {
     let normalized = p.replace('\\', "/");
     let mut out: Vec<&str> = Vec::new();
@@ -204,7 +265,11 @@ fn normalize_rel_path(p: &str) -> String {
         match part {
             "" | "." => {}
             ".." => {
-                out.pop();
+                if out.last().is_some_and(|last| *last != "..") {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
             }
             other => out.push(other),
         }
@@ -262,37 +327,59 @@ pub fn extract_config_stub(path: &Path, source_key: &str) -> Extraction {
                 });
             }
         }
-        // Cargo.toml package name / dependencies
+        // Cargo.toml package identity.
         if path.file_name().and_then(|n| n.to_str()) == Some("Cargo.toml") {
-            for line in text.lines() {
+            let mut section = "";
+            for (line_index, line) in text.lines().enumerate() {
                 let t = line.trim();
-                if let Some(rest) = t.strip_prefix("name")
-                    && let Some(eq) = rest.find('=')
-                {
-                    let val = rest[eq + 1..].trim().trim_matches('"');
-                    if !val.is_empty() {
-                        let nid = make_id(&[val]);
-                        nodes.push(Node {
-                            id: nid.clone(),
-                            label: val.to_string(),
-                            file_type: FileType::Code,
-                            source_file: path_str.clone(),
-                            source_location: Some("L1".into()),
-                            community: None,
-                            origin_file: None,
-                        });
-                        edges.push(Edge {
-                            source: file_nid.clone(),
-                            target: nid,
-                            relation: "contains".into(),
-                            confidence: Confidence::Extracted,
-                            source_file: path_str.clone(),
-                            source_location: Some("L1".into()),
-                            weight: Some(1.0),
-                            context: None,
-                        });
-                    }
+                if t.starts_with('[') && t.ends_with(']') {
+                    section = t;
+                    continue;
                 }
+                if section != "[package]" {
+                    continue;
+                }
+                let Some((key, value)) = t.split_once('=') else {
+                    continue;
+                };
+                if key.trim() != "name" {
+                    continue;
+                }
+                let value = value.trim();
+                let package_name = value
+                    .strip_prefix('"')
+                    .and_then(|rest| rest.split('"').next())
+                    .or_else(|| {
+                        value
+                            .strip_prefix('\'')
+                            .and_then(|rest| rest.split('\'').next())
+                    })
+                    .unwrap_or("");
+                if package_name.is_empty() {
+                    continue;
+                }
+                let nid = make_id(&[package_name]);
+                let source_location = Some(format!("L{}", line_index + 1));
+                nodes.push(Node {
+                    id: nid.clone(),
+                    label: package_name.to_string(),
+                    file_type: FileType::Code,
+                    source_file: path_str.clone(),
+                    source_location: source_location.clone(),
+                    community: None,
+                    origin_file: None,
+                });
+                edges.push(Edge {
+                    source: file_nid.clone(),
+                    target: nid,
+                    relation: "contains".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: path_str.clone(),
+                    source_location,
+                    weight: Some(1.0),
+                    context: None,
+                });
+                break;
             }
         }
     }

@@ -197,9 +197,40 @@ pub fn explain(graph: &GraphJson, name: &str) -> String {
 
 fn query_terms(q: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "what", "how", "where", "when", "who", "why", "which", "the", "a", "an", "is", "are",
-        "does", "do", "of", "to", "in", "on", "for", "and", "or", "with", "from", "this",
-        "that", "it", "be", "by", "show", "me", "about", "connects", "connected", "between",
+        "what",
+        "how",
+        "where",
+        "when",
+        "who",
+        "why",
+        "which",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "does",
+        "do",
+        "of",
+        "to",
+        "in",
+        "on",
+        "for",
+        "and",
+        "or",
+        "with",
+        "from",
+        "this",
+        "that",
+        "it",
+        "be",
+        "by",
+        "show",
+        "me",
+        "about",
+        "connects",
+        "connected",
+        "between",
     ];
     q.split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
         .filter(|t| t.len() > 1)
@@ -296,10 +327,7 @@ fn directed_relation(graph: &GraphJson, a: &str, b: &str) -> String {
     "related".into()
 }
 
-fn real_edges_among(
-    graph: &GraphJson,
-    nodes: &HashSet<String>,
-) -> Vec<(String, String, String)> {
+fn real_edges_among(graph: &GraphJson, nodes: &HashSet<String>) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for e in &graph.links {
@@ -343,30 +371,27 @@ fn bfs_nodes(graph: &GraphJson, seeds: &[String], depth: usize) -> HashSet<Strin
 
 fn dfs_nodes(graph: &GraphJson, seeds: &[String], depth: usize) -> HashSet<String> {
     let adj = undirected_neighbors(graph);
-    let mut seen = HashSet::new();
-    fn rec(
-        cur: &str,
-        d: usize,
-        depth: usize,
-        adj: &HashMap<String, Vec<String>>,
-        seen: &mut HashSet<String>,
-    ) {
-        if d >= depth {
-            return;
+    let mut best_depth: HashMap<String, usize> = HashMap::new();
+    let mut stack: Vec<(String, usize)> =
+        seeds.iter().rev().map(|seed| (seed.clone(), 0)).collect();
+    while let Some((current, current_depth)) = stack.pop() {
+        if best_depth
+            .get(&current)
+            .is_some_and(|known_depth| *known_depth <= current_depth)
+        {
+            continue;
         }
-        if let Some(nbrs) = adj.get(cur) {
-            for nbr in nbrs {
-                if seen.insert(nbr.clone()) {
-                    rec(nbr, d + 1, depth, adj, seen);
-                }
+        best_depth.insert(current.clone(), current_depth);
+        if current_depth >= depth {
+            continue;
+        }
+        if let Some(neighbors) = adj.get(&current) {
+            for neighbor in neighbors.iter().rev() {
+                stack.push((neighbor.clone(), current_depth + 1));
             }
         }
     }
-    for s in seeds {
-        seen.insert(s.clone());
-        rec(s, 0, depth, &adj, &mut seen);
-    }
-    seen
+    best_depth.into_keys().collect()
 }
 
 fn subgraph_to_text(
@@ -386,6 +411,8 @@ fn subgraph_to_text(
             ordered.push(n);
         }
     }
+    let seed_count = ordered.len().min(seeds.len());
+    ordered[seed_count..].sort();
     for id in ordered {
         let n = match graph.nodes.iter().find(|n| n.id == *id) {
             Some(n) => n,
@@ -420,4 +447,68 @@ fn subgraph_to_text(
         words += w;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Confidence, Edge, FileType, Node};
+    use std::collections::BTreeMap;
+
+    fn graph_with_edges(edges: &[(&str, &str)]) -> GraphJson {
+        let mut ids: Vec<&str> = edges.iter().flat_map(|(a, b)| [*a, *b]).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        GraphJson {
+            directed: false,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: ids
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: id.into(),
+                    file_type: FileType::Code,
+                    source_file: "test".into(),
+                    source_location: None,
+                    community: None,
+                    origin_file: None,
+                })
+                .collect(),
+            links: edges
+                .iter()
+                .map(|(source, target)| Edge {
+                    source: (*source).into(),
+                    target: (*target).into(),
+                    relation: "related".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: "test".into(),
+                    source_location: None,
+                    weight: Some(1.0),
+                    context: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn depth_limited_dfs_keeps_nodes_reachable_by_a_shorter_branch() {
+        // DFS visits root-b-x-shared first (depth 3), then reaches `shared`
+        // again through root-z-shared (depth 2). Its child is within the
+        // requested radius and must not be lost because of the first visit.
+        let graph = graph_with_edges(&[
+            ("root", "b"),
+            ("b", "x"),
+            ("x", "shared"),
+            ("root", "z"),
+            ("z", "shared"),
+            ("shared", "child"),
+        ]);
+
+        let bfs = bfs_nodes(&graph, &["root".into()], 3);
+        let dfs = dfs_nodes(&graph, &["root".into()], 3);
+
+        assert_eq!(dfs, bfs);
+        assert!(dfs.contains("child"));
+    }
 }

@@ -1,15 +1,47 @@
 //! Graph analysis: god nodes, surprising connections, suggested questions.
 
-use crate::schema::{
-    Analysis, Confidence, GodNode, GraphJson, SuggestedQuestion, SurpriseEdge,
-};
-use std::collections::{HashMap, HashSet};
+use crate::schema::{Analysis, Confidence, GodNode, GraphJson, SuggestedQuestion, SurpriseEdge};
+use petgraph::algo::kosaraju_scc;
+use petgraph::graph::DiGraph;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const BUILTIN_NOISE: &[&str] = &[
-    "str", "int", "float", "bool", "bytes", "object", "Path", "Any", "Optional", "List",
-    "Dict", "Set", "Tuple", "Union", "Callable", "String", "Self", "self", "true", "false",
-    "None", "null", "undefined", "Error", "Result", "Option", "Vec", "Box", "Arc", "Rc",
-    "HashMap", "HashSet", "ok", "err", "Some", "None",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "bytes",
+    "object",
+    "Path",
+    "Any",
+    "Optional",
+    "List",
+    "Dict",
+    "Set",
+    "Tuple",
+    "Union",
+    "Callable",
+    "String",
+    "Self",
+    "self",
+    "true",
+    "false",
+    "None",
+    "null",
+    "undefined",
+    "Error",
+    "Result",
+    "Option",
+    "Vec",
+    "Box",
+    "Arc",
+    "Rc",
+    "HashMap",
+    "HashSet",
+    "ok",
+    "err",
+    "Some",
+    "None",
 ];
 
 /// Fill god nodes / surprises / questions on top of a clustered analysis.
@@ -176,39 +208,126 @@ fn is_file_or_stub(n: &crate::schema::Node, deg: usize) -> bool {
 
 /// Find simple import cycles among file-level nodes.
 pub fn find_import_cycles(graph: &GraphJson) -> Vec<Vec<String>> {
-    let mut adj: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in &graph.links {
         if e.relation == "imports" || e.relation == "imports_from" {
-            adj.entry(e.source.as_str())
+            adj.entry(e.source.clone())
                 .or_default()
-                .insert(e.target.as_str());
+                .push(e.target.clone());
         }
     }
-    let mut cycles = Vec::new();
-    let nodes: Vec<&str> = adj.keys().copied().collect();
-    for &start in &nodes {
-        if let Some(nbrs) = adj.get(start) {
-            for &mid in nbrs {
-                if adj.get(mid).is_some_and(|s| s.contains(start)) && start < mid {
-                    let sl = graph
-                        .nodes
-                        .iter()
-                        .find(|n| n.id == start)
-                        .map(|n| n.label.clone())
-                        .unwrap_or_else(|| start.to_string());
-                    let ml = graph
-                        .nodes
-                        .iter()
-                        .find(|n| n.id == mid)
-                        .map(|n| n.label.clone())
-                        .unwrap_or_else(|| mid.to_string());
-                    cycles.push(vec![sl.clone(), ml, /* back to start */ sl]);
+    for neighbors in adj.values_mut() {
+        neighbors.sort();
+        neighbors.dedup();
+    }
+    let mut import_graph = DiGraph::new();
+    let mut node_indices = HashMap::new();
+    for (source, targets) in &adj {
+        let source_index = *node_indices
+            .entry(source.as_str())
+            .or_insert_with(|| import_graph.add_node(source.as_str()));
+        for target in targets {
+            let target_index = *node_indices
+                .entry(target.as_str())
+                .or_insert_with(|| import_graph.add_node(target.as_str()));
+            import_graph.add_edge(source_index, target_index, ());
+        }
+    }
+    let mut components: Vec<Vec<&str>> = kosaraju_scc(&import_graph)
+        .into_iter()
+        .map(|component| {
+            component
+                .into_iter()
+                .map(|index| import_graph[index])
+                .collect()
+        })
+        .collect();
+    for component in &mut components {
+        component.sort_unstable();
+    }
+    components.sort_by(|a, b| a.first().cmp(&b.first()));
+
+    fn enumerate_cycles(
+        start: &str,
+        current: &str,
+        adj: &BTreeMap<String, Vec<String>>,
+        component: &HashSet<&str>,
+        visited: &mut HashSet<String>,
+        path: &mut Vec<String>,
+        cycles: &mut Vec<Vec<String>>,
+    ) {
+        if cycles.len() >= 20 {
+            return;
+        }
+        if let Some(neighbors) = adj.get(current) {
+            for neighbor in neighbors {
+                if !component.contains(neighbor.as_str()) {
+                    continue;
+                }
+                if neighbor == start {
+                    let mut cycle = path.clone();
+                    cycle.push(start.to_string());
+                    cycles.push(cycle);
+                    if cycles.len() >= 20 {
+                        return;
+                    }
+                } else if neighbor.as_str() >= start && visited.insert(neighbor.clone()) {
+                    path.push(neighbor.clone());
+                    enumerate_cycles(start, neighbor, adj, component, visited, path, cycles);
+                    path.pop();
+                    visited.remove(neighbor);
                 }
             }
         }
     }
-    cycles.truncate(20);
+
+    let mut cycles = Vec::new();
+    for component in components {
+        let has_self_loop = component.first().is_some_and(|node| {
+            adj.get(*node)
+                .is_some_and(|neighbors| neighbors.iter().any(|neighbor| neighbor == node))
+        });
+        if component.len() == 1 && !has_self_loop {
+            continue;
+        }
+        let component_set: HashSet<&str> = component.iter().copied().collect();
+        for start in &component {
+            let mut visited = HashSet::from([(*start).to_string()]);
+            let mut path = vec![(*start).to_string()];
+            enumerate_cycles(
+                start,
+                start,
+                &adj,
+                &component_set,
+                &mut visited,
+                &mut path,
+                &mut cycles,
+            );
+            if cycles.len() >= 20 {
+                break;
+            }
+        }
+        if cycles.len() >= 20 {
+            break;
+        }
+    }
+    cycles.sort();
+
+    let labels: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.label.as_str()))
+        .collect();
     cycles
+        .into_iter()
+        .take(20)
+        .map(|cycle| {
+            cycle
+                .into_iter()
+                .map(|id| labels.get(id.as_str()).copied().unwrap_or(&id).to_string())
+                .collect()
+        })
+        .collect()
 }
 
 pub fn confidence_breakdown(graph: &GraphJson) -> (u32, u32, u32) {
@@ -223,4 +342,86 @@ pub fn confidence_breakdown(graph: &GraphJson) -> (u32, u32, u32) {
         }
     }
     (ext, inf, amb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Edge, FileType, Node};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn import_cycle_detection_finds_cycles_longer_than_two_nodes() {
+        let graph = GraphJson {
+            directed: true,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: ["a", "b", "c"]
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: id.to_ascii_uppercase(),
+                    file_type: FileType::Code,
+                    source_file: format!("{id}.rs"),
+                    source_location: None,
+                    community: None,
+                    origin_file: None,
+                })
+                .collect(),
+            links: [("a", "b"), ("b", "c"), ("c", "a")]
+                .into_iter()
+                .map(|(source, target)| Edge {
+                    source: source.into(),
+                    target: target.into(),
+                    relation: "imports".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: format!("{source}.rs"),
+                    source_location: None,
+                    weight: Some(1.0),
+                    context: None,
+                })
+                .collect(),
+        };
+
+        assert_eq!(find_import_cycles(&graph), vec![vec!["A", "B", "C", "A"]]);
+    }
+
+    #[test]
+    fn import_cycle_detection_finds_distinct_cycles_that_share_nodes() {
+        let graph = GraphJson {
+            directed: true,
+            multigraph: false,
+            graph: BTreeMap::new(),
+            nodes: ["a", "b", "c", "d"]
+                .into_iter()
+                .map(|id| Node {
+                    id: id.into(),
+                    label: id.to_ascii_uppercase(),
+                    file_type: FileType::Code,
+                    source_file: format!("{id}.rs"),
+                    source_location: None,
+                    community: None,
+                    origin_file: None,
+                })
+                .collect(),
+            links: [("a", "b"), ("b", "d"), ("d", "a"), ("a", "c"), ("c", "d")]
+                .into_iter()
+                .map(|(source, target)| Edge {
+                    source: source.into(),
+                    target: target.into(),
+                    relation: "imports".into(),
+                    confidence: Confidence::Extracted,
+                    source_file: format!("{source}.rs"),
+                    source_location: None,
+                    weight: Some(1.0),
+                    context: None,
+                })
+                .collect(),
+        };
+
+        assert_eq!(
+            find_import_cycles(&graph),
+            vec![vec!["A", "B", "D", "A"], vec!["A", "C", "D", "A"]]
+        );
+    }
 }

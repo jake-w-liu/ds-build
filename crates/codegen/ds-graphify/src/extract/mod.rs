@@ -38,9 +38,27 @@ pub fn extract_file_keyed(path: &Path, source_key: &str) -> Extraction {
         "js" | "jsx" | "mjs" | "cjs" => javascript::extract_js(path, source_key, false),
         "ts" | "tsx" | "mts" | "cts" => javascript::extract_js(path, source_key, true),
         "md" | "mdx" | "qmd" | "txt" | "rst" => markdown::extract_markdown(path, source_key),
+        "html" => generic_file_node(path, source_key, crate::schema::FileType::Document),
         "json" | "toml" | "yaml" | "yml" => markdown::extract_config_stub(path, source_key),
+        "java" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "rb" | "cs" | "kt" | "kts"
+        | "scala" | "php" | "swift" | "lua" | "zig" | "ex" | "exs" | "jl" | "vue" | "svelte"
+        | "astro" | "dart" | "sql" | "sh" | "bash" => {
+            generic_file_node(path, source_key, crate::schema::FileType::Code)
+        }
         _ => Extraction::empty(),
     }
+}
+
+fn generic_file_node(
+    path: &Path,
+    source_key: &str,
+    file_type: crate::schema::FileType,
+) -> Extraction {
+    let mut builder = helpers::Builder::new(path, source_key);
+    if let Some(file_node) = builder.nodes.first_mut() {
+        file_node.file_type = file_type;
+    }
+    builder.finish()
 }
 
 /// Root-relative portable key for a path under `root`.
@@ -71,35 +89,49 @@ pub fn extract_many(paths: &[PathBuf], root: &Path) -> Extraction {
 }
 
 fn resolve_cross_file_calls(extraction: &mut Extraction) {
-    use std::collections::HashMap;
-    // label (without trailing ()) -> preferred definition id (has source_file non-empty)
-    let mut defs: HashMap<String, String> = HashMap::new();
+    use std::collections::{HashMap, HashSet};
+    // label (without trailing ()) -> unique definition id, or None if ambiguous.
+    let mut defs: HashMap<String, Option<String>> = HashMap::new();
     for n in &extraction.nodes {
         if n.source_file.is_empty() {
             continue;
         }
-        let bare = n.label.trim_end_matches("()").trim_start_matches('.').to_string();
+        let bare = n
+            .label
+            .trim_end_matches("()")
+            .trim_start_matches('.')
+            .to_string();
         if bare.is_empty() {
             continue;
         }
         defs.entry(bare.to_ascii_lowercase())
-            .or_insert_with(|| n.id.clone());
+            .and_modify(|definition| {
+                if definition.as_ref().is_some_and(|id| id != &n.id) {
+                    *definition = None;
+                }
+            })
+            .or_insert_with(|| Some(n.id.clone()));
     }
 
     // For edges that point at sourceless stubs, rewire to real defs when unique.
     let mut id_remap: HashMap<String, String> = HashMap::new();
+    let mut ambiguous = HashSet::new();
     for n in &extraction.nodes {
         if !n.source_file.is_empty() {
             continue;
         }
         let bare = n.label.trim_end_matches("()").trim_start_matches('.');
-        if let Some(real) = defs.get(&bare.to_ascii_lowercase())
-            && real != &n.id
-        {
-            id_remap.insert(n.id.clone(), real.clone());
+        match defs.get(&bare.to_ascii_lowercase()) {
+            Some(Some(real)) if real != &n.id => {
+                id_remap.insert(n.id.clone(), real.clone());
+            }
+            Some(None) => {
+                ambiguous.insert(n.id.clone());
+            }
+            _ => {}
         }
     }
-    if id_remap.is_empty() {
+    if id_remap.is_empty() && ambiguous.is_empty() {
         return;
     }
     for e in &mut extraction.edges {
@@ -109,11 +141,12 @@ fn resolve_cross_file_calls(extraction: &mut Extraction) {
         if let Some(r) = id_remap.get(&e.target) {
             e.target = r.clone();
         }
+        if ambiguous.contains(&e.source) || ambiguous.contains(&e.target) {
+            e.confidence = crate::schema::Confidence::Ambiguous;
+        }
     }
     // Drop sourceless stubs that were remapped.
-    extraction
-        .nodes
-        .retain(|n| !id_remap.contains_key(&n.id));
+    extraction.nodes.retain(|n| !id_remap.contains_key(&n.id));
 }
 
 /// Shared helpers for language extractors.
@@ -128,7 +161,6 @@ pub(crate) mod helpers {
         pub edges: Vec<Edge>,
         pub seen: HashSet<String>,
         pub path_str: String,
-        pub stem: String,
         pub file_nid: String,
     }
 
@@ -137,19 +169,12 @@ pub(crate) mod helpers {
         /// `path` is only used for the display basename when `source_key` has no name.
         pub fn new(path: &Path, source_key: &str) -> Self {
             let path_str = source_key.replace('\\', "/");
-            let stem = Path::new(&path_str)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .or_else(|| path.file_stem().and_then(|s| s.to_str()))
-                .unwrap_or("file")
-                .to_string();
             let file_nid = make_id(&[&path_str]);
             let mut b = Self {
                 nodes: Vec::new(),
                 edges: Vec::new(),
                 seen: HashSet::new(),
                 path_str,
-                stem,
                 file_nid: file_nid.clone(),
             };
             let name = Path::new(source_key)
@@ -163,16 +188,23 @@ pub(crate) mod helpers {
         }
 
         pub fn add_node(&mut self, id: &str, label: &str, line: usize, file_type: FileType) {
+            let node = Node {
+                id: id.to_string(),
+                label: label.to_string(),
+                file_type,
+                source_file: self.path_str.clone(),
+                source_location: Some(format!("L{line}")),
+                community: None,
+                origin_file: None,
+            };
             if self.seen.insert(id.to_string()) {
-                self.nodes.push(Node {
-                    id: id.to_string(),
-                    label: label.to_string(),
-                    file_type,
-                    source_file: self.path_str.clone(),
-                    source_location: Some(format!("L{line}")),
-                    community: None,
-                    origin_file: None,
-                });
+                self.nodes.push(node);
+            } else if let Some(existing) = self
+                .nodes
+                .iter_mut()
+                .find(|existing| existing.id == id && existing.source_file.is_empty())
+            {
+                *existing = node;
             }
         }
 
@@ -289,11 +321,43 @@ pub(crate) mod helpers {
     fn is_noise_call(name: &str) -> bool {
         matches!(
             name,
-            "println" | "print" | "format" | "panic" | "assert" | "unwrap" | "expect" | "ok"
-                | "err" | "clone" | "to_string" | "into" | "from" | "new" | "default" | "len"
-                | "push" | "pop" | "insert" | "get" | "set" | "map" | "filter" | "collect"
-                | "iter" | "next" | "Some" | "None" | "Ok" | "Err" | "true" | "false"
-                | "console" | "log" | "require" | "append" | "make"
+            "println"
+                | "print"
+                | "format"
+                | "panic"
+                | "assert"
+                | "unwrap"
+                | "expect"
+                | "ok"
+                | "err"
+                | "clone"
+                | "to_string"
+                | "into"
+                | "from"
+                | "new"
+                | "default"
+                | "len"
+                | "push"
+                | "pop"
+                | "insert"
+                | "get"
+                | "set"
+                | "map"
+                | "filter"
+                | "collect"
+                | "iter"
+                | "next"
+                | "Some"
+                | "None"
+                | "Ok"
+                | "Err"
+                | "true"
+                | "false"
+                | "console"
+                | "log"
+                | "require"
+                | "append"
+                | "make"
         )
     }
 }

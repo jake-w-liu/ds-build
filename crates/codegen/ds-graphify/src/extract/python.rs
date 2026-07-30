@@ -39,14 +39,7 @@ pub fn extract_python(path: &Path, source_key: &str) -> Extraction {
         &mut function_bodies,
     );
     for (func_nid, body) in function_bodies {
-        walk_calls(
-            body,
-            &source,
-            &func_nid,
-            &mut b,
-            &["call"],
-            "function",
-        );
+        walk_calls(body, &source, &func_nid, &mut b, &["call"], "function");
     }
     b.finish()
 }
@@ -67,7 +60,10 @@ fn walk<'a>(
                 let (func_nid, label) = if let Some(cls) = parent_class {
                     (make_id(&[cls, &func_name]), format!(".{func_name}()"))
                 } else {
-                    (make_id(&[&b.file_nid, &func_name]), format!("{func_name}()"))
+                    (
+                        make_id(&[&b.file_nid, &func_name]),
+                        format!("{func_name}()"),
+                    )
                 };
                 b.add_node(&func_nid, &label, line, FileType::Code);
                 if let Some(cls) = parent_class {
@@ -102,14 +98,7 @@ fn walk<'a>(
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut c = body.walk();
                     for child in body.children(&mut c) {
-                        walk(
-                            child,
-                            source,
-                            b,
-                            Some(&cls_nid),
-                            file_nid,
-                            function_bodies,
-                        );
+                        walk(child, source, b, Some(&cls_nid), file_nid, function_bodies);
                     }
                 }
             }

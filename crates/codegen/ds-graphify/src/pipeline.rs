@@ -7,6 +7,7 @@ use crate::export;
 use crate::extract;
 use crate::report;
 use crate::schema::{DetectionResult, Extraction, GraphJson, TokenCost};
+use anyhow::Context;
 use std::path::{Path, PathBuf};
 
 pub const OUT_DIR_NAME: &str = "graphify-out";
@@ -50,21 +51,21 @@ pub struct PipelineResult {
 
 /// Run the full detect → extract → build → cluster → analyze → report → export pipeline.
 pub fn run(opts: &PipelineOptions) -> anyhow::Result<PipelineResult> {
+    anyhow::ensure!(
+        opts.resolution.is_finite() && opts.resolution > 0.0,
+        "resolution must be a finite number greater than zero"
+    );
     std::fs::create_dir_all(&opts.out_dir)?;
 
     if opts.cluster_only {
         return run_cluster_only(opts);
     }
 
-    let detection = detect::detect(&opts.root)?;
+    let detection_root = absolute_canonical(&opts.root)?;
+    let output_root = absolute_canonical(&opts.out_dir)?;
+    let exclusions = output_exclusions(&detection_root, &output_root);
+    let detection = detect::detect_excluding(&detection_root, &exclusions)?;
     let det_path = opts.out_dir.join(".graphify_detect.json");
-    std::fs::write(&det_path, serde_json::to_string_pretty(&detection)?)?;
-
-    // Persist scan root
-    std::fs::write(
-        opts.out_dir.join(".graphify_root"),
-        &detection.scan_root,
-    )?;
 
     let root = PathBuf::from(&detection.scan_root);
     let mut paths: Vec<PathBuf> = detect::all_code_paths(&detection);
@@ -80,23 +81,39 @@ pub fn run(opts: &PipelineOptions) -> anyhow::Result<PipelineResult> {
     let _ = opts.update;
 
     let extraction = extract::extract_many(&paths, &root);
+    if let Some(error) = &extraction.error {
+        anyhow::bail!("structural extraction failed: {error}");
+    }
     let ast_path = opts.out_dir.join(".graphify_ast.json");
-    std::fs::write(&ast_path, serde_json::to_string_pretty(&extraction)?)?;
+    let ast_json = serde_json::to_string_pretty(&extraction)?;
 
     // Merge optional semantic extraction if present
     let mut merged = extraction;
     let sem_path = opts.out_dir.join(".graphify_semantic.json");
     if sem_path.is_file() {
-        if let Ok(text) = std::fs::read_to_string(&sem_path)
-            && let Ok(sem) = serde_json::from_str::<Extraction>(&text)
-        {
-            merged.merge(sem);
-        }
+        let text = std::fs::read_to_string(&sem_path)
+            .with_context(|| format!("failed to read {}", sem_path.display()))?;
+        let sem = serde_json::from_str::<Extraction>(&text)
+            .with_context(|| format!("invalid {}", sem_path.display()))?;
+        merged.merge(sem);
     } else {
         // Empty semantic file so tooling that expects it doesn't fail
         let empty = Extraction::empty();
-        let _ = std::fs::write(&sem_path, serde_json::to_string_pretty(&empty)?);
+        std::fs::write(&sem_path, serde_json::to_string_pretty(&empty)?)?;
     }
+    let validation_errors = merged.validate();
+    if !validation_errors.is_empty() {
+        anyhow::bail!(
+            "merged extraction is invalid:\n{}",
+            validation_errors.join("\n")
+        );
+    }
+    // Persist intermediate artifacts only after every input has parsed and
+    // the merged graph validates, so a failed rebuild cannot make metadata
+    // describe a newer corpus than the last successful graph.
+    std::fs::write(&det_path, serde_json::to_string_pretty(&detection)?)?;
+    std::fs::write(opts.out_dir.join(".graphify_root"), &detection.scan_root)?;
+    std::fs::write(&ast_path, ast_json)?;
 
     let mut graph = GraphJson::from_extraction(&merged, opts.directed);
     let mut analysis = cluster::cluster(&mut graph, opts.resolution);
@@ -188,6 +205,10 @@ fn run_cluster_only(opts: &PipelineOptions) -> anyhow::Result<PipelineResult> {
     let report_path = opts.out_dir.join("GRAPH_REPORT.md");
     export::write_graph_json(&graph, &graph_path)?;
     std::fs::write(&report_path, report_md)?;
+    std::fs::write(
+        opts.out_dir.join(".graphify_analysis.json"),
+        serde_json::to_string_pretty(&analysis)?,
+    )?;
     let graph_html_path = if opts.no_viz {
         None
     } else {
@@ -218,6 +239,37 @@ fn git_head(root: &Path) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if s.is_empty() { None } else { Some(s) }
+}
+
+fn absolute_canonical(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    Ok(dunce::canonicalize(&absolute).unwrap_or(absolute))
+}
+
+fn output_exclusions(root: &Path, out: &Path) -> Vec<PathBuf> {
+    if !out.starts_with(root) {
+        return Vec::new();
+    }
+    if out != root {
+        return vec![out.to_path_buf()];
+    }
+    [
+        ".graphify_detect.json",
+        ".graphify_root",
+        ".graphify_ast.json",
+        ".graphify_semantic.json",
+        ".graphify_analysis.json",
+        "graph.json",
+        "GRAPH_REPORT.md",
+        "graph.html",
+    ]
+    .into_iter()
+    .map(|name| out.join(name))
+    .collect()
 }
 
 /// Summarize detection for CLI stdout.

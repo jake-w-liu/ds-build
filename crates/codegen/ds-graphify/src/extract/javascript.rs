@@ -98,9 +98,7 @@ fn walk<'a>(
                     if child.kind() == "class_heritage" {
                         let t = node_text(child, source);
                         for tok in t.split(|c: char| !c.is_alphanumeric() && c != '_') {
-                            if tok.is_empty()
-                                || matches!(tok, "extends" | "implements")
-                            {
+                            if tok.is_empty() || matches!(tok, "extends" | "implements") {
                                 continue;
                             }
                             let tgt = b.ensure_named(tok, line);
@@ -111,14 +109,7 @@ fn walk<'a>(
                 if let Some(body) = node.child_by_field_name("body") {
                     let mut c = body.walk();
                     for child in body.children(&mut c) {
-                        walk(
-                            child,
-                            source,
-                            b,
-                            Some(&nid),
-                            file_nid,
-                            function_bodies,
-                        );
+                        walk(child, source, b, Some(&nid), file_nid, function_bodies);
                     }
                 }
             }

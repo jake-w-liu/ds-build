@@ -126,16 +126,23 @@ impl Extraction {
             if e.source.is_empty() || e.target.is_empty() {
                 errors.push(format!("Edge {i} missing source/target"));
             }
-            if !ids.is_empty() && !ids.contains(e.source.as_str()) {
+            if !ids.contains(e.source.as_str()) {
                 errors.push(format!(
                     "Edge {i} source '{}' does not match any node id",
                     e.source
                 ));
             }
-            if !ids.is_empty() && !ids.contains(e.target.as_str()) {
+            if !ids.contains(e.target.as_str()) {
                 errors.push(format!(
                     "Edge {i} target '{}' does not match any node id",
                     e.target
+                ));
+            }
+            if let Some(weight) = e.weight
+                && (!weight.is_finite() || weight < 0.0)
+            {
+                errors.push(format!(
+                    "Edge {i} has invalid weight {weight}; weights must be finite and non-negative"
                 ));
             }
         }
@@ -157,10 +164,19 @@ pub struct GraphJson {
 
 impl GraphJson {
     pub fn from_extraction(extraction: &Extraction, directed: bool) -> Self {
-        // Dedup nodes by id (last write wins, semantic-over-AST style).
+        // Dedup nodes by id (last write wins, semantic-over-AST style), but
+        // never let an extractor's sourceless placeholder erase a concrete
+        // definition encountered in another file.
         let mut by_id: BTreeMap<String, Node> = BTreeMap::new();
         for n in &extraction.nodes {
-            by_id.insert(n.id.clone(), n.clone());
+            let keep_existing = by_id.get(&n.id).is_some_and(|existing| {
+                !existing.source_file.is_empty()
+                    && n.source_file.is_empty()
+                    && n.origin_file.is_some()
+            });
+            if !keep_existing {
+                by_id.insert(n.id.clone(), n.clone());
+            }
         }
         let nodes: Vec<Node> = by_id.into_values().collect();
         let id_set: std::collections::HashSet<String> =

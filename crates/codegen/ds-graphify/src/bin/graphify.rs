@@ -1,7 +1,7 @@
 //! `graphify` CLI — Graphify-compatible entrypoint (native Rust).
 
 use clap::{Parser, Subcommand};
-use ds_graphify::pipeline::{self, PipelineOptions, OUT_DIR_NAME};
+use ds_graphify::pipeline::{self, OUT_DIR_NAME, PipelineOptions};
 use ds_graphify::query;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -159,15 +159,9 @@ fn run() -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Some(Commands::Update { path }) => run_build(
-            path,
-            out,
-            directed,
-            no_viz,
-            resolution,
-            cluster_only,
-            true,
-        ),
+        Some(Commands::Update { path }) => {
+            run_build(path, out, directed, no_viz, resolution, cluster_only, true)
+        }
         Some(Commands::Build { path }) => run_build(
             path,
             out,

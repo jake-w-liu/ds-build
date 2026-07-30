@@ -33,9 +33,7 @@ pub fn render_report(
             "- {} files · ~{} words",
             detection.total_files, detection.total_words
         ));
-        lines.push(
-            "- Verdict: corpus is large enough that graph structure adds value.".into(),
-        );
+        lines.push("- Corpus indexed successfully.".into());
     }
 
     lines.push(String::new());
@@ -57,7 +55,11 @@ pub fn render_report(
     if let Some(commit) = built_at_commit {
         lines.push(String::new());
         lines.push("## Graph Freshness".into());
-        let short = if commit.len() > 8 { &commit[..8] } else { commit };
+        let short = if commit.len() > 8 {
+            &commit[..8]
+        } else {
+            commit
+        };
         lines.push(format!("- Built from commit: `{short}`"));
         lines.push("- Run `git rev-parse HEAD` and compare to check if the graph is stale.".into());
         lines.push("- Run `graphify update .` after code changes (no API cost).".into());
@@ -67,11 +69,7 @@ pub fn render_report(
         lines.push(String::new());
         lines.push("## Community Hubs (Navigation)".into());
         for (cid, label) in &analysis.community_labels {
-            let size = analysis
-                .communities
-                .get(cid)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = analysis.communities.get(cid).map(|m| m.len()).unwrap_or(0);
             if size == 0 {
                 continue;
             }
@@ -92,9 +90,7 @@ pub fn render_report(
     lines.push(String::new());
     lines.push("## Surprising Connections (you probably didn't know these)".into());
     if analysis.surprises.is_empty() {
-        lines.push(
-            "- None detected - all connections are within the same source files.".into(),
-        );
+        lines.push("- None detected.".into());
     } else {
         for s in &analysis.surprises {
             lines.push(format!(

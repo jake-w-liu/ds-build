@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 
 const CODE_EXTENSIONS: &[&str] = &[
     "rs", "py", "pyi", "go", "js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts", "java", "c",
-    "h", "cpp", "cc", "cxx", "hpp", "rb", "cs", "kt", "kts", "scala", "php", "swift", "lua",
-    "zig", "ex", "exs", "jl", "vue", "svelte", "astro", "dart", "sql", "sh", "bash", "json",
-    "toml", "yaml", "yml",
+    "h", "cpp", "cc", "cxx", "hpp", "rb", "cs", "kt", "kts", "scala", "php", "swift", "lua", "zig",
+    "ex", "exs", "jl", "vue", "svelte", "astro", "dart", "sql", "sh", "bash", "json", "toml",
+    "yaml", "yml",
 ];
 
 const DOC_EXTENSIONS: &[&str] = &["md", "mdx", "qmd", "txt", "rst", "html"];
@@ -33,7 +33,22 @@ const SENSITIVE_NAMES: &[&str] = &[
 /// Respects `.gitignore` via the `ignore` crate and merges `.graphifyignore`
 /// patterns when present.
 pub fn detect(root: &Path) -> anyhow::Result<DetectionResult> {
+    detect_excluding(root, &[])
+}
+
+/// Detect supported files while excluding exact files or directory trees.
+///
+/// The pipeline uses this for a custom output directory so generated graph
+/// artifacts can never become inputs to the next build.
+pub fn detect_excluding(
+    root: &Path,
+    excluded_paths: &[PathBuf],
+) -> anyhow::Result<DetectionResult> {
     let root = dunce_canonicalize(root)?;
+    let excluded_paths: Vec<PathBuf> = excluded_paths
+        .iter()
+        .map(|path| dunce_canonicalize(path))
+        .collect::<anyhow::Result<_>>()?;
     let mut builder = ignore::WalkBuilder::new(&root);
     builder
         .hidden(false)
@@ -62,6 +77,12 @@ pub fn detect(root: &Path) -> anyhow::Result<DetectionResult> {
             continue;
         }
         let path = entry.path();
+        if excluded_paths
+            .iter()
+            .any(|excluded| path == excluded || path.starts_with(excluded))
+        {
+            continue;
+        }
         if should_skip_path(path, &root) {
             continue;
         }
@@ -186,20 +207,12 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
 /// All absolute paths from a detection result, rooted at scan_root.
 pub fn all_code_paths(det: &DetectionResult) -> Vec<PathBuf> {
     let root = PathBuf::from(&det.scan_root);
-    det.files
-        .code
-        .iter()
-        .map(|r| root.join(r))
-        .collect()
+    det.files.code.iter().map(|r| root.join(r)).collect()
 }
 
 pub fn all_doc_paths(det: &DetectionResult) -> Vec<PathBuf> {
     let root = PathBuf::from(&det.scan_root);
-    det.files
-        .document
-        .iter()
-        .map(|r| root.join(r))
-        .collect()
+    det.files.document.iter().map(|r| root.join(r)).collect()
 }
 
 #[cfg(test)]

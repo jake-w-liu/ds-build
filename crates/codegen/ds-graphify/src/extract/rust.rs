@@ -71,10 +71,7 @@ fn walk<'a>(
                 let func_name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
                 let (func_nid, label) = if let Some(impl_nid) = parent_impl {
-                    (
-                        make_id(&[impl_nid, &func_name]),
-                        format!(".{func_name}()"),
-                    )
+                    (make_id(&[impl_nid, &func_name]), format!(".{func_name}()"))
                 } else {
                     (
                         make_id(&[&b.file_nid, &func_name]),

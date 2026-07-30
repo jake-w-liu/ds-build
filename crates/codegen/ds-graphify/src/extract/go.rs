@@ -28,12 +28,11 @@ pub fn extract_go(path: &Path, source_key: &str) -> Extraction {
     };
 
     let mut b = Builder::new(path, source_key);
-    let pkg_scope = path
+    let pkg_scope = Path::new(source_key)
         .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or(&b.stem)
-        .to_string();
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|| "root".to_string());
     let file_nid = b.file_nid.clone();
     let mut function_bodies: Vec<(String, tree_sitter::Node)> = Vec::new();
 
@@ -96,18 +95,19 @@ fn walk<'a>(
                 .unwrap_or("recv")
                 .trim_start_matches('*')
                 .trim_matches(|c| c == '(' || c == ')')
+                .rsplit('.')
+                .next()
+                .unwrap_or("recv")
+                .split('[')
+                .next()
+                .unwrap_or("recv")
                 .to_string();
             let line = node.start_position().row + 1;
             let type_nid = make_id(&[pkg_scope, &type_name]);
-            b.add_node(&type_nid, &type_name, line, FileType::Code);
+            b.add_sourceless(&type_nid, &type_name);
             b.add_edge(file_nid, &type_nid, "contains", line, Confidence::Extracted);
             let method_nid = make_id(&[&type_nid, &name]);
-            b.add_node(
-                &method_nid,
-                &format!(".{name}()"),
-                line,
-                FileType::Code,
-            );
+            b.add_node(&method_nid, &format!(".{name}()"), line, FileType::Code);
             b.add_edge(
                 &type_nid,
                 &method_nid,
