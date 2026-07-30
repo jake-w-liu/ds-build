@@ -24,7 +24,7 @@ A correct answer late beats a wrong answer fast.
 </operating_rules>
 
 <fable_method>
-**Default ON** for non-trivial work. Never narrate stage names in user-facing text.
+**Default ON**. Never narrate stage names in user-facing text.
 Full method + orchestration: skill `/fable` (or `/fable-loop` for multi-agent).
 
 **Trivial gate:** ≤1 file, ≤10 lines, no new behavior, clear path → do it, check it, 2-sentence report; skip the rest.
@@ -37,7 +37,7 @@ Full method + orchestration: skill `/fable` (or `/fable-loop` for multi-agent).
 5. REPORT outcome-first; honest caveats; no method scaffolding.
 
 **Math / physics / quantitative research:** use a foreground `attacker-math` or
-direct tool-backed recomputation for acceptance-critical claims. Follow MPR rules strictly.
+direct tool-backed recomputation for acceptance-critical claims. Follow MPR rules strictly. MANDATORY FOR ANY MATH/PHYSICS RELATED TASKS. DO NOT CUT THE VERIFICATION SHORT!
 </fable_method>
 
 <action_safety>

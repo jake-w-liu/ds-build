@@ -83,6 +83,13 @@ impl WebFetchClient {
         let mut url = validate_url(raw_url)?;
         upgrade_to_https(&mut url);
 
+        // Domain allowlist runs before cache/network so blocked hosts never
+        // hit the wire or pollute the cache (config + DEFAULT_ALLOWED_DOMAINS).
+        let matcher = super::domain::DomainMatcher::new(&self.params.allowed_domains());
+        if let Some(blocked) = matcher.check(&url) {
+            return Ok(blocked);
+        }
+
         let url_str = url.to_string();
 
         // Check cache.
@@ -127,6 +134,14 @@ impl WebFetchClient {
                 });
             }
         };
+
+        // Re-check allowlist against the final URL after same-host redirects so
+        // path-scoped entries (e.g. vercel.com/docs) cannot be bypassed via 302.
+        if let Ok(final_parsed) = Url::parse(&final_url)
+            && let Some(blocked) = matcher.check(&final_parsed)
+        {
+            return Ok(blocked);
+        }
 
         // PDF: save raw bytes to disk instead of lossy UTF-8 conversion.
         if is_pdf(&content_type) {
@@ -1302,6 +1317,25 @@ mod tests {
         let json = r#"{"allowed_domains": ["example.com"]}"#;
         let params: WebFetchParams = serde_json::from_str(json).unwrap();
         assert!(params.proxy_endpoint.is_none());
+    }
+
+    #[tokio::test]
+    async fn domain_allowlist_blocks_before_network() {
+        let params = WebFetchParams {
+            allowed_domains: Some(vec!["docs.rs".into()]),
+            ..Default::default()
+        };
+        let client = WebFetchClient::new(&params).expect("client");
+        let out = client
+            .fetch("https://evil.example.com/secret", None, None, None)
+            .await
+            .expect("domain block is Ok(DomainNotAllowed), not Err");
+        match out {
+            crate::types::output::WebFetchOutput::DomainNotAllowed(host) => {
+                assert_eq!(host, "evil.example.com");
+            }
+            other => panic!("expected DomainNotAllowed, got {other:?}"),
+        }
     }
 
     // ── HTML cleaning (scraper-based) ─────────────────────────────────

@@ -76,7 +76,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let nid = make_id(&[&b.stem, &name]);
+                let nid = make_id(&[&b.file_nid, &name]);
                 b.add_node(&nid, &format!("{name}()"), line, FileType::Code);
                 b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
                 if let Some(body) = node.child_by_field_name("body") {
@@ -89,7 +89,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let nid = make_id(&[&b.stem, &name]);
+                let nid = make_id(&[&b.file_nid, &name]);
                 b.add_node(&nid, &name, line, FileType::Code);
                 b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
                 // heritage
@@ -157,7 +157,7 @@ fn walk<'a>(
                         && !name.is_empty()
                     {
                         let line = child.start_position().row + 1;
-                        let nid = make_id(&[&b.stem, &name]);
+                        let nid = make_id(&[&b.file_nid, &name]);
                         b.add_node(&nid, &format!("{name}()"), line, FileType::Code);
                         b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
                         if let Some(body) = v.child_by_field_name("body") {
@@ -185,7 +185,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let nid = make_id(&[&b.stem, &name]);
+                let nid = make_id(&[&b.file_nid, &name]);
                 b.add_node(&nid, &name, line, FileType::Code);
                 b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
             }

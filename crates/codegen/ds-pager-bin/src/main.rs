@@ -1876,6 +1876,7 @@ async fn async_main() -> Result<()> {
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
                 ),
+                no_subagents: args.no_subagents,
             },
         )
         .await;

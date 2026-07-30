@@ -221,7 +221,9 @@ pub(crate) mod helpers {
         }
 
         pub fn ensure_named(&mut self, name: &str, line: usize) -> String {
-            let local = make_id(&[&self.stem, name]);
+            // Prefer the same file-scoped id as definition sites (file_nid + name),
+            // not stem alone — stems collide across paths like a/lib.rs vs b/lib.rs.
+            let local = make_id(&[&self.file_nid, name]);
             if self.seen.contains(&local) {
                 return local;
             }

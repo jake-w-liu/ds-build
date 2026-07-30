@@ -1891,7 +1891,7 @@ impl Config {
     /// paths only read model/key fields and do not need this call.
     pub fn resolve_subagents(
         &mut self,
-        cli_flag: bool,
+        cli_flag: Option<bool>,
         raw_config: &toml::Value,
         cwd: Option<&std::path::Path>,
     ) {
@@ -1922,8 +1922,9 @@ impl Config {
         self.cli_subagents = ctx.cli_subagents;
         self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
-        let cli_flag = ctx.cli_subagents.unwrap_or(false);
-        self.resolve_subagents(cli_flag, ctx.raw_config, ctx.cwd);
+        // Pass through Option so `--no-subagents` (Some(false)) force-disables
+        // instead of collapsing to "no CLI opinion" (None → default on).
+        self.resolve_subagents(ctx.cli_subagents, ctx.raw_config, ctx.cwd);
         let tools = crate::config::ToolsConfig::resolve(ctx.raw_config);
         self.respect_gitignore = match self.requirements.respect_gitignore.pinned() {
             Some(pinned) => pinned,

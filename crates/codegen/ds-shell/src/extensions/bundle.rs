@@ -743,7 +743,7 @@ mod tests {
         )
         .unwrap();
         let config = crate::config::SubagentsConfig::resolve(
-            false,
+            None,
             &toml::Value::Table(Default::default()),
             Some(&project_root),
         );

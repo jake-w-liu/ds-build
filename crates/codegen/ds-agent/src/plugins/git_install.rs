@@ -84,11 +84,10 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
                 (main.to_string(), None)
             }
         } else {
-            // HTTPS URL: https://host/user/repo@ref
-            match main.rsplit_once('@') {
-                Some((url, r)) if !r.is_empty() => (url.to_string(), Some(r.to_string())),
-                _ => (main.to_string(), None),
-            }
+            // HTTPS (or other scheme://) URL: https://host/user/repo@ref
+            // Do not treat userinfo `@` (https://user:token@host/...) as a ref
+            // delimiter — only a trailing `@ref` after the authority is a pin.
+            parse_scheme_url_and_ref(main)
         };
 
         InstallSource::Git {
@@ -128,6 +127,32 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
 /// pin policy accepts; branches, tags, and short prefixes are mutable or forgeable.
 pub fn is_full_commit_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Split `scheme://…@ref` without confusing userinfo `@` for a ref delimiter.
+///
+/// Examples:
+/// - `https://github.com/o/r@v1` → (`https://github.com/o/r`, Some(`v1`))
+/// - `https://user:tok@github.com/o/r` → (full URL, None)
+/// - `https://user:tok@github.com/o/r@abc` → (`https://user:tok@github.com/o/r`, Some(`abc`))
+fn parse_scheme_url_and_ref(main: &str) -> (String, Option<String>) {
+    let Some(scheme_sep) = main.find("://") else {
+        return (main.to_string(), None);
+    };
+    let after_scheme = &main[scheme_sep + 3..];
+    // Authority ends at the first `/` (path). Only look for `@ref` in the path.
+    let Some(path_start) = after_scheme.find('/') else {
+        return (main.to_string(), None);
+    };
+    let path_and_maybe_ref = &after_scheme[path_start..];
+    match path_and_maybe_ref.rsplit_once('@') {
+        Some((path, r)) if !r.is_empty() && !path.is_empty() => {
+            let authority = &after_scheme[..path_start];
+            let url = format!("{}{authority}{path}", &main[..scheme_sep + 3]);
+            (url, Some(r.to_string()))
+        }
+        _ => (main.to_string(), None),
+    }
 }
 
 fn validate_git_operand<'a>(value: &'a str, kind: &str) -> Result<&'a str, String> {
@@ -734,7 +759,7 @@ pub enum UpdateStatus {
 /// - Tag installs: pinned — no-op
 /// - Commit installs: pinned — no-op
 /// - Local installs: no-op (explicit update); [`super::local_refresh`] re-copies on session spawn / reload
-pub fn update_repo(repo_key: &str, repo: &InstalledRepo, _require_sha: bool) -> Result<UpdateStatus, InstallError> {
+pub fn update_repo(repo_key: &str, repo: &InstalledRepo, require_sha: bool) -> Result<UpdateStatus, InstallError> {
     match &repo.kind {
         InstallKind::Local { .. } => Ok(UpdateStatus::LiveLocal),
         InstallKind::Git {
@@ -743,12 +768,19 @@ pub fn update_repo(repo_key: &str, repo: &InstalledRepo, _require_sha: bool) -> 
             subdir,
             ..
         } => {
-            // Check if pinned
+            // Pin policy: full commit OID (40/64 hex), version tags (`v1.2.3`),
+            // or any install when require_sha is set (mutable branch heads are
+            // not auto-updated under pin-only policy).
+            if require_sha {
+                let ref_name = git_ref
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(|| commit.clone());
+                return Ok(UpdateStatus::Pinned { ref_name });
+            }
             if let Some(r) = git_ref {
-                // Heuristic: if the ref looks like a commit hash (40 hex chars)
-                // or a version tag (starts with v and contains dots), it's pinned.
-                let is_tag_or_commit = r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
-                    || (r.starts_with('v') && r.contains('.'));
+                let is_tag_or_commit =
+                    is_full_commit_sha(r) || (r.starts_with('v') && r.contains('.'));
                 if is_tag_or_commit {
                     return Ok(UpdateStatus::Pinned {
                         ref_name: r.clone(),
@@ -918,6 +950,44 @@ mod tests {
             }
             _ => panic!("expected Git"),
         }
+    }
+
+    #[test]
+    fn parse_https_url_with_userinfo_does_not_split_on_credential_at() {
+        let source = parse_install_source(
+            "https://x-access-token:ghp_x@github.com/org/repo",
+            Path::new("/tmp"),
+        );
+        match source {
+            InstallSource::Git { url, git_ref, .. } => {
+                assert_eq!(url, "https://x-access-token:ghp_x@github.com/org/repo");
+                assert!(git_ref.is_none());
+            }
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn parse_https_url_userinfo_and_trailing_ref() {
+        let source = parse_install_source(
+            "https://user:tok@github.com/org/repo@v1.2.3",
+            Path::new("/tmp"),
+        );
+        match source {
+            InstallSource::Git { url, git_ref, .. } => {
+                assert_eq!(url, "https://user:tok@github.com/org/repo");
+                assert_eq!(git_ref.as_deref(), Some("v1.2.3"));
+            }
+            _ => panic!("expected Git"),
+        }
+    }
+
+    #[test]
+    fn is_full_commit_sha_accepts_40_and_64() {
+        assert!(is_full_commit_sha(&"a".repeat(40)));
+        assert!(is_full_commit_sha(&"b".repeat(64)));
+        assert!(!is_full_commit_sha(&"c".repeat(39)));
+        assert!(!is_full_commit_sha("main"));
     }
 
     #[test]

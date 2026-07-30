@@ -104,6 +104,33 @@ fn full_pipeline_produces_graphify_artifacts() {
 }
 
 #[test]
+fn same_stem_different_paths_get_distinct_symbol_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let a = tmp.path().join("a");
+    let b = tmp.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("lib.rs"), "pub fn foo() {}\n").unwrap();
+    fs::write(b.join("lib.rs"), "pub fn foo() {}\n").unwrap();
+    let ext = ds_graphify::extract::extract_many(
+        &[a.join("lib.rs"), b.join("lib.rs")],
+        tmp.path(),
+    );
+    let foo_ids: Vec<_> = ext
+        .nodes
+        .iter()
+        .filter(|n| n.label == "foo()" || n.label == "foo")
+        .map(|n| n.id.as_str())
+        .collect();
+    assert!(
+        foo_ids.len() >= 2,
+        "expected distinct foo nodes, got {foo_ids:?} from {:?}",
+        ext.nodes.iter().map(|n| (&n.id, &n.label)).collect::<Vec<_>>()
+    );
+    assert_ne!(foo_ids[0], foo_ids[1], "IDs must not collide: {foo_ids:?}");
+}
+
+#[test]
 fn rust_extractor_finds_struct_and_impl() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(

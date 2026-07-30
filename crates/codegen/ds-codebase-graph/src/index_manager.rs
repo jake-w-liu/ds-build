@@ -1101,17 +1101,24 @@ impl IndexManager {
         let start = Instant::now();
         let stale_count = stale_files.len();
         let deleted_count = deleted_files.len();
+        let root = self.config.root_path.clone();
 
-        // Remove deleted files
+        // Remove deleted files (keys are root-relative).
         for path in deleted_files {
-            Arc::make_mut(&mut self.index).remove_file(Path::new(&path));
+            let rel = to_relative_path(&root, Path::new(&path));
+            Arc::make_mut(&mut self.index).remove_file(&rel);
         }
 
-        // Reindex stale files
+        // Reindex stale files: join relative cache keys so FS ops work off-CWD.
         for path in stale_files {
             let path_ref = Path::new(&path);
-            if self.registry.is_supported(path_ref) {
-                self.reindex_file(path_ref);
+            let abs = if path_ref.is_absolute() {
+                path_ref.to_path_buf()
+            } else {
+                root.join(path_ref)
+            };
+            if self.registry.is_supported(&abs) {
+                self.reindex_file(&abs);
             }
         }
 
@@ -1341,14 +1348,21 @@ fn background_index_refresh(
         "Starting background index validation"
     );
 
-    // Phase 1: Parallel stat check on cached files to find stale/deleted
+    // Phase 1: Parallel stat check on cached files to find stale/deleted.
+    // Cache keys are root-relative — join with root_path so is_stale/exists
+    // work when process CWD ≠ workspace root.
     let (stale_from_cache, deleted): (Vec<_>, Vec<_>) = cached_data
         .par_iter()
         .filter_map(|(path, cached_meta)| {
-            let path_ref = Path::new(path);
-            if cached_meta.is_stale(path_ref) {
-                // Check if file exists or is deleted
-                if path_ref.exists() {
+            let rel = Path::new(path);
+            let abs = if rel.is_absolute() {
+                rel.to_path_buf()
+            } else {
+                root_path.join(rel)
+            };
+            if cached_meta.is_stale(&abs) {
+                // Keep the original cache key (relative) for remove/reindex.
+                if abs.exists() {
                     Some((Some(path.clone()), None)) // Stale
                 } else {
                     Some((None, Some(path.clone()))) // Deleted
@@ -1386,7 +1400,8 @@ fn background_index_refresh(
         "Stat check complete"
     );
 
-    // Phase 2: Walk filesystem to find new files (not in cache)
+    // Phase 2: Walk filesystem to find new files (not in cache).
+    // Compare root-relative keys against the cache (which stores relative paths).
     let cached_set: HashSet<&str> = cached_data.iter().map(|(p, _)| p.as_str()).collect();
     let registry = crate::languages::LanguageRegistry::new();
 
@@ -1399,8 +1414,17 @@ fn background_index_refresh(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
         .filter(|e| registry.is_supported(e.path()))
-        .filter(|e| !cached_set.contains(e.path().to_string_lossy().as_ref()))
-        .map(|e| e.path().to_string_lossy().into_owned())
+        .filter_map(|e| {
+            let abs = e.path();
+            let rel = to_relative_path(&root_path, abs);
+            let rel_str = rel.to_string_lossy();
+            if cached_set.contains(rel_str.as_ref()) {
+                None
+            } else {
+                // Absolute path so reindex_file can stat/read regardless of CWD.
+                Some(abs.to_string_lossy().into_owned())
+            }
+        })
         .collect();
 
     let walk_elapsed = start.elapsed() - stat_elapsed;

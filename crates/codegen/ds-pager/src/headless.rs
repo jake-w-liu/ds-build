@@ -192,6 +192,8 @@ pub struct HeadlessOptions {
     pub wait_for_background: bool,
     /// Max time to wait for background quiescence after the first turn ends.
     pub background_wait_timeout: Duration,
+    /// When true (`--no-subagents`), force-disable subagent spawning.
+    pub no_subagents: bool,
 }
 
 // ── CLI flag helpers ─────────────────────────────────────────────────────
@@ -875,7 +877,12 @@ pub async fn run_single_turn(
         remote_settings: None,
         cwd: Some(&cwd),
         is_headless: true,
-        cli_subagents: None,
+        // Some(false) force-disables; None leaves config/env/default in control.
+        cli_subagents: if options.no_subagents {
+            Some(false)
+        } else {
+            None
+        },
         cli_web_search_model: None,
         cli_session_summary_model: None,
         cli_experimental_memory: false,

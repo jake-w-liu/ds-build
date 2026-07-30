@@ -77,7 +77,7 @@ fn walk<'a>(
                     )
                 } else {
                     (
-                        make_id(&[&b.stem, &func_name]),
+                        make_id(&[&b.file_nid, &func_name]),
                         format!("{func_name}()"),
                     )
                 };
@@ -98,7 +98,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let item_name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let item_nid = make_id(&[&b.stem, &item_name]);
+                let item_nid = make_id(&[&b.file_nid, &item_name]);
                 b.add_node(&item_nid, &item_name, line, FileType::Code);
                 b.add_edge(file_nid, &item_nid, "contains", line, Confidence::Extracted);
 
@@ -132,7 +132,7 @@ fn walk<'a>(
                         .to_string()
                 })
                 .unwrap_or_else(|| "impl".into());
-            let impl_nid = make_id(&[&b.stem, &type_name]);
+            let impl_nid = make_id(&[&b.file_nid, &type_name]);
             b.add_node(&impl_nid, &type_name, line, FileType::Code);
             b.add_edge(file_nid, &impl_nid, "contains", line, Confidence::Extracted);
 
@@ -172,7 +172,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let nid = make_id(&[&b.stem, &name]);
+                let nid = make_id(&[&b.file_nid, &name]);
                 b.add_node(&nid, &name, line, FileType::Code);
                 b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
             }
@@ -182,7 +182,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let nid = make_id(&[&b.stem, &name]);
+                let nid = make_id(&[&b.file_nid, &name]);
                 b.add_node(&nid, &name, line, FileType::Code);
                 b.add_edge(file_nid, &nid, "contains", line, Confidence::Extracted);
             }

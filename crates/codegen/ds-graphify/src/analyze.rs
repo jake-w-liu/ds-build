@@ -202,7 +202,7 @@ pub fn find_import_cycles(graph: &GraphJson) -> Vec<Vec<String>> {
                         .find(|n| n.id == mid)
                         .map(|n| n.label.clone())
                         .unwrap_or_else(|| mid.to_string());
-                    cycles.push(vec![sl, ml, /* back */ start.to_string()]);
+                    cycles.push(vec![sl.clone(), ml, /* back to start */ sl]);
                 }
             }
         }

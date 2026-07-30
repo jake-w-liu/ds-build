@@ -446,7 +446,8 @@ impl SubagentsConfig {
         self.discover_roles_in_dir(&roles_dir);
     }
     /// Resolve the final subagents config from all sources (in priority order):
-    /// 1. CLI flag `--subagents` (absolute highest — always enables)
+    /// 1. CLI `Some(true)` (`--subagents`) force-enables; `Some(false)`
+    ///    (`--no-subagents`) force-disables
     /// 2. `DS_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
     /// 3. Config file `[subagents]` section
     /// 4. Default (enabled)
@@ -457,13 +458,13 @@ impl SubagentsConfig {
     ///
     /// When `cwd` is provided, file-based roles are discovered from
     /// `{cwd}/.ds/roles/*.toml` and merged (inline config takes precedence).
-    pub fn resolve(cli_flag: bool, config: &toml::Value, cwd: Option<&std::path::Path>) -> Self {
+    pub fn resolve(cli_flag: Option<bool>, config: &toml::Value, cwd: Option<&std::path::Path>) -> Self {
         let mut result: Self = config
             .get("subagents")
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
         let resolved = crate::agent::config::resolve_enabled(
-            if cli_flag { Some(true) } else { None },
+            cli_flag,
             "DS_SUBAGENTS",
             result.enabled,
             config.get("subagents").is_some(),

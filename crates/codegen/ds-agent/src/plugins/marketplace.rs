@@ -51,7 +51,28 @@ pub fn resolve(git_root: &Path) -> Vec<ResolvedMarketplace> {
             continue;
         };
 
-        let marketplace_path = git_root.join(rel_path);
+        // Containment: reject absolute paths and any `..` / prefix components
+        // before joining. Do not rely on canonicalize alone — missing targets
+        // fail open under Path::starts_with with unnormalized `..`.
+        let rel = Path::new(rel_path);
+        if rel.is_absolute()
+            || rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            tracing::warn!(
+                marketplace = %name,
+                path = %rel_path,
+                "marketplace source.path escapes git root; skipping"
+            );
+            continue;
+        }
+        let marketplace_path = git_root.join(rel);
         let plugins_dir = marketplace_path.join("plugins");
         let Ok(entries) = std::fs::read_dir(&plugins_dir) else {
             continue;

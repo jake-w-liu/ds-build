@@ -67,7 +67,7 @@ fn walk<'a>(
                 let (func_nid, label) = if let Some(cls) = parent_class {
                     (make_id(&[cls, &func_name]), format!(".{func_name}()"))
                 } else {
-                    (make_id(&[&b.stem, &func_name]), format!("{func_name}()"))
+                    (make_id(&[&b.file_nid, &func_name]), format!("{func_name}()"))
                 };
                 b.add_node(&func_nid, &label, line, FileType::Code);
                 if let Some(cls) = parent_class {
@@ -85,7 +85,7 @@ fn walk<'a>(
             if let Some(name_node) = node.child_by_field_name("name") {
                 let cls_name = node_text(name_node, source);
                 let line = node.start_position().row + 1;
-                let cls_nid = make_id(&[&b.stem, &cls_name]);
+                let cls_nid = make_id(&[&b.file_nid, &cls_name]);
                 b.add_node(&cls_nid, &cls_name, line, FileType::Code);
                 b.add_edge(file_nid, &cls_nid, "contains", line, Confidence::Extracted);
                 if let Some(superclasses) = node.child_by_field_name("superclasses") {
