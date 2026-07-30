@@ -1,0 +1,88 @@
+# Ruff configuration targeting the smells AI-authored Python commits actually
+# introduce. Merge into pyproject.toml under [tool.ruff] / [tool.ruff.lint].
+#
+# Empirical ranking of AI-introduced Python issues, most frequent first:
+#   1. broad exception handling      -> BLE, E722
+#   2. unused argument               -> ARG
+#   3. undefined variable/reference  -> F821, F822
+#   4. access to protected member    -> SLF001
+#   5. unused import                 -> F401
+# Everything else here is secondary. If the codebase cannot pass all of this
+# today, enable the top five first and ratchet — a rule set that gets disabled
+# next week is worth less than five rules that stay on.
+
+target-version = "py39"
+line-length = 100
+
+[lint]
+select = [
+    # --- the top five, non-negotiable ---
+    "BLE",   # blind-except: `except Exception` / `except BaseException`
+    "E722",  # bare `except:`
+    "ARG",   # unused function/method arguments
+    "F821",  # undefined name
+    "F822",  # undefined name in __all__
+    "SLF",   # private-member access from outside the owning class
+    "F401",  # unused import
+
+    # --- correctness ---
+    "F",     # pyflakes: undefined names, unused locals, f-string mistakes
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "B",     # bugbear: mutable default args, loop-variable capture, assert-on-tuple
+    "A",     # builtin shadowing
+    "RET",   # inconsistent / unreachable returns
+    "TRY",   # exception antipatterns: raise-vanilla, try-consider-else
+    "EM",    # exception messages built inline (hides context in tracebacks)
+    "DTZ",   # naive datetime use — the single most common formatter bug
+    "S",     # bandit security rules
+    "ASYNC", # blocking calls in async functions
+
+    # --- duplication and dead weight ---
+    "SIM",   # simplifiable code: duplicate branches, nested ifs, redundant checks
+    "C4",    # comprehension rewrites
+    "PIE",   # duplicate class-field definitions, unnecessary pass/spread
+    "ERA",   # commented-out code
+    "F841",  # assigned-but-never-used local
+
+    # --- maintainability ---
+    "PL",    # pylint subset: too many args/branches/statements, magic values
+    "N",     # naming conventions (consistency makes duplicates findable)
+    "PTH",   # os.path -> pathlib
+    "RUF",   # ruff-specific, incl. mutable class defaults
+]
+
+ignore = [
+    # Docstring formatting is style, and comments are not counted, so these
+    # would be pure noise for this purpose.
+    "D",
+    # Long lines are handled by the formatter, and flagging them here would
+    # collide with the code-golf detector's job.
+    "E501",
+    # `assert` in tests is correct.
+    "S101",
+    # Explicit `raise ... from` is good practice but too noisy to introduce
+    # mid-engagement. Turn this on once the codebase is stable.
+    "B904",
+]
+
+[lint.per-file-ignores]
+# Tests legitimately access internals, use magic values, and take unused
+# fixtures.
+"tests/**" = ["SLF001", "ARG", "PLR2004", "S105", "S106"]
+# Package entry points re-export without using the imports.
+"__init__.py" = ["F401"]
+# Migrations are generated history and must not be edited to satisfy a linter.
+"**/migrations/**" = ["ALL"]
+
+[lint.pylint]
+# Thresholds for god functions. Start where the codebase currently sits and
+# lower them over time rather than turning the build red on day one.
+max-args = 6
+max-branches = 12
+max-statements = 50
+max-returns = 6
+
+[lint.flake8-bugbear]
+# Decorators that legitimately take mutable defaults or call at definition time.
+extend-immutable-calls = []

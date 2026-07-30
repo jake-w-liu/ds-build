@@ -17,6 +17,17 @@ const FABLE_SKILL_MD: &str = include_str!("../skills/fable/SKILL.md");
 const FABLE_LOOP_SKILL_MD: &str = include_str!("../skills/fable-loop/SKILL.md");
 const PSST_GPT_SKILL_MD: &str = include_str!("../skills/psst-gpt/SKILL.md");
 const GRAPHIFY_SKILL_MD: &str = include_str!("../skills/graphify/SKILL.md");
+const SLOPFIX_SKILL_MD: &str = include_str!("../skills/slopfix/SKILL.md");
+
+macro_rules! bundled_skill_asset {
+    ($skill:literal, $path:literal) => {
+        (
+            $skill,
+            $path,
+            include_str!(concat!("../skills/", $skill, "/", $path)),
+        )
+    };
+}
 
 /// Extra files shipped beside a skill's SKILL.md (e.g. scripts).
 /// Path is relative to `skills/<name>/`.
@@ -76,6 +87,37 @@ const BUNDLED_SKILL_ASSETS: &[(&str, &str, &str)] = &[
         "scripts/selfcheck_wake.sh",
         include_str!("../skills/psst-gpt/scripts/selfcheck_wake.sh"),
     ),
+    bundled_skill_asset!("slopfix", "agents/openai.yaml"),
+    bundled_skill_asset!("slopfix", "assets/behaviour-inventory.template.md"),
+    bundled_skill_asset!("slopfix", "assets/final-report.template.md"),
+    bundled_skill_asset!("slopfix", "assets/slop-ledger.template.md"),
+    bundled_skill_asset!("slopfix", "assets/guardrails/AGENTS.md.template"),
+    bundled_skill_asset!("slopfix", "assets/guardrails/eslint.slopfix.mjs"),
+    bundled_skill_asset!("slopfix", "assets/guardrails/jscpd.slopfix.json"),
+    bundled_skill_asset!("slopfix", "assets/guardrails/ruff.slopfix.toml"),
+    bundled_skill_asset!("slopfix", "assets/guardrails/slopfix-ci.yml"),
+    bundled_skill_asset!("slopfix", "references/01-triage.md"),
+    bundled_skill_asset!("slopfix", "references/02-baseline.md"),
+    bundled_skill_asset!("slopfix", "references/03-behaviour-inventory.md"),
+    bundled_skill_asset!("slopfix", "references/04-census.md"),
+    bundled_skill_asset!("slopfix", "references/05-consolidation.md"),
+    bundled_skill_asset!("slopfix", "references/06-rewrite-protocol.md"),
+    bundled_skill_asset!("slopfix", "references/07-crc-gate.md"),
+    bundled_skill_asset!("slopfix", "references/08-guardrails.md"),
+    bundled_skill_asset!("slopfix", "references/09-reporting.md"),
+    bundled_skill_asset!("slopfix", "references/10-forbidden-moves.md"),
+    bundled_skill_asset!("slopfix", "references/11-quality-assurance.md"),
+    bundled_skill_asset!("slopfix", "scripts/julia_lines.jl"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/__init__.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/clones.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/concepts.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/counting.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/langs.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/manifest.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/quality.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/scope.py"),
+    bundled_skill_asset!("slopfix", "scripts/slopfix_lib/smells.py"),
 ];
 
 /// Legacy bundled skill names (renamed or removed).
@@ -130,6 +172,7 @@ const BUNDLED_SKILLS: &[(&str, &str)] = &[
     ("fable-loop", FABLE_LOOP_SKILL_MD),
     ("psst-gpt", PSST_GPT_SKILL_MD),
     ("graphify", GRAPHIFY_SKILL_MD),
+    ("slopfix", SLOPFIX_SKILL_MD),
 ];
 
 /// True when a discovered skill is the copy `extract_bundled_files` wrote to
@@ -523,6 +566,114 @@ mod tests {
             .filter_map(|(skill, path, _)| (*skill == "psst-gpt").then_some(*path))
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn slopfix_bundles_complete_runtime_tree() {
+        let expected: std::collections::BTreeSet<_> = [
+            "agents/openai.yaml",
+            "assets/behaviour-inventory.template.md",
+            "assets/final-report.template.md",
+            "assets/guardrails/AGENTS.md.template",
+            "assets/guardrails/eslint.slopfix.mjs",
+            "assets/guardrails/jscpd.slopfix.json",
+            "assets/guardrails/ruff.slopfix.toml",
+            "assets/guardrails/slopfix-ci.yml",
+            "assets/slop-ledger.template.md",
+            "references/01-triage.md",
+            "references/02-baseline.md",
+            "references/03-behaviour-inventory.md",
+            "references/04-census.md",
+            "references/05-consolidation.md",
+            "references/06-rewrite-protocol.md",
+            "references/07-crc-gate.md",
+            "references/08-guardrails.md",
+            "references/09-reporting.md",
+            "references/10-forbidden-moves.md",
+            "references/11-quality-assurance.md",
+            "scripts/julia_lines.jl",
+            "scripts/slopfix.py",
+            "scripts/slopfix_lib/__init__.py",
+            "scripts/slopfix_lib/clones.py",
+            "scripts/slopfix_lib/concepts.py",
+            "scripts/slopfix_lib/counting.py",
+            "scripts/slopfix_lib/langs.py",
+            "scripts/slopfix_lib/manifest.py",
+            "scripts/slopfix_lib/quality.py",
+            "scripts/slopfix_lib/scope.py",
+            "scripts/slopfix_lib/smells.py",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<_> = BUNDLED_SKILL_ASSETS
+            .iter()
+            .filter_map(|(skill, path, _)| (*skill == "slopfix").then_some(*path))
+            .collect();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn slopfix_extracts_and_refreshes_nested_runtime_assets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        extract_bundled_files(home);
+
+        for &(skill, rel, content) in BUNDLED_SKILL_ASSETS {
+            if skill == "slopfix" {
+                assert_eq!(
+                    std::fs::read_to_string(home.join("skills/slopfix").join(rel)).unwrap(),
+                    content,
+                    "slopfix asset {rel} was not extracted byte-for-byte"
+                );
+            }
+        }
+
+        let nested_module = home.join("skills/slopfix/scripts/slopfix_lib/quality.py");
+        std::fs::write(&nested_module, "STALE_CONTENT").unwrap();
+        extract_missing_skills(home);
+        assert_eq!(
+            std::fs::read_to_string(nested_module).unwrap(),
+            include_str!("../skills/slopfix/scripts/slopfix_lib/quality.py")
+        );
+    }
+
+    #[tokio::test]
+    async fn slopfix_skill_is_discovered_as_a_slash_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        extract_bundled_files(home);
+
+        let workspace = tmp.path().join("workspace");
+        let local_skill = workspace.join(".ds/skills/slopfix");
+        std::fs::create_dir_all(&local_skill).unwrap();
+        std::fs::copy(
+            home.join("skills/slopfix/SKILL.md"),
+            local_skill.join("SKILL.md"),
+        )
+        .unwrap();
+
+        let skills = ds_agent::prompt::skills::list_skills(
+            Some(workspace.to_str().unwrap()),
+            &Default::default(),
+            ds_agent::prompt::skills::CompatConfig::default(),
+        )
+        .await;
+        let slopfix = skills
+            .iter()
+            .find(|skill| skill.name == "slopfix")
+            .expect("extracted slopfix skill should be discoverable");
+
+        assert!(slopfix.enabled);
+        assert!(slopfix.user_invocable);
+        assert_eq!(
+            slopfix.short_description.as_deref(),
+            Some("Remove verified AI code debt without regressions")
+        );
+        assert_eq!(
+            slopfix.argument_hint.as_deref(),
+            Some("[scope, target, and stop point]")
+        );
     }
 
     #[test]

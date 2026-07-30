@@ -1,0 +1,224 @@
+# Slopfix guardrail checks. Copy to .github/workflows/slopfix.yml and adapt to
+# whatever CI the project uses — the three checks matter, the syntax does not.
+#
+# These are the only guardrail layer that cannot be ignored, which is what makes
+# the AGENTS.md instructions and the lint rules stick. They keep the reduction
+# durable: the codebase can change freely but cannot quietly grow back.
+#
+# Prerequisites, both committed to the repository:
+#   .slopfix/baseline.json          the frozen measurement contract
+#   scripts/slopfix.py              copied from this skill
+#   scripts/slopfix_lib/            copied with the launcher (required imports)
+#   scripts/julia_lines.jl          copied too when `--counter julia` was used
+
+name: slopfix guardrails
+
+# Quoted so YAML 1.1 parsers do not read the key as the boolean `true`.
+"on":
+  pull_request:
+  push:
+    branches: [main, master]
+
+env:
+  # ---------------------------------------------------------------------------
+  # THE RATCHET. Non-blank, non-comment code lines may not exceed this number.
+  #
+  # Set it to the line count at the end of the engagement plus a few percent of
+  # headroom, so ordinary feature work is not blocked. Raising it is legitimate
+  # when real functionality is added — do it in its own commit, with a reason in
+  # the message. It is not legitimate to get under it by parking code in an
+  # excluded directory, collapsing lines, or deleting tests: `measure` detects
+  # all three and reports them as integrity findings.
+  # ---------------------------------------------------------------------------
+  SLOPFIX_CODE_CEILING: "27500"
+
+  # Duplicated share of the codebase, in percent. Set to where the engagement
+  # left it, plus a point of headroom.
+  SLOPFIX_DUPLICATION_THRESHOLD: "3"
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `slopfix` uses `git ls-files` for scope discovery, so the checkout
+          # must be a real work tree. Full history is not needed.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Read every runtime version encoded in the frozen counter identity.
+      # Examples:
+      #   scc/3.7.0
+      #   slopfix-builtin/2
+      #   slopfix-builtin/2+julia/1.12.6
+      - name: Read the counter recorded in the baseline
+        id: counter
+        run: |
+          set -euo pipefail
+          COUNTER=$(python3 -c "
+          import json
+          with open('.slopfix/baseline.json') as fh:
+              print(json.load(fh)['counter']['id'])
+          ")
+          echo "baseline counter: ${COUNTER}"
+          case "${COUNTER}" in
+            scc/*)
+              VERSION="${COUNTER#scc/}"
+              VERSION="${VERSION#v}"
+              [[ "${VERSION}" =~ ^[0-9]+([.][0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]] || {
+                echo "Unsafe or unrecognised scc version: ${VERSION}" >&2
+                exit 1
+              }
+              echo "scc-version=${VERSION}" >> "${GITHUB_OUTPUT}"
+              ;;
+            slopfix-builtin/*+julia/*)
+              VERSION="${COUNTER##*+julia/}"
+              [[ "${COUNTER}" =~ ^slopfix-builtin/[0-9]+[+]julia/ ]] &&
+              [[ "${VERSION}" =~ ^[0-9]+([.][0-9]+){1,3}([+-][0-9A-Za-z.-]+)?$ ]] || {
+                echo "Unsafe or unrecognised Julia counter: ${COUNTER}" >&2
+                exit 1
+              }
+              echo "julia-version=${VERSION}" >> "${GITHUB_OUTPUT}"
+              ;;
+            slopfix-builtin/[0-9]*)
+              [[ "${COUNTER}" =~ ^slopfix-builtin/[0-9]+$ ]] || {
+                echo "Unrecognised builtin counter identity: ${COUNTER}" >&2
+                exit 1
+              }
+              echo "Baseline used the bundled scanner only."
+              ;;
+            *)
+              echo "Unrecognised counter identity: ${COUNTER}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install the recorded scc version
+        if: steps.counter.outputs['scc-version'] != ''
+        env:
+          SCC_VERSION: ${{ steps.counter.outputs['scc-version'] }}
+        run: |
+          curl -fsSL -o /tmp/scc.tar.gz \
+            "https://github.com/boyter/scc/releases/download/v${SCC_VERSION}/scc_Linux_x86_64.tar.gz"
+          tar -xzf /tmp/scc.tar.gz -C /tmp scc
+          sudo install -m 0755 /tmp/scc /usr/local/bin/scc
+          scc --version
+
+      # Required when the baseline used `--counter julia`. Without this step the
+      # old template silently matched the `slopfix-builtin/*` case and then
+      # failed at measure time because Julia was absent.
+      - uses: julia-actions/setup-julia@v2
+        if: >-
+          steps.counter.outputs['julia-version'] != '' ||
+          hashFiles('Project.toml', 'JuliaProject.toml') != ''
+        with:
+          version: ${{ steps.counter.outputs['julia-version'] || '1' }}
+
+      - name: Report the toolchain
+        run: python3 scripts/slopfix.py doctor
+
+      # -- Check 1: the line ceiling, plus every integrity check --------------
+      # Fails on: growth past the ceiling, code parked outside the measured
+      # scope, code golf, stripped comments, deleted tests, and newly
+      # introduced placeholders or swallowed errors.
+      - name: Line ceiling and measurement integrity
+        run: |
+          python3 scripts/slopfix.py measure \
+            --ceiling "${SLOPFIX_CODE_CEILING}" \
+            --strict
+
+      # -- Check 2: no new blocking smells -----------------------------------
+      # Strict from day one: there is no legitimate reason to add a swallowed
+      # error or a stub. Note this scans the whole tree, so if the codebase
+      # still has pre-existing blocking smells in untouched files, either fix
+      # them or scope this step to the changed paths until they are gone.
+      - name: Blocking smells
+        run: |
+          python3 scripts/slopfix.py smells --severity blocking --strict
+
+      # -- Check 3: the full quality contract ---------------------------------
+      # The config is executable input and must be reviewed before commit.
+      # Strict mode fails on any FAIL and on required UNVERIFIED gates.
+      - name: Full quality assurance contract
+        if: hashFiles('.slopfix/quality.json') != ''
+        run: |
+          python3 scripts/slopfix.py quality-check --run --strict
+
+      # -- Check 4: duplication threshold ------------------------------------
+      - name: Duplication threshold
+        run: |
+          npx --yes jscpd@5.0.14 \
+            --config .jscpd.json \
+            --threshold "${SLOPFIX_DUPLICATION_THRESHOLD}" \
+            .
+
+      # Keep the census as an artefact: it is the standing backlog of
+      # consolidation candidates, and the trend over time is the real signal.
+      - name: Census (informational)
+        if: always()
+        run: |
+          python3 scripts/slopfix.py census --json > census.json
+          python3 scripts/slopfix.py census --top 15
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: slopfix-census
+          path: census.json
+          retention-days: 30
+
+  # The project's own linters stay authoritative for smells. This job exists so
+  # the guardrail configuration from the engagement is actually enforced, rather
+  # than committed and forgotten.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Ruff
+        if: hashFiles('pyproject.toml', 'ruff.toml', '.ruff.toml') != ''
+        run: |
+          pipx install ruff==0.16.0
+          ruff check .
+
+      # Julia projects should keep `Pkg.test()` authoritative and add
+      # `Aqua.test_all(YourPackage)` to test/runtests.jl. JET is valuable for
+      # concrete call paths but is Julia-version-sensitive, so pin it in the
+      # project's test environment before enabling it as a required check.
+      - uses: julia-actions/setup-julia@v2
+        if: hashFiles('Project.toml', 'JuliaProject.toml') != ''
+        with:
+          version: "1"
+
+      - uses: julia-actions/cache@v2
+        if: hashFiles('Project.toml', 'JuliaProject.toml') != ''
+
+      - name: Standard Julia package tests (including Aqua when configured)
+        if: hashFiles('Project.toml', 'JuliaProject.toml') != ''
+        run: |
+          julia --project=. --startup-file=no - <<'JULIA'
+          using Pkg, TOML
+          project = isfile("Project.toml") ? "Project.toml" : "JuliaProject.toml"
+          name = get(TOML.parsefile(project), "name", nothing)
+          if name isa String && isfile(joinpath("src", name * ".jl"))
+              Pkg.instantiate()
+              Pkg.test(; coverage=true)
+          else
+              println(
+                  "Not a standard Julia package; the strict quality contract " *
+                  "must run the application test command."
+              )
+          end
+          JULIA
+
+      # - name: ESLint
+      #   run: |
+      #     npm ci
+      #     npx eslint . --max-warnings 0

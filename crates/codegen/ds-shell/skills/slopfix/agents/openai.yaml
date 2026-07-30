@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slopfix"
+  short_description: "Remediate AI code debt with replayable evidence"
+  default_prompt: "Use $slopfix to freeze reduction and quality contracts, inventory behavior, and rank verified debt before editing."

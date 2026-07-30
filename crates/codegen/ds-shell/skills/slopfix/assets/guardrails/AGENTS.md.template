@@ -1,0 +1,128 @@
+# <project> — instructions for AI coding agents
+
+Copy to the repository root as `AGENTS.md`, and copy or symlink to `CLAUDE.md` so
+both toolchains read it. **Fill in the project-specific tables.** A generic version
+of this file gets ignored; a version that names *this* project's canonical modules
+gets used.
+
+---
+
+## The one rule that matters
+
+**Search before you write.** This codebase has been through a de-duplication pass.
+Before adding any helper, utility, formatter, validator, client, or wrapper, look
+for an existing one:
+
+```bash
+rg -i 'format.*date|date.*format' --type py    # by concept
+rg -n 'def .*<concept>' src/                   # by definition
+rg -n 'function .*<concept>|<concept>.*\\(.*\\)\\s*=' src/  # Julia forms
+ls src/utils/ src/lib/ src/domain/             # by location
+```
+
+If something close exists, extend it. If nothing exists, add it to the canonical
+location below — not next to the code that happens to need it.
+
+Writing a second implementation of something that already exists is the specific
+failure this codebase was cleaned up to remove. It costs nothing to check.
+
+## Canonical modules
+
+**Check here first.** Do not create a parallel implementation of any of these.
+
+| Concept | Canonical module | Notes |
+| --- | --- | --- |
+| Date/time formatting and parsing | `src/utils/dates.py` | Only place that formats dates. `YYYY-MM-DD`, zero-padded, org timezone. |
+| Money and currency | `src/domain/money.py` | Half-up to 2 dp. Never use floats for money. |
+| HTTP client | `src/lib/http_client.py` | Timeouts and retries configured here. Do not call `requests` directly. |
+| Validation | | |
+| Error mapping to responses | | |
+| Logging | | |
+| Caching | | |
+| ID generation | | |
+| Pagination | | |
+| Permission checks | | |
+
+For Julia packages, use the project’s real module layout in this table (for
+example `src/Dates.jl` or `src/utils/dates.jl`) and include methods added to
+external functions through qualified extension. Multiple dispatch does not make
+two independently maintained implementations equivalent.
+
+Add a row when you add a new shared concept. An out-of-date table is how the
+duplication comes back.
+
+## Do not hand-roll
+
+Use the library, not a homegrown version:
+
+| Instead of writing | Use |
+| --- | --- |
+| a date library | `<the project's choice>` |
+| a query builder | the ORM |
+| a validation framework | `<the project's choice>` |
+| a retry loop | `<the project's choice>` |
+| a DI container | constructor arguments |
+| a state manager | `<the project's choice>` |
+
+If a library genuinely does not fit, that is a discussion to have before writing
+300 lines, not after.
+
+## Error handling
+
+- **Never** catch broadly: no bare `except:`, no `except Exception:`, no
+  `catch (e) {}`, no `catch {}`. Catch the specific errors you can handle.
+- **Never** discard an error. Log it with context or propagate it. `except: pass`
+  is the single most common defect in AI-written code in this repository's history
+  and it is a build failure here.
+- Error messages name what failed and with what input.
+- Clean up resources on every path, including error paths.
+
+## Structure
+
+| Directory | Contains |
+| --- | --- |
+| `src/api/` | HTTP handlers only — parse, delegate, serialise. No business logic. |
+| `src/domain/` | Business rules. No framework or HTTP imports. |
+| `src/utils/` | Small, pure, dependency-free helpers. |
+| `src/lib/` | Infrastructure adapters: HTTP, storage, queue. |
+| `tests/` | Mirrors `src/`. |
+
+New code goes where it belongs, not where you were already reading.
+
+## Definition of done
+
+- Tests for new behaviour, including boundaries, empty/null input, and error paths.
+- Lint clean: `<the project's lint command>`.
+- No `TODO`, no `FIXME`, no `NotImplementedError`, no stub, no commented-out
+  fallback.
+- Existing tests still pass. Do not weaken or delete a test to make a change pass.
+- No new duplication: CI fails if the duplicated share rises.
+- Julia packages: `Pkg.test()` passes; Aqua passes when configured; measured hot
+  paths keep their benchmark/allocation thresholds.
+- The committed `.slopfix/quality.json` is executable input: review command argv
+  before changing it. Final CI runs `slopfix quality-check --run --strict`.
+- A missing tool or unconfigured quality dimension is `UNVERIFIED`, never pass.
+- Do not claim secure, faster, compatible, portable, or fully correct outside the
+  exact gates recorded in `.slopfix/quality-report.json`.
+
+## Line-count ceiling
+
+CI enforces a maximum on non-blank, non-comment code lines:
+
+```bash
+python3 scripts/slopfix.py measure --strict
+```
+
+If a genuine feature needs more, raise the ceiling deliberately in `<file>` in its
+own commit, with a reason. Do not work around the check by moving code into
+excluded directories, collapsing lines, or deleting tests — those are all detected
+and reported.
+
+## Behaviour inventory
+
+`.slopfix/behaviour-inventory.md` lists every behaviour this system is required to
+have. Adding a behaviour means adding a row. Changing one means it was a deliberate
+decision, and it belongs in the approved-changes table with a date.
+
+Before you finish a change, check whether it touches an inventory row. If it does,
+verify that row.
