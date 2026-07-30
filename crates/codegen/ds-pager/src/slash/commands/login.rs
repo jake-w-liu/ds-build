@@ -15,17 +15,13 @@ impl SlashCommand for LoginCommand {
     }
 
     fn usage(&self) -> &str {
-        "/login [chatgpt]"
-    }
-
-    fn takes_args(&self) -> bool {
-        true
+        "/login"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         match args.trim().to_ascii_lowercase().as_str() {
             "" | "chatgpt" | "openai" => CommandResult::Action(Action::ChatgptLogin),
-            _ => CommandResult::Error("Usage: /login [chatgpt]".into()),
+            _ => CommandResult::Error("Usage: /login".into()),
         }
     }
 }
@@ -40,6 +36,7 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = super::super::tests::make_ctx(&models);
 
+        assert!(!LoginCommand.takes_args());
         assert!(matches!(
             LoginCommand.run(&mut ctx, ""),
             CommandResult::Action(Action::ChatgptLogin)

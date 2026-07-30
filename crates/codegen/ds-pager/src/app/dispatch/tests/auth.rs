@@ -3,10 +3,10 @@
 use super::*;
 
 #[test]
-fn chatgpt_login_dispatches_chatgpt_login_effect() {
+fn bare_login_submission_dispatches_chatgpt_login_effect() {
     let mut app = test_app_with_agent();
 
-    let effects = dispatch(Action::ChatgptLogin, &mut app);
+    let effects = dispatch(Action::SendPrompt("/login".into()), &mut app);
 
     assert_eq!(effects.len(), 1);
     assert!(matches!(effects[0], Effect::ChatgptLogin));

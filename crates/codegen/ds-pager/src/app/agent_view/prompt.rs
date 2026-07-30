@@ -1142,6 +1142,35 @@ mod prompt_page_scroll_tests {
         assert!(matches!(outcome, InputOutcome::Changed));
         assert_eq!(completion.prompt.suggestions.dropdown.selected, 0);
     }
+
+    #[test]
+    fn bare_login_completion_submits_on_first_enter() {
+        let registry = ActionRegistry::non_vscode_for_test();
+        let mut agent = prompt_focused_agent();
+        agent.prompt.set_text("/login");
+        agent.prompt.refresh_slash(&agent.session.models);
+
+        let snapshot = agent.prompt.slash_snapshot();
+        let login_index = snapshot
+            .matches
+            .iter()
+            .position(|row| row.display == "/login")
+            .expect("/login completion");
+        agent
+            .prompt
+            .slash_move_selection(login_index as isize - snapshot.selected as isize);
+        let snapshot = agent.prompt.slash_snapshot();
+        let selected = snapshot.selection().expect("/login completion");
+        assert_eq!(selected.display, "/login");
+        assert_eq!(selected.insert_text, "/login");
+
+        let outcome = agent
+            .handle_input_with_prompt_paging(&key(KeyCode::Enter, KeyModifiers::NONE), &registry);
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::SendPrompt(text)) if text == "/login"
+        ));
+    }
 }
 
 #[cfg(test)]
