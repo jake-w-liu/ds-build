@@ -678,7 +678,8 @@ impl LocalTerminalActor {
 
         // Apply SHELL_ENV_OVERRIDES (TERM=dumb, NO_COLOR, DS_AGENT=1, etc.)
         // + request env + pager env. Agent marker is re-applied last so request
-        // env cannot clear it.
+        // env cannot clear it. Model API keys are scrubbed last so neither
+        // inherited process env nor request env can leak credentials into tools.
         cmd.envs(shell_state::shell_env_overrides());
 
         for (key, value) in env {
@@ -687,6 +688,7 @@ impl LocalTerminalActor {
 
         cmd.envs(crate::util::pager_env());
         crate::util::apply_ds_agent_marker(&mut cmd);
+        crate::util::scrub_model_credential_env(&mut cmd);
 
         cmd.fd_mappings(prep.fd_mappings)
             .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
@@ -2747,6 +2749,8 @@ fn spawn_shell_command(
         }
         // Agent marker must win over request/login env.
         crate::util::apply_ds_agent_marker(&mut cmd);
+        // Scrub after all env merges so credentials cannot ride in via login env.
+        crate::util::scrub_model_credential_env(&mut cmd);
 
         // Detach from the controlling terminal so subprocesses cannot open
         // /dev/tty and compete with the TUI for terminal input.
@@ -2788,6 +2792,7 @@ fn spawn_shell_command(
         cmd.envs(crate::util::pager_env());
         // Agent marker must win over request env.
         crate::util::apply_ds_agent_marker(&mut cmd);
+        crate::util::scrub_model_credential_env(&mut cmd);
 
         // Set creation flags inline rather than via crate::util::detach_command
         // + new_process_group: tokio's creation_flags is a SET, not OR, so

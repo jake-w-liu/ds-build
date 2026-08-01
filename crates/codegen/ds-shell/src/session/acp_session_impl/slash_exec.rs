@@ -387,12 +387,32 @@ impl SessionActor {
                     None => String::new(),
                 };
 
+                let usage_md = info
+                    .usage
+                    .as_ref()
+                    .map(|u| {
+                        // format_status_lines uses two-space indent; convert to markdown bullets.
+                        let lines = u.format_status_lines();
+                        let body = lines
+                            .lines()
+                            .map(|l| {
+                                let trimmed = l.trim_start();
+                                if let Some((label, rest)) = trimmed.split_once(':') {
+                                    format!("\n\n**{}:**{}", label, rest)
+                                } else {
+                                    format!("\n\n{trimmed}")
+                                }
+                            })
+                            .collect::<String>();
+                        body
+                    })
+                    .unwrap_or_default();
                 let text = format!(
                     "{}**Session ID:** {}\n\n\
                      **Working directory:** {}\n\n\
                      {}{}\n\n\
                      **Turn:** {}\n\n\
-                     **Context:** {} / {} tokens ({:.0}%)",
+                     **Context:** {} / {} tokens ({:.0}%){}",
                     title_line,
                     self.session_info.id.0,
                     self.session_info.cwd,
@@ -402,6 +422,7 @@ impl SessionActor {
                     ctx.used,
                     ctx.total,
                     context_pct,
+                    usage_md,
                 );
                 self.send_slash_command_output(&text).await;
                 ok_end_turn(0, None)

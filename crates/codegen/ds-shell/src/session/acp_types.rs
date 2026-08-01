@@ -490,6 +490,150 @@ fn default_auto_compact_threshold() -> u8 {
     DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT
 }
 
+/// Session-level token / cost summary for `/status` (session-info).
+///
+/// Built from the session [`UsageLedger`](ds_chat_state::UsageLedger). Cost
+/// prefers wire-reported ticks when complete; otherwise an estimate from the
+/// DeepSeek list-price table when the model is known.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTokenUsage {
+    /// Full prompt tokens (includes cache reads) — ledger identity.
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cached_read_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub model_calls: u64,
+    /// Wire cost in USD ticks (1e10 per USD) when complete and trustworthy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_ticks: Option<i64>,
+    /// Estimated USD from DeepSeek rates (always filled when model rates known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_usd: Option<f64>,
+    /// True when the displayed primary cost is the estimate (no wire cost).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_is_estimate: bool,
+    /// Some folded calls lacked wire cost (partial bill).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cost_is_partial: bool,
+}
+
+impl SessionTokenUsage {
+    /// Uncached input = full input − cache reads (saturating).
+    pub fn uncached_input_tokens(&self) -> u64 {
+        self.input_tokens.saturating_sub(self.cached_read_tokens)
+    }
+
+    /// Latest-session cache hit rate as a percent of full prompt tokens.
+    pub fn cache_hit_rate_pct(&self) -> Option<f64> {
+        if self.input_tokens == 0 {
+            return None;
+        }
+        Some((self.cached_read_tokens as f64 / self.input_tokens as f64) * 100.0)
+    }
+
+    /// Primary display cost in USD: wire ticks when present, else estimate.
+    pub fn display_cost_usd(&self) -> Option<(f64, bool /* is_estimate */)> {
+        if let Some(ticks) = self.cost_usd_ticks {
+            return Some((crate::extensions::notification::ticks_to_usd(ticks), false));
+        }
+        self.estimated_cost_usd.map(|c| (c, true))
+    }
+
+    /// Build from a session usage ledger and active model id.
+    pub fn from_ledger(model_id: Option<&str>, ledger: &ds_chat_state::UsageLedger) -> Self {
+        let t = &ledger.totals;
+        let estimated_cost_usd = model_id.and_then(|m| {
+            ds_models::estimate_cost_usd_for_model(
+                m,
+                t.input_tokens,
+                t.cached_read_tokens,
+                t.output_tokens,
+            )
+        });
+        let cost_is_partial = t.cost_is_partial();
+        // Prefer wire cost only when complete and non-partial (same gate as headless).
+        let cost_usd_ticks = if ledger.incomplete || cost_is_partial {
+            None
+        } else {
+            ds_sampling_types::reported_cost_ticks(t.cost_usd_ticks)
+        };
+        let cost_is_estimate = cost_usd_ticks.is_none() && estimated_cost_usd.is_some();
+        Self {
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            cached_read_tokens: t.cached_read_tokens,
+            reasoning_tokens: t.reasoning_tokens,
+            model_calls: t.model_calls,
+            cost_usd_ticks,
+            estimated_cost_usd,
+            cost_is_estimate,
+            cost_is_partial,
+        }
+    }
+
+    /// True when no model calls and no tokens have been recorded yet.
+    pub fn is_empty(&self) -> bool {
+        self.model_calls == 0
+            && self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cached_read_tokens == 0
+            && self.reasoning_tokens == 0
+    }
+
+    /// Human-readable lines for `/status` / session-info (cache, tokens, cost).
+    pub fn format_status_lines(&self) -> String {
+        if self.is_empty() {
+            return "  Tokens: not reported yet\n  Cache: not reported yet\n  Cost: not reported yet"
+                .to_string();
+        }
+        let cache = match self.cache_hit_rate_pct() {
+            Some(pct) => format!(
+                "{pct:.1}% hit · {} read",
+                format_token_count(self.cached_read_tokens)
+            ),
+            None if self.cached_read_tokens == 0 => "not reported yet".to_string(),
+            None => format!("{} read", format_token_count(self.cached_read_tokens)),
+        };
+        let tokens = format!(
+            "{} uncached in · {} out · {} reasoning · {} calls",
+            format_token_count(self.uncached_input_tokens()),
+            format_token_count(self.output_tokens),
+            format_token_count(self.reasoning_tokens),
+            self.model_calls,
+        );
+        let cost = match self.display_cost_usd() {
+            Some((usd, true)) => format!("~${usd:.4} (est.)"),
+            Some((usd, false)) => format!("${usd:.4}"),
+            None if self.cost_is_partial => "partial (incomplete bill)".to_string(),
+            None => "not reported yet".to_string(),
+        };
+        format!("  Cache: {cache}\n  Tokens: {tokens}\n  Cost: {cost}")
+    }
+}
+
+/// Compact token count for status lines (matches dscode-style readability).
+pub fn format_token_count(value: u64) -> String {
+    if value < 1_000 {
+        return value.to_string();
+    }
+    if value < 10_000 {
+        return format!("{:.1}k", value as f64 / 1_000.0);
+    }
+    if value < 1_000_000 {
+        return format!("{}k", (value + 500) / 1_000);
+    }
+    if value < 10_000_000 {
+        return format!("{:.1}M", value as f64 / 1_000_000.0);
+    }
+    format!("{}M", (value + 500_000) / 1_000_000)
+}
+
 /// Unified session info data returned by GetSessionInfo.
 /// One query, all the fields needed for /session-info and /context.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -517,6 +661,9 @@ pub struct SessionInfoData {
     #[serde(default)]
     pub turn_index: u64,
     pub context: ContextInfo,
+    /// Session-cumulative token/cost usage for `/status` cost-awareness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionTokenUsage>,
 }
 
 /// Whether this model slug supports showing checkpoint identity (resolved model ID, fingerprint).
@@ -913,5 +1060,89 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: TokenUsageCategory = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtripped, original);
+    }
+
+    #[test]
+    fn session_token_usage_from_ledger_estimates_when_wire_cost_missing() {
+        let mut ledger = ds_chat_state::UsageLedger::default();
+        let usage = ds_sampling_types::TokenUsage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 50_000,
+            total_tokens: 1_050_000,
+            reasoning_tokens: 10_000,
+            cached_prompt_tokens: 100_000,
+        };
+        ledger.record_main_loop_call("deepseek-v4-flash", &usage, Some(100), None);
+        let summary = SessionTokenUsage::from_ledger(Some("deepseek-v4-flash"), &ledger);
+        assert_eq!(summary.input_tokens, 1_000_000);
+        assert_eq!(summary.cached_read_tokens, 100_000);
+        assert_eq!(summary.output_tokens, 50_000);
+        assert_eq!(summary.reasoning_tokens, 10_000);
+        assert_eq!(summary.uncached_input_tokens(), 900_000);
+        assert!(summary.cost_usd_ticks.is_none());
+        assert!(summary.cost_is_estimate);
+        let est = summary.estimated_cost_usd.expect("estimate present");
+        // 900k*0.14 + 100k*0.0028 + 50k*0.28 per 1M
+        let expected = 0.126 + 0.00028 + 0.014;
+        assert!((est - expected).abs() < 1e-12, "est={est} expected={expected}");
+        let lines = summary.format_status_lines();
+        assert!(lines.contains("Cache:"), "{lines}");
+        assert!(lines.contains("Tokens:"), "{lines}");
+        assert!(lines.contains("Cost:"), "{lines}");
+        assert!(lines.contains("(est.)"), "{lines}");
+        assert!(lines.contains("reasoning"), "{lines}");
+    }
+
+    #[test]
+    fn session_token_usage_prefers_wire_cost_over_estimate() {
+        let mut ledger = ds_chat_state::UsageLedger::default();
+        let usage = ds_sampling_types::TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 100,
+            total_tokens: 1100,
+            reasoning_tokens: 0,
+            cached_prompt_tokens: 0,
+        };
+        // 1e9 ticks = $0.10
+        ledger.record_main_loop_call("deepseek-v4-pro", &usage, Some(10), Some(1_000_000_000));
+        let summary = SessionTokenUsage::from_ledger(Some("deepseek-v4-pro"), &ledger);
+        assert_eq!(summary.cost_usd_ticks, Some(1_000_000_000));
+        assert!(!summary.cost_is_estimate);
+        let (usd, is_est) = summary.display_cost_usd().unwrap();
+        assert!(!is_est);
+        assert!((usd - 0.1).abs() < 1e-12);
+        let lines = summary.format_status_lines();
+        assert!(lines.contains("$0.1000"), "{lines}");
+        assert!(!lines.contains("(est.)"), "{lines}");
+    }
+
+    #[test]
+    fn format_token_count_compacts_large_values() {
+        assert_eq!(format_token_count(42), "42");
+        assert_eq!(format_token_count(1_500), "1.5k");
+        assert_eq!(format_token_count(25_000), "25k");
+        assert_eq!(format_token_count(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn session_info_data_omits_usage_when_none_for_wire_compat() {
+        let data = SessionInfoData {
+            agent_name: None,
+            model: Some("deepseek-v4-flash".into()),
+            model_display_name: None,
+            resolved_model_id: None,
+            model_fingerprint: None,
+            show_model_fingerprint: false,
+            api_backend: None,
+            conversation_id: None,
+            turns: 0,
+            turn_index: 0,
+            context: ContextInfo::default(),
+            usage: None,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        // Field is skip_serializing_if None — do not confuse with usagePct.
+        assert!(!json.contains("\"usage\""), "{json}");
+        assert!(!json.contains("\"usage\":"), "{json}");
     }
 }

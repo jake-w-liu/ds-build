@@ -21,7 +21,10 @@ pub use command_display::strip_redundant_session_cd;
 #[cfg(unix)]
 pub use env::detach_from_tty;
 pub use env::substitute_plugin_tokens;
-pub use env::{DS_AGENT_ENV, DS_AGENT_ENV_VALUE, apply_ds_agent_marker, pager_env};
+pub use env::{
+    DS_AGENT_ENV, DS_AGENT_ENV_VALUE, MODEL_CREDENTIAL_ENV_KEYS, apply_ds_agent_marker, pager_env,
+    scrub_model_credential_env, strip_model_credentials_from_map,
+};
 pub use fs::{UnicodePathMatch, canonicalize_with_timeout, try_resolve_unicode_filename};
 pub use ds_home::{ds_application, ds_home};
 pub use path_suggestions::format_not_found_error;

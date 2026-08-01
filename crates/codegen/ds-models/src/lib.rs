@@ -4,6 +4,13 @@
 //! At runtime each model is resolved via:
 //!   CLI flag > ENV var > config.toml > remote settings > these defaults
 
+mod pricing;
+
+pub use pricing::{
+    DEEPSEEK_V4_FLASH_RATES, DEEPSEEK_V4_PRO_RATES, DeepSeekTokenRates, estimate_cost_usd,
+    estimate_cost_usd_for_model, estimate_cost_usd_from_full_input, rates_for_model,
+};
+
 use std::sync::LazyLock;
 
 /// The raw JSON, embedded at compile time. Re-exported through the

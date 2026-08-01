@@ -293,6 +293,7 @@ impl ShellState {
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         cmd.envs(crate::util::pager_env());
+        crate::util::scrub_model_credential_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| {
             crate::computer::types::ComputerError::io(format!(
                 "failed to spawn {shell:?} for shell state init: {e}"

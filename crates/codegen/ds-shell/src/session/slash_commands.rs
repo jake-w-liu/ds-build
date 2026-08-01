@@ -244,7 +244,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "session-info",
-        description: "Show session details (model, turns, context usage)",
+        description: "Show session details (model, context, cache, tokens, cost)",
         argument_hint: None,
         aliases: &["status", "info"],
         gate: BuiltinGate::AlwaysOn,
