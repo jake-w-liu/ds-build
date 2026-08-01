@@ -650,9 +650,23 @@ impl LocalTerminalActor {
         // it's still threaded into `spawn_command` (the non-persistent
         // fallback path) below.
         let _ = cwd;
-        let prep = shell_state
+        let mut prep = shell_state
             .prepare_command(command, cwd_override, self.search_shadows)
             .map_err(|e| ComputerError::io(format!("prepare persistent command: {e}")))?;
+
+        // The shell's tracked cwd may have been deleted out from under it
+        // (e.g. the goal harness removes its scratch root after completion
+        // while the shell is still cd'd into it). `prepare_command` already
+        // falls back to $HOME; prefer the request's workspace cwd when that
+        // still exists so the next command lands somewhere sensible.
+        if !prep.cwd.is_dir() {
+            tracing::warn!(
+                "shell tracked cwd {} no longer exists; falling back to {}",
+                prep.cwd.display(),
+                cwd.display()
+            );
+            prep.cwd = shell_state::resolve_spawn_cwd(&prep.cwd, &[cwd]);
+        }
 
         let mut cmd = tokio::process::Command::new(&prep.binary);
         cmd.args(&prep.args)

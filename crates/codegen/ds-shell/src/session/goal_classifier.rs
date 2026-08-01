@@ -1979,7 +1979,11 @@ async fn read_skeptic_verdict(
             blocking: SkepticBlocking::None,
             evidence: String::new(),
             findings: Vec::new(),
-            fallback_note: Some("verdict JSON missing/malformed; used terminal token".into()),
+            fallback_note: Some(
+                "verifier produced no verdict JSON (missing/malformed); terminal token used as \
+                 fallback — verifier-side contract failure, not an implementer gap"
+                    .into(),
+            ),
             latency_ms: started.elapsed().as_millis() as u64,
         },
         None => skeptic_failure(
@@ -5696,7 +5700,9 @@ mod tests {
             "terminal-only skeptic must surface as confidence=unknown",
         );
         assert!(log.iter().any(|t| t == "skeptic:1:true:unknown"));
-        assert!(body.contains("verdict JSON missing/malformed; used terminal token"));
+        assert!(
+            body.contains("verifier produced no verdict JSON (missing/malformed); terminal token used as fallback")
+        );
     }
 
     #[tokio::test]

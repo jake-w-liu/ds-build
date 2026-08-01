@@ -1,5 +1,13 @@
 # Changelog
 
+# 0.1.64 — 2026-08-01
+
+## Bug Fixes
+
+- **Terminal tool survives a deleted working directory**: when the tracked shell cwd no longer exists (e.g. the goal harness removes its scratch root while a persistent shell is still `cd`'d into it), commands now fall back to the workspace directory (then `$HOME`) instead of failing every spawn with `ENOENT`; the tracked cwd self-heals from the next shell dump.
+- **Goal-verifier gap messages** now attribute a missing/malformed skeptic verdict JSON to the verifier's own output-contract failure ("verifier produced no verdict JSON … verifier-side contract failure, not an implementer gap") instead of the previous text, which read like an implementer obligation.
+
+
 # 0.2.101 — 2026-07-13
 
 ## Features

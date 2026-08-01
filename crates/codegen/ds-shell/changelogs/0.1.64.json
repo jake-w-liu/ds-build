@@ -1,0 +1,12 @@
+[
+  {
+    "category": "fixes",
+    "description": "**Terminal tool survives a deleted working directory**: when the tracked shell cwd no longer exists (e.g. the goal harness removes its scratch root while a persistent shell is still `cd`'d into it), commands now fall back to the workspace directory (then `$HOME`) instead of failing every spawn with `ENOENT`; the tracked cwd self-heals from the next shell dump.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Goal-verifier gap messages** now attribute a missing/malformed skeptic verdict JSON to the verifier's own output-contract failure instead of the previous text, which read like an implementer obligation.",
+    "breaking_change": false
+  }
+]

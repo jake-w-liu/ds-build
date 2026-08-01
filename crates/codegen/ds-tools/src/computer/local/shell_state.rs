@@ -286,7 +286,7 @@ impl ShellState {
         // on stdout read).
         let mut cmd = tokio::process::Command::new(shell.binary_path());
         cmd.args(&args)
-            .current_dir(cwd)
+            .current_dir(&resolve_spawn_cwd(cwd, &[]))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -428,7 +428,7 @@ impl ShellState {
             ),
         };
 
-        let effective_cwd = cwd_override.unwrap_or(&self.cwd);
+        let effective_cwd = resolve_spawn_cwd(cwd_override.unwrap_or(&self.cwd), &[]);
 
         let args: Vec<String> = match self.shell {
             ShellKind::Bash => vec![
@@ -503,6 +503,32 @@ pub struct PreparedCommand {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Resolve the working directory a shell command should spawn in.
+///
+/// `preferred` wins when it still exists. Otherwise the first still-existing
+/// entry of `fallbacks` is used, then `$HOME`, then `/`. This keeps the
+/// terminal tool alive when the tracked working directory has been deleted
+/// out from under a persistent shell — e.g. the goal harness removes its
+/// scratch root after a goal completes while the shell is still `cd`'d into
+/// it. Without this fallback every subsequent spawn fails with ENOENT and
+/// the terminal tool appears dead for the rest of the session. The
+/// persistent shell's own state dump then re-records the real cwd, so the
+/// tracked state self-heals on the next command.
+pub(crate) fn resolve_spawn_cwd(preferred: &Path, fallbacks: &[&Path]) -> PathBuf {
+    if preferred.is_dir() {
+        return preferred.to_path_buf();
+    }
+    for fb in fallbacks {
+        if fb.is_dir() {
+            return fb.to_path_buf();
+        }
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
 
 /// Create an OS pipe, returning `(read_end, write_end)` as `OwnedFd`.
 ///
@@ -674,6 +700,35 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_spawn_cwd_prefers_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = PathBuf::from("/nonexistent/ds-cwd-test");
+        assert_eq!(resolve_spawn_cwd(tmp.path(), &[&missing]), tmp.path());
+    }
+
+    #[test]
+    fn resolve_spawn_cwd_falls_back_when_preferred_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = PathBuf::from("/nonexistent/ds-cwd-test");
+        // Preferred missing, fallback exists -> fallback wins.
+        assert_eq!(resolve_spawn_cwd(&missing, &[tmp.path()]), tmp.path());
+        // Fallbacks are tried in order.
+        let tmp2 = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_spawn_cwd(&missing, &[tmp.path(), tmp2.path()]),
+            tmp.path()
+        );
+    }
+
+    #[test]
+    fn resolve_spawn_cwd_never_returns_missing_dir() {
+        let missing = PathBuf::from("/nonexistent/ds-cwd-test");
+        // No fallbacks: must degrade to an existing directory ($HOME or /).
+        let r = resolve_spawn_cwd(&missing, &[]);
+        assert!(r.is_dir(), "fallback {r:?} must exist");
+    }
 
     #[test]
     fn shell_env_overrides_marks_agent_terminal() {
@@ -903,6 +958,72 @@ mod tests {
             "snapshot should be non-empty after a successful command"
         );
         assert!(state.cwd.is_absolute(), "cwd should be absolute");
+    }
+
+    #[tokio::test]
+    async fn prepare_command_survives_deleted_tracked_cwd() {
+        // Regression for the "terminal tool dies after goal completion"
+        // friction: the goal harness removes its scratch root while a
+        // persistent shell is still cd'd into it. `prepare_command` must
+        // fall back to a real directory so the next spawn does not fail
+        // with ENOENT, and the tracked cwd must self-heal from the dump.
+        use command_fds::CommandFdExt;
+
+        if !bash_available() {
+            return;
+        }
+        let base = std::env::current_dir().unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &base).await.unwrap();
+
+        // Simulate the shell having cd'd into a scratch dir that then gets
+        // deleted out from under it.
+        let scratch = tempfile::tempdir().unwrap();
+        state.cwd = scratch.path().to_path_buf();
+        scratch.close().unwrap();
+        assert!(!state.cwd.exists(), "precondition: tracked cwd must be gone");
+
+        let prep = state
+            .prepare_command(
+                "pwd",
+                None,
+                crate::computer::local::SearchShadowConfig::default(),
+            )
+            .unwrap();
+        assert!(
+            prep.cwd.is_dir(),
+            "prep cwd must fall back to a real directory, got {:?}",
+            prep.cwd
+        );
+
+        // The command must actually run in the fallback directory.
+        let mut cmd = tokio::process::Command::new(&prep.binary);
+        cmd.args(&prep.args)
+            .current_dir(&prep.cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        cmd.fd_mappings(prep.fd_mappings).unwrap();
+        let child = cmd.spawn().unwrap();
+        drop(cmd);
+        let snapshot = state.snapshot.clone();
+        let write_handle =
+            tokio::spawn(
+                async move { write_snapshot_to_pipe(&snapshot, prep.state_in_write).await },
+            );
+        let read_handle =
+            tokio::spawn(async move { read_dump_from_pipe(prep.state_out_read).await });
+        let output = child.wait_with_output().await.unwrap();
+        assert!(output.status.success(), "command failed: {:?}", output);
+        write_handle.await.unwrap().unwrap();
+        let dump = read_handle.await.unwrap().unwrap();
+        assert!(state.update_from_dump(&dump));
+        // Tracked cwd self-heals to the (real) fallback directory.
+        assert!(
+            state.cwd.is_dir(),
+            "tracked cwd must self-heal to a real directory, got {:?}",
+            state.cwd
+        );
     }
 
     /// Helper: run a command against a ShellState, update state, return (exit_code, stdout).
