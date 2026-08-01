@@ -549,12 +549,13 @@ pub struct ConversationRequest {
 }
 
 impl ConversationRequest {
-    /// Strip all inline image data from the conversation to reduce payload size.
+    /// Strip all inline image data from the conversation.
     ///
     /// Replaces `ContentPart::Image` entries with a text placeholder so the
-    /// model knows an image was there but the base64 blob is gone. This is
-    /// used as a recovery strategy when the downstream API returns 413
-    /// "Request Entity Too Large".
+    /// model knows an image was there but the base64/blob is gone. Used as a
+    /// recovery strategy when the downstream API returns 413 "Request Entity
+    /// Too Large", rejects image processing, or (for text-only providers like
+    /// DeepSeek) rejects the `image_url` content-part schema entirely.
     pub fn strip_images(&mut self) -> usize {
         let mut stripped = 0usize;
         for item in &mut self.items {
@@ -563,7 +564,9 @@ impl ConversationRequest {
                     for part in &mut user.content {
                         if matches!(part, ContentPart::Image { .. }) {
                             *part = ContentPart::Text {
-                                text: Arc::<str>::from("[image removed — conversation too large]"),
+                                text: Arc::<str>::from(
+                                    "[image removed — not sent to the model]",
+                                ),
                             };
                             stripped += 1;
                         }
@@ -571,7 +574,8 @@ impl ConversationRequest {
                 }
                 ConversationItem::ToolResult(t) => {
                     // Drop inline images from tool results (e.g. read_file on
-                    // images/PDFs). On 413 retry these are the largest payloads.
+                    // images/PDFs). On 413 / unsupported-multimodal retry these
+                    // are the largest payloads and the schema violation.
                     stripped += t.images.len();
                     t.images.clear();
                 }

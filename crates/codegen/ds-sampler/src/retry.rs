@@ -563,6 +563,19 @@ mod tests {
     }
 
     #[test]
+    fn classify_deepseek_unknown_image_url_variant_strips_images() {
+        let err = api_err(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error: Failed to deserialize the JSON body into the target type: \
+             messages[338]: unknown variant `image_url`, expected `text` at line 1 column 835497",
+        );
+        assert!(matches!(
+            classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithImageStrip
+        ));
+    }
+
+    #[test]
     fn classify_image_processing_error_500_wrapped_strips_images() {
         let err = api_err(
             StatusCode::INTERNAL_SERVER_ERROR,

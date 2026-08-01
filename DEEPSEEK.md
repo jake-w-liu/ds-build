@@ -205,6 +205,7 @@ Then type a short prompt and confirm a normal reply.
 | Works for pro, fails for flash | Flash entry has a bad key; copy the working pro `api_key` into the flash block. |
 | `command not found: ds` | Install binary and ensure `~/.local/bin` is on `PATH`. |
 | Still seeing old system prompt / identity | Start a **new** session; rebuild after prompt changes. |
+| `unknown variant \`image_url\`, expected \`text\`` on every prompt | DeepSeek is text-only; an older session may have stored image parts. Rebuild/update `ds`, then **start a new session** (or continue after update: requests now strip images for DeepSeek). Avoid attaching images / reading image files unless you configure a real vision model for `image_description`. |
 
 ---
 

@@ -10,6 +10,22 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
+/// DeepSeek (and similar text-only OpenAI-compatible servers) reject content
+/// parts with `type: "image_url"`. Match their deserialize errors so the
+/// sampler can strip images and retry.
+fn is_unsupported_image_url_content_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    // DeepSeek: `unknown variant \`image_url\`, expected \`text\``
+    // Also accept unquoted / single-quoted variants from other stacks.
+    let mentions_image_url = lower.contains("image_url") || lower.contains("\"image_url\"");
+    let unknown_variant = lower.contains("unknown variant");
+    let expects_text = lower.contains("expected `text`")
+        || lower.contains("expected 'text'")
+        || lower.contains("expected \"text\"")
+        || lower.contains("expected text");
+    (unknown_variant && mentions_image_url) || (mentions_image_url && expects_text)
+}
+
 /// Why the model's response was classified as "empty" by [`ConversationResponse::empty_reason`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,6 +242,11 @@ impl SamplingError {
     /// The API rejected the request because an inline image could not be
     /// processed. Matches both direct 400 and proxy-wrapped 500 responses.
     /// Exact-case match — consistent with `is_encrypted_content_error`.
+    ///
+    /// Also matches providers (notably DeepSeek) that reject the entire
+    /// multimodal content-part schema — `unknown variant image_url, expected
+    /// text` — so callers can strip images and retry instead of bricking the
+    /// session with a permanent 400.
     pub fn is_image_processing_error(&self) -> bool {
         matches!(
             self,
@@ -233,7 +254,9 @@ impl SamplingError {
                 status,
                 message,
                 ..
-            } if matches!(status.as_u16(), 400 | 500) && message.contains("Could not process image")
+            } if matches!(status.as_u16(), 400 | 500)
+                && (message.contains("Could not process image")
+                    || is_unsupported_image_url_content_message(message))
         )
     }
 
@@ -695,6 +718,24 @@ mod tests {
         };
         assert!(err.is_image_processing_error());
         assert!(!err.is_encrypted_content_error());
+    }
+
+    #[test]
+    fn image_processing_error_deepseek_unknown_image_url_variant_detected() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "invalid_request_error: Failed to deserialize the JSON body into \
+                      the target type: messages[338]: unknown variant `image_url`, \
+                      expected `text` at line 1 column 835497"
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(
+            err.is_image_processing_error(),
+            "DeepSeek text-only schema rejection must strip-and-retry"
+        );
     }
 
     #[test]

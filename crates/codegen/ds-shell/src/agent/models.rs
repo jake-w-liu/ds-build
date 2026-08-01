@@ -94,6 +94,32 @@ pub(crate) fn task_model_error_for_catalog(
     Some(format!("Unknown Task.model slug '{requested}'. {guidance}"))
 }
 
+/// Whether a provider is known to accept OpenAI-style multimodal
+/// `image_url` content blocks on chat/completions.
+///
+/// DeepSeek's API only deserializes `type: "text"` content parts; sending
+/// `image_url` yields a hard 400 that bricks any session whose history
+/// retains the image. Detect by routing slug and/or base URL so catalog
+/// keys like `deepseek-v4-flash` and custom deepseek endpoints both fail
+/// closed.
+pub(crate) fn provider_accepts_native_image_input(model_slug: &str, base_url: &str) -> bool {
+    let slug = model_slug.to_ascii_lowercase();
+    let base = base_url.to_ascii_lowercase();
+    if slug.starts_with("deepseek")
+        || slug.contains("deepseek-")
+        || slug.contains("/deepseek")
+    {
+        return false;
+    }
+    if base.contains("api.deepseek.com")
+        || base.contains("deepseek.com/")
+        || base.contains("deepseek.com")
+    {
+        return false;
+    }
+    true
+}
+
 /// Thread-safe model manager.
 ///
 /// Owns the auth manager, config, and gateway needed to refresh models.
@@ -538,10 +564,16 @@ impl ModelsManager {
 
     /// Whether a model is trusted to accept native image content blocks.
     ///
-    /// The configured image-description model is the explicit vision-capable
-    /// endpoint. Every other or unknown model is treated conservatively as
-    /// text-only; the session transcribes images through that endpoint instead
-    /// of risking a provider-rejected multimodal history.
+    /// The configured image-description model is treated as the explicit
+    /// vision-capable endpoint **only when that endpoint itself accepts
+    /// multimodal `image_url` parts**. DeepSeek chat models reject
+    /// `image_url` content blocks (`unknown variant image_url, expected
+    /// text`); pointing `image_description` at `deepseek-v4-flash` must
+    /// not make Flash look vision-capable or the main coding model will
+    /// ship multimodal history and brick the session with repeated 400s.
+    ///
+    /// Every other / unknown model is text-only: the session transcribes
+    /// (or omits) images instead of risking a provider-rejected request.
     pub fn model_supports_image_input(&self, model_id: &str) -> bool {
         let configured = self
             .inner
@@ -550,11 +582,26 @@ impl ModelsManager {
             .image_description_model
             .clone()
             .unwrap_or_else(|| crate::models::default_image_description_model().to_owned());
+        // If the configured "vision" endpoint is itself text-only, no
+        // catalog model is trusted for native image input.
+        if !provider_accepts_native_image_input(&configured, "") {
+            return false;
+        }
         let models = self.inner.models.read();
-        resolve_catalog_key(&models, &acp::ModelId::new(model_id))
-            .and_then(|key| models.get(key.0.as_ref()))
-            .map(|entry| entry.info().model == configured)
-            .unwrap_or_else(|| model_id == configured)
+        let Some(key) = resolve_catalog_key(&models, &acp::ModelId::new(model_id)) else {
+            // Unknown slug: only trust it when it equals the configured
+            // vision endpoint *and* is not a known text-only provider.
+            return model_id == configured
+                && provider_accepts_native_image_input(model_id, "");
+        };
+        let Some(entry) = models.get(key.0.as_ref()) else {
+            return false;
+        };
+        let info = entry.info();
+        if !provider_accepts_native_image_input(&info.model, &info.base_url) {
+            return false;
+        }
+        info.model == configured
     }
 
     /// Resolved next-prompt-suggestion model pin from the live config
@@ -3760,5 +3807,93 @@ mod tests {
                 (id.clone(), acp::ModelInfo::new(id, (*k).to_string()))
             })
             .collect()
+    }
+
+    // ── native image-input capability ──────────────────────────────────
+
+    #[test]
+    fn provider_accepts_native_image_input_rejects_deepseek() {
+        assert!(!provider_accepts_native_image_input("deepseek-v4-pro", ""));
+        assert!(!provider_accepts_native_image_input("deepseek-v4-flash", ""));
+        assert!(!provider_accepts_native_image_input(
+            "custom",
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(provider_accepts_native_image_input("gpt-4o", ""));
+        assert!(provider_accepts_native_image_input(
+            "vision-model",
+            "https://api.openai.com/v1"
+        ));
+    }
+
+    #[test]
+    fn deepseek_coding_models_never_support_native_image_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(tmp.path(), DsComConfig::default()));
+        let mut cfg = config::Config::default();
+        // Default image_description is deepseek-v4-flash — must not make Flash
+        // look vision-capable.
+        cfg.image_description_model = Some("deepseek-v4-flash".to_owned());
+
+        let mut catalog = IndexMap::new();
+        for id in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            let mut entry = ModelEntry {
+                info: config::ModelInfo::fallback(id),
+                api_key: None,
+                env_key: None,
+                api_base_url: None,
+            };
+            entry.info.base_url = "https://api.deepseek.com/v1".into();
+            catalog.insert(id.to_string(), entry);
+        }
+        let mgr = ModelsManager::new(
+            None,
+            catalog,
+            acp::ModelId::new("deepseek-v4-pro"),
+            auth_manager,
+            cfg,
+        );
+        assert!(!mgr.model_supports_image_input("deepseek-v4-pro"));
+        assert!(
+            !mgr.model_supports_image_input("deepseek-v4-flash"),
+            "image_description == flash must not imply native image support on DeepSeek"
+        );
+    }
+
+    #[test]
+    fn configured_non_deepseek_vision_model_supports_native_image_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(tmp.path(), DsComConfig::default()));
+        let mut cfg = config::Config::default();
+        cfg.image_description_model = Some("gpt-4o".to_owned());
+
+        let mut catalog = IndexMap::new();
+        let mut vision = ModelEntry {
+            info: config::ModelInfo::fallback("gpt-4o"),
+            api_key: None,
+            env_key: None,
+            api_base_url: None,
+        };
+        vision.info.base_url = "https://api.openai.com/v1".into();
+        catalog.insert("gpt-4o".to_string(), vision);
+
+        let mut text = ModelEntry {
+            info: config::ModelInfo::fallback("deepseek-v4-pro"),
+            api_key: None,
+            env_key: None,
+            api_base_url: None,
+        };
+        text.info.base_url = "https://api.deepseek.com/v1".into();
+        catalog.insert("deepseek-v4-pro".to_string(), text);
+
+        let mgr = ModelsManager::new(
+            None,
+            catalog,
+            acp::ModelId::new("deepseek-v4-pro"),
+            auth_manager,
+            cfg,
+        );
+        assert!(mgr.model_supports_image_input("gpt-4o"));
+        assert!(!mgr.model_supports_image_input("deepseek-v4-pro"));
     }
 }

@@ -728,6 +728,15 @@ impl SessionActor {
                 self.client_identifier.clone(),
                 Some(self.max_retries),
             );
+        // DeepSeek (and any other text-only endpoint) rejects `image_url`
+        // content parts. Calling it as a "vision" describe model always
+        // fails with 400 and can poison retries; fail fast so callers can
+        // soft-omit images instead.
+        if !crate::agent::models::provider_accepts_native_image_input(&describe_model, "") {
+            return Err(acp::Error::internal_error().data(format!(
+                "image description model '{describe_model}' does not accept native image input"
+            )));
+        }
         let client = ds_sampler::SamplingClient::new(sampler_config).map_err(|e| {
             acp::Error::internal_error().data(format!(
                 "failed to build image-describe sampling client: {e}"

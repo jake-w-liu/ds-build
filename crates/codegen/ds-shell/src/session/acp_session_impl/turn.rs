@@ -764,15 +764,56 @@ impl SessionActor {
         self.inject_plan_mode_reminders().await;
         self.inject_resumed_tasks_reminder();
         self.drain_between_turn_completions().await;
-        let user_message = if user_images.is_empty() {
-            user_message
-        } else if self.is_cursor_harness()
-            || !self.models_manager.model_supports_image_input(
+        // Text-only providers (DeepSeek) reject `image_url` content parts.
+        // Never attach native image parts for them; transcribe when possible,
+        // otherwise keep path-only notices so history stays provider-safe.
+        let supports_image_input = !self.is_cursor_harness()
+            && self.models_manager.model_supports_image_input(
                 self.models_manager.current_model_id().0.as_ref(),
-            )
-        {
-            self.transcribe_user_images(user_message, &user_images)
-                .await?
+            );
+        // Base64 lifted out of the query text is the same class of attachment
+        // as ACP image blocks — fold it into the text-only path so it is not
+        // re-attached as `image_url` after transcription of `user_images` only.
+        let mut images_for_model = user_images.clone();
+        if !supports_image_input && !extra_images.is_empty() {
+            images_for_model.extend(extra_images.iter().cloned());
+        }
+        let user_message = if images_for_model.is_empty() {
+            user_message
+        } else if self.is_cursor_harness() || !supports_image_input {
+            match self
+                .transcribe_user_images(user_message.clone(), &images_for_model)
+                .await
+            {
+                Ok(msg) => msg,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %self.session_info.id,
+                        ?error,
+                        "user image transcription failed; omitting native images for text-only model"
+                    );
+                    let session_dir =
+                        crate::session::persistence::session_dir(&crate::session::info::Info {
+                            id: self.session_info.id.clone(),
+                            cwd: self.session_info.cwd.clone(),
+                        });
+                    match crate::session::image_describe::persist_and_prepend_image_files(
+                        &session_dir,
+                        &images_for_model,
+                        &user_message,
+                    ) {
+                        Ok(msg) => format!(
+                            "{msg}\n\n[Note: attached image(s) could not be described for this \
+                             text-only model and were omitted from the model-visible history. \
+                             Paths above remain available via read tools.]"
+                        ),
+                        Err(_) => format!(
+                            "{user_message}\n\n[Note: the user attached image(s) to this message, \
+                             but they could not be processed for this text-only model and were omitted.]"
+                        ),
+                    }
+                }
+            }
         } else {
             let session_dir =
                 crate::session::persistence::session_dir(&crate::session::info::Info {
@@ -841,7 +882,11 @@ impl SessionActor {
                 }
             };
             user_chat.set_prompt_index(current_prompt_index);
-            if !self.is_cursor_harness() {
+            // Only attach native image content parts when the coding model
+            // accepts them. Text-only models keep path/description text only —
+            // re-attaching after transcription was shipping `image_url` blocks
+            // that DeepSeek rejects with a permanent 400.
+            if supports_image_input {
                 for image in &user_images {
                     user_chat.add_image(pick_user_image_url(image));
                 }
@@ -2017,6 +2062,22 @@ impl SessionActor {
                 request.x_ds_deployment_id = crate::managed_config::resolve_deployment_id(
                     crate::managed_config::resolve_deployment_key().as_deref(),
                 );
+            }
+            // Heal sessions that already stored native image parts under a
+            // text-only model (e.g. pre-fix history, or a prior false
+            // supports_image_input). Strip from the *request* only so the API
+            // never sees `image_url`; UI/persistence retain the originals.
+            if !self.models_manager.model_supports_image_input(
+                self.models_manager.current_model_id().0.as_ref(),
+            ) {
+                let stripped = request.strip_images();
+                if stripped > 0 {
+                    tracing::info!(
+                        session_id = %self.session_info.id,
+                        stripped,
+                        "stripped {stripped} image part(s) before sampling (text-only model)"
+                    );
+                }
             }
             if structured_output_native {
                 request.json_schema = json_schema.clone();
