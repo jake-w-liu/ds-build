@@ -87,6 +87,12 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<crate::rs::ResponseFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// DeepSeek (and compatible) thinking toggle for Chat Completions.
+    /// Official OpenAI-format docs: `{"thinking": {"type": "enabled"|"disabled"}}`
+    /// alongside `reasoning_effort` for depth. See
+    /// https://api-docs.deepseek.com/guides/thinking_mode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ChatThinkingMode>,
 
     /// custom headers
     #[serde(skip)]
@@ -111,6 +117,34 @@ pub struct ChatCompletionRequest {
     pub trace: Option<Box<dyn TraceContext>>,
 }
 
+/// Chat Completions thinking toggle (`thinking.type`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ChatThinkingMode {
+    #[serde(rename = "type")]
+    pub type_: ChatThinkingType,
+}
+
+impl ChatThinkingMode {
+    pub fn enabled() -> Self {
+        Self {
+            type_: ChatThinkingType::Enabled,
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            type_: ChatThinkingType::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatThinkingType {
+    Enabled,
+    Disabled,
+}
+
 impl ChatCompletionRequest {
     pub fn new(model: impl Into<String>, messages: Vec<ChatRequestMessage>) -> Self {
         Self {
@@ -127,6 +161,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_ds_conv_id: None,
             x_ds_req_id: None,
             x_ds_session_id: None,
@@ -153,6 +188,7 @@ impl ChatCompletionRequest {
             search_parameters: None,
             response_format: None,
             reasoning_effort: None,
+            thinking: None,
             x_ds_conv_id: None,
             x_ds_req_id: None,
             x_ds_session_id: None,

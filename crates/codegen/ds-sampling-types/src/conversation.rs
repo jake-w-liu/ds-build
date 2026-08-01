@@ -1847,6 +1847,14 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
                 if !pending_reasoning.is_empty() {
                     msg.reasoning_content = Some(pending_reasoning.join("\n"));
                     pending_reasoning.clear();
+                } else if !msg.tool_calls.is_empty() {
+                    // DeepSeek thinking mode 400s assistant tool_calls turns
+                    // when the reasoning_content KEY is absent from the JSON
+                    // ("must be passed back"). Empty string is accepted; only
+                    // a missing key fails. Always emit the field on tool_calls
+                    // turns (matches official tool-call + thinking docs and
+                    // deepseek-reasonix wire behavior).
+                    msg.reasoning_content = Some(String::new());
                 }
                 out.push(msg);
             }
@@ -2075,6 +2083,12 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 },
             });
 
+        // DeepSeek Chat Completions thinking toggle: pair with reasoning_effort
+        // so the wire matches official docs (`thinking.type` + effort depth).
+        let thinking = req
+            .reasoning_effort
+            .map(|_| crate::ChatThinkingMode::enabled());
+
         ChatCompletionRequest {
             model: req.model,
             messages,
@@ -2089,6 +2103,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             search_parameters: None,
             response_format,
             reasoning_effort: req.reasoning_effort,
+            thinking,
             x_ds_conv_id: req.x_ds_conv_id,
             x_ds_req_id: req.x_ds_req_id,
             x_ds_session_id: req.x_ds_session_id,
@@ -5157,6 +5172,92 @@ mod tests {
         assert!(
             json.get("reasoning_effort").is_none(),
             "reasoning_effort must be absent when unset; got: {json:#}",
+        );
+        assert!(
+            json.get("thinking").is_none(),
+            "thinking must be absent when reasoning_effort is unset; got: {json:#}",
+        );
+    }
+
+    /// DeepSeek Chat Completions thinking toggle pairs with reasoning_effort
+    /// (official docs + deepseek-reasonix wire shape).
+    #[test]
+    fn test_chat_completion_request_pairs_thinking_enabled_with_effort() {
+        let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+            .with_model("deepseek-v4-flash");
+        let req = ConversationRequest {
+            reasoning_effort: Some(crate::ReasoningEffort::High),
+            ..req
+        };
+        let chat: ChatCompletionRequest = req.into();
+        let json = serde_json::to_value(&chat).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning_effort").and_then(|v| v.as_str()),
+            Some("high"),
+            "{json:#}"
+        );
+        assert_eq!(
+            json.pointer("/thinking/type").and_then(|v| v.as_str()),
+            Some("enabled"),
+            "thinking.type=enabled must accompany reasoning_effort; got: {json:#}",
+        );
+    }
+
+    /// DeepSeek thinking + tool_calls requires the reasoning_content KEY on the
+    /// assistant message even when CoT text is empty (API 400 if key missing).
+    #[test]
+    fn conversation_to_chat_messages_emits_reasoning_content_key_on_tool_calls() {
+        let msgs = conversation_to_chat_messages(vec![
+            ConversationItem::user("use a tool"),
+            ConversationItem::Assistant(AssistantItem {
+                content: Arc::<str>::from(""),
+                tool_calls: vec![ToolCall {
+                    id: Arc::<str>::from("call_1"),
+                    name: "read_file".to_string(),
+                    arguments: Arc::<str>::from("{}"),
+                }],
+                model_id: None,
+                model_fingerprint: None,
+                reasoning_effort: None,
+            }),
+        ]);
+        assert_eq!(msgs.len(), 2);
+        let assistant = &msgs[1];
+        assert!(!assistant.tool_calls.is_empty());
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some(""),
+            "tool_calls turns must carry reasoning_content (empty OK)"
+        );
+        let json = serde_json::to_value(assistant).unwrap();
+        assert!(
+            json.get("reasoning_content").is_some(),
+            "JSON key must be present; got: {json:#}"
+        );
+        assert_eq!(json.get("reasoning_content").and_then(|v| v.as_str()), Some(""));
+    }
+
+    #[test]
+    fn conversation_to_chat_messages_folds_nonempty_reasoning_onto_tool_calls() {
+        let msgs = conversation_to_chat_messages(vec![
+            ConversationItem::user("use a tool"),
+            reasoning_sibling("r1", "I should call read_file", None),
+            ConversationItem::Assistant(AssistantItem {
+                content: Arc::<str>::from(""),
+                tool_calls: vec![ToolCall {
+                    id: Arc::<str>::from("call_1"),
+                    name: "read_file".to_string(),
+                    arguments: Arc::<str>::from("{}"),
+                }],
+                model_id: None,
+                model_fingerprint: None,
+                reasoning_effort: None,
+            }),
+        ]);
+        let assistant = &msgs[1];
+        assert_eq!(
+            assistant.reasoning_content.as_deref(),
+            Some("I should call read_file")
         );
     }
 
