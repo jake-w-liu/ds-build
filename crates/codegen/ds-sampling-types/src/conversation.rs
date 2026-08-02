@@ -2279,6 +2279,32 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     }
 }
 
+/// Rewrite Responses `reasoning.effort` for DeepSeek wire after async-openai serialize.
+///
+/// async-openai's `ReasoningEffort` serializes product max as `"xhigh"` and has a
+/// `"minimal"` variant. DeepSeek Responses documents `none|low|high|max` only
+/// ([thinking mode](https://api-docs.deepseek.com/guides/thinking_mode)); Chat
+/// Completions already emit `"max"` and treat Minimal as thinking off. Align
+/// the Responses body so default/max UX and off-path stay consistent:
+/// - `xhigh` → `max` (highest effort; server maps raw `xhigh` to high, not max)
+/// - `minimal` → `none` (disable thinking, matching Chat Completions)
+pub fn patch_deepseek_responses_effort(body: &mut serde_json::Value) {
+    let Some(effort) = body
+        .pointer_mut("/reasoning/effort")
+        .and_then(|v| v.as_str().map(|s| s.to_owned()))
+    else {
+        return;
+    };
+    let rewritten = match effort.as_str() {
+        "xhigh" => "max",
+        "minimal" => "none",
+        _ => return,
+    };
+    if let Some(slot) = body.pointer_mut("/reasoning/effort") {
+        *slot = serde_json::Value::String(rewritten.into());
+    }
+}
+
 /// Convert a ConversationItem to Responses API InputItem(s)
 fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
     match item {
@@ -5391,9 +5417,12 @@ mod tests {
 
     #[test]
     fn test_responses_request_carries_reasoning_effort_nested() {
+        // Minimal maps to Responses `none` (thinking off). Xhigh still serializes
+        // as async-openai's `xhigh` here; wire rewrite to DeepSeek `max` is
+        // `patch_deepseek_responses_effort` (applied at send time).
         for (variant, expected) in [
             (crate::ReasoningEffort::None, "none"),
-            (crate::ReasoningEffort::Minimal, "minimal"),
+            (crate::ReasoningEffort::Minimal, "none"),
             (crate::ReasoningEffort::Low, "low"),
             (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
@@ -5412,6 +5441,61 @@ mod tests {
                 "{variant:?} should serialize as reasoning.effort={expected:?}; got: {json:#}",
             );
         }
+    }
+
+    #[test]
+    fn patch_deepseek_responses_effort_rewrites_xhigh_and_minimal() {
+        let mut body = serde_json::json!({
+            "reasoning": { "effort": "xhigh", "summary": "concise" }
+        });
+        patch_deepseek_responses_effort(&mut body);
+        assert_eq!(
+            body.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+            Some("max"),
+            "DeepSeek highest effort is max, not OpenAI xhigh; got: {body:#}"
+        );
+
+        let mut body = serde_json::json!({
+            "reasoning": { "effort": "minimal" }
+        });
+        patch_deepseek_responses_effort(&mut body);
+        assert_eq!(
+            body.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+            Some("none"),
+            "minimal must become none (thinking off); got: {body:#}"
+        );
+
+        // Leave documented tokens alone.
+        for keep in ["none", "low", "high", "max", "medium"] {
+            let mut body = serde_json::json!({ "reasoning": { "effort": keep } });
+            patch_deepseek_responses_effort(&mut body);
+            assert_eq!(
+                body.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+                Some(keep),
+            );
+        }
+    }
+
+    #[test]
+    fn responses_xhigh_reaches_deepseek_wire_as_max_after_patch() {
+        let req = ConversationRequest {
+            reasoning_effort: Some(crate::ReasoningEffort::Xhigh),
+            ..ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+                .with_model("deepseek-v4-flash")
+        };
+        let resp: crate::rs::CreateResponse = (&req).into();
+        let mut json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+            Some("xhigh"),
+            "pre-patch async-openai shape"
+        );
+        patch_deepseek_responses_effort(&mut json);
+        assert_eq!(
+            json.pointer("/reasoning/effort").and_then(|v| v.as_str()),
+            Some("max"),
+            "post-patch DeepSeek Responses wire; got: {json:#}"
+        );
     }
 
     #[test]

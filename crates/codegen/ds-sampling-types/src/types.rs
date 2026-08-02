@@ -815,10 +815,14 @@ impl ReasoningEffort {
     pub fn to_responses_api(self) -> crate::rs::ReasoningEffort {
         match self {
             Self::None => crate::rs::ReasoningEffort::None,
-            Self::Minimal => crate::rs::ReasoningEffort::Minimal,
+            // Align with Chat Completions / Messages: Minimal means thinking off.
+            // DeepSeek Responses documents `none` (not `minimal`) to disable.
+            Self::Minimal => crate::rs::ReasoningEffort::None,
             Self::Low => crate::rs::ReasoningEffort::Low,
             Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
+            // async-openai has no `max` variant; wire is rewritten to `"max"` by
+            // [`crate::patch_deepseek_responses_effort`] after serialize.
             Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
         }
     }

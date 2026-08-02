@@ -1197,6 +1197,8 @@ impl SamplingClient {
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
         ds_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // DeepSeek Responses effort tokens (max / none) vs async-openai (xhigh / minimal).
+        ds_sampling_types::patch_deepseek_responses_effort(&mut request_body);
         let http_request = ds_headers
             .apply(self.post(self.endpoint("responses")))
             .json(&request_body);
@@ -1342,6 +1344,7 @@ impl SamplingClient {
             }
         }
         ds_sampling_types::patch_reasoning_text_types(&mut request_body);
+        ds_sampling_types::patch_deepseek_responses_effort(&mut request_body);
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self

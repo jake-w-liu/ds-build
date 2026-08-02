@@ -2643,6 +2643,8 @@ async fn capture_login_path() -> HashMap<String, String> {
             .kill_on_drop(true);
         crate::util::detach_command(&mut cmd);
         cmd.envs(crate::util::pager_env());
+        // Login shell sources user rc files; never leak model API keys into that env.
+        crate::util::scrub_model_credential_env(&mut cmd);
         let mut child = cmd.spawn().ok()?;
 
         let mut stdout_buf = Vec::new();
