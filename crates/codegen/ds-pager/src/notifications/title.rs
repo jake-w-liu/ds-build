@@ -676,7 +676,7 @@ mod tests {
             ..idle_state()
         };
         mgr.update(&state);
-        assert_eq!(mgr.last_title, "ds-3 - ds");
+        assert_eq!(mgr.last_title, "deepseek-v4-flash - ds");
     }
 
     #[test]
@@ -846,7 +846,7 @@ mod tests {
         mgr.update(&state);
         assert_eq!(
             mgr.last_title,
-            "Thinking - proj - ds-3 - workspace - ds"
+            "Thinking - proj - deepseek-v4-flash - workspace - ds"
         );
     }
 

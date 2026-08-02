@@ -571,7 +571,7 @@
         super::super::settings::apply_soft_default_permission_mode(
             &mut app,
             None,
-            Some("always-approve"),
+            Some(Some("always-approve")),
         );
         assert!(app.default_yolo, "remote always-approve must arm default_yolo");
         assert_eq!(
@@ -598,7 +598,7 @@
         app.current_ui.permission_mode = Some("always-approve".into());
         app.default_yolo = true;
 
-        super::super::settings::apply_soft_default_permission_mode(&mut app, None, None);
+        super::super::settings::apply_soft_default_permission_mode(&mut app, None, Some(None));
         assert!(!app.default_yolo, "remote null must disarm a soft always-approve");
         assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
         assert!(app.permission_mode_from_soft_default);
@@ -618,7 +618,7 @@
         super::super::settings::apply_soft_default_permission_mode(
             &mut app,
             None,
-            Some("always-approve"),
+            Some(Some("always-approve")),
         );
         assert!(!app.default_yolo, "policy pin must block a remote always-approve");
         assert_eq!(app.current_ui.permission_mode.as_deref(), Some("ask"));
@@ -626,7 +626,7 @@
         let mut app = make_app_with_agent("sess-gate-pm");
         app.permission_mode_from_soft_default = true;
         app.auto_mode_gate = false;
-        super::super::settings::apply_soft_default_permission_mode(&mut app, None, Some("auto"));
+        super::super::settings::apply_soft_default_permission_mode(&mut app, None, Some(Some("auto")));
         assert!(!app.default_yolo);
         assert_eq!(
             app.current_ui.permission_mode.as_deref(),

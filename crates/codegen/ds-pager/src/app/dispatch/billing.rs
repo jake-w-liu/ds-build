@@ -24,9 +24,11 @@ pub(super) fn is_max_tier(subscription_tier: Option<&str>) -> bool {
     let Some(t) = subscription_tier else {
         return false; // Unknown — default to Q&A.
     };
-    // Normalize: lowercase + spaces→underscores to match both JWT-derived
-    // keys ("ds_heavy") and CCP display names ("DS Heavy").
-    t.to_ascii_lowercase().replace(' ', "_") == "ds_heavy"
+    // Normalize: lowercase + spaces→underscores to match JWT-derived keys
+    // ("ds_heavy", "SUPERDS_HEAVY") and CCP display names ("DS Heavy").
+    // All heavy-flavored tiers are max-tier identifiers; exact-match-only
+    // missed the uppercase JWT claim forms and billed them as non-max.
+    t.to_ascii_lowercase().replace(' ', "_").ends_with("_heavy")
 }
 
 /// URL for upgrading the subscription tier.

@@ -1188,10 +1188,20 @@ impl SamplingClient {
             deployment_id: request.x_ds_deployment_id.as_deref(),
             user_id: request.x_ds_user_id.as_deref(),
         };
+        let extra_raw_tools = std::mem::take(&mut request.extra_raw_tools);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
         })?;
+        // Inject DeepSeek-specific tools (e.g., x_search) that can't be expressed
+        // via async_openai's rs::Tool enum (mirrors create_response_stream).
+        if !extra_raw_tools.is_empty() {
+            if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                tools.extend(extra_raw_tools);
+            } else {
+                request_body["tools"] = serde_json::Value::Array(extra_raw_tools);
+            }
+        }
         // async-openai's ReasoningTextContent struct omits the `type`
         // discriminator that the Responses API requires on input. Patch
         // it in post-serialize. This is the last surviving piece of the
@@ -1958,12 +1968,17 @@ impl SamplingClient {
 
         let responses_request = self.prepare_responses_request(&mut request);
 
+        // Collect DeepSeek-specific tools that can't be expressed via rs::Tool
+        // (e.g., x_search). These are injected as raw JSON after serialization
+        // (mirrors conversation_stream_responses).
+        let extra_tools = ds_sampling_types::extra_raw_tools(&request.hosted_tools);
         let mut wrapper = CreateResponseWrapper::new(responses_request);
         wrapper.x_ds_conv_id = x_ds_conv_id;
         wrapper.x_ds_req_id = x_ds_req_id;
         wrapper.x_ds_session_id = x_ds_session_id;
         wrapper.x_ds_turn_idx = x_ds_turn_idx;
         wrapper.x_ds_agent_id = x_ds_agent_id;
+        wrapper.extra_raw_tools = extra_tools;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);

@@ -9,14 +9,14 @@ fn model_with_support(id: &str, supports: bool) -> (acp::ModelId, acp::ModelInfo
     let meta = if supports {
         Some(serde_json::json!({
             "supportsReasoningEffort": true,
-            "reasoningEffort": "medium",
+            "reasoningEffort": "high",
             "reasoningEfforts": [
-                { "id": "deep", "value": "xhigh", "label": "Deep" },
+                { "id": "max", "value": "max", "label": "Max" },
                 { "id": "high", "value": "high", "label": "High" },
             ],
         }))
     } else {
-        Some(serde_json::json!({ "reasoningEffort": "medium" }))
+        Some(serde_json::json!({ "reasoningEffort": "high" }))
     };
     let info = acp::ModelInfo::new(id.clone(), id.0.to_string())
         .meta(meta.and_then(|v| v.as_object().cloned()));
@@ -34,7 +34,10 @@ fn models_with_current(supports: bool) -> ModelState {
 
 #[test]
 fn effort_only_resolves_canonical_token() {
-    let models = models_with_current(true);
+    let mut models = models_with_current(true);
+    // Current effort differs from the requested token so the switch is
+    // meaningful (equal values short-circuit to a no-op skip).
+    models.reasoning_effort = Some(ReasoningEffort::Low);
     let out = take_deferred_model_switch(None, &models, Some("high"));
     assert_eq!(
         out,
@@ -46,9 +49,9 @@ fn effort_only_resolves_canonical_token() {
 }
 
 #[test]
-fn effort_only_resolves_remapped_menu_id() {
+fn effort_only_resolves_menu_id() {
     let models = models_with_current(true);
-    let out = take_deferred_model_switch(None, &models, Some("deep"));
+    let out = take_deferred_model_switch(None, &models, Some("max"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
@@ -57,6 +60,23 @@ fn effort_only_resolves_remapped_menu_id() {
                 Some(ReasoningEffort::Max)
             )),
             effort_error: None,
+        }
+    );
+}
+
+#[test]
+fn effort_only_legacy_custom_id_is_rejected() {
+    // Custom catalog ids are forced to DeepSeek tokens on parse; a stale
+    // id like "deep" must not resolve (menus only advertise max|high|low).
+    let models = models_with_current(true);
+    assert_eq!(
+        take_deferred_model_switch(None, &models, Some("deep")),
+        DeferredSwitchOutcome {
+            switch: None,
+            effort_error: Some(EffortTokenError::UnknownToken {
+                token: "deep".into(),
+                offered: vec!["max".into(), "high".into()],
+            }),
         }
     );
 }
@@ -110,7 +130,7 @@ fn effort_only_errors_on_unknown_token() {
             switch: None,
             effort_error: Some(EffortTokenError::UnknownToken {
                 token: "bogus".into(),
-                offered: vec!["deep".into(), "high".into()],
+                offered: vec!["max".into(), "high".into()],
             }),
         }
     );
@@ -135,10 +155,10 @@ fn stashed_model_switch_prefers_explicit_stash() {
 }
 
 #[test]
-fn stashed_model_re_resolves_remap_when_effort_missing() {
+fn stashed_model_re_resolves_menu_id_when_effort_missing() {
     let models = models_with_current(true);
     let current = models.current.clone().unwrap();
-    let out = take_deferred_model_switch(Some((current.clone(), None)), &models, Some("deep"));
+    let out = take_deferred_model_switch(Some((current.clone(), None)), &models, Some("max"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
@@ -159,7 +179,7 @@ fn stashed_model_keeps_model_when_token_unresolvable() {
             switch: Some((current, None)),
             effort_error: Some(EffortTokenError::UnknownToken {
                 token: "bogus".into(),
-                offered: vec!["deep".into(), "high".into()],
+                offered: vec!["max".into(), "high".into()],
             }),
         }
     );
@@ -183,7 +203,7 @@ fn stashed_model_keeps_model_when_unsupported() {
 }
 
 #[test]
-fn effort_only_accepts_max_as_xhigh() {
+fn effort_only_accepts_max() {
     let models = models_with_current(true);
     let out = take_deferred_model_switch(None, &models, Some("max"));
     assert_eq!(

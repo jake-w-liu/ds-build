@@ -6667,7 +6667,7 @@ reasoning_effort = "low"
             .clone()
             .unwrap();
         assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["id"], "deep");
-        assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["value"], "xhigh");
+        assert_eq!(meta[REASONING_EFFORTS_META_KEY][0]["value"], "max");
         assert_eq!(meta["supportsReasoningEffort"], true);
         assert_eq!(meta["reasoningEffort"], "high");
     }
@@ -6687,7 +6687,7 @@ reasoning_effort = "low"
             .unwrap();
         assert!(meta.get(REASONING_EFFORTS_META_KEY).is_none());
         assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "medium");
+        assert_eq!(meta["reasoningEffort"], "high");
     }
     #[test]
     fn acp_model_meta_keeps_explicit_scalar_when_list_present() {
@@ -6743,7 +6743,7 @@ reasoning_effort = "low"
             .clone()
             .unwrap();
         assert_eq!(meta["supportsReasoningEffort"], true);
-        assert_eq!(meta["reasoningEffort"], "medium");
+        assert_eq!(meta["reasoningEffort"], "high");
     }
     #[test]
     fn acp_model_meta_omits_reasoning_when_unsupported() {

@@ -27,7 +27,10 @@ async fn web_search_uses_model_override_from_config_end_to_end() {
                 "content": [{
                     "type": "output_text",
                     "text": "search result",
-                    "annotations": []
+                    "annotations": [{
+                        "type": "url_citation",
+                        "url": "https://example.com/result"
+                    }]
                 }]
             }]
         }))

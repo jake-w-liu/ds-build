@@ -768,14 +768,14 @@ mod tests {
     fn subagent_meta_all_fields() {
         assert_eq!(
             format_subagent_meta(Some("researcher"), Some("analyst"), Some("deepseek-v4-flash")),
-            " (researcher \u{00b7} analyst \u{00b7} ds-3)"
+            " (researcher \u{00b7} analyst \u{00b7} deepseek-v4-flash)"
         );
     }
     #[test]
     fn subagent_meta_partial_skips_nones() {
         assert_eq!(
             format_subagent_meta(Some("researcher"), None, Some("deepseek-v4-flash")),
-            " (researcher \u{00b7} ds-3)"
+            " (researcher \u{00b7} deepseek-v4-flash)"
         );
     }
     #[test]
@@ -817,7 +817,7 @@ mod tests {
     fn subagent_meta_collapses_duplicate_persona_role() {
         assert_eq!(
             format_subagent_meta(Some("reviewer"), Some("reviewer"), Some("deepseek-v4-flash")),
-            " (reviewer \u{00b7} ds-3)"
+            " (reviewer \u{00b7} deepseek-v4-flash)"
         );
     }
     #[test]
@@ -845,7 +845,7 @@ mod tests {
     fn subagent_meta_drops_both_empty_persona_role() {
         assert_eq!(
             format_subagent_meta(Some(""), Some(" "), Some("deepseek-v4-flash")),
-            " (ds-3)"
+            " (deepseek-v4-flash)"
         );
     }
     #[test]

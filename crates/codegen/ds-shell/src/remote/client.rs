@@ -1448,7 +1448,8 @@ mod tests {
         );
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert_eq!(result.reasoning_efforts.len(), 2);
-        assert_eq!(result.reasoning_efforts[0].id, "deep");
+        // Custom catalog ids are forced to DeepSeek tokens on parse.
+        assert_eq!(result.reasoning_efforts[0].id, "max");
         assert_eq!(result.reasoning_efforts[0].value, ReasoningEffort::Max);
         assert_eq!(result.reasoning_efforts[1].value, ReasoningEffort::Low);
         for value in [

@@ -2468,6 +2468,18 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
         })
         .collect();
 
+    // Stable alphabetical order keeps the tools prefix byte-stable for
+    // DeepSeek's automatic prefix cache when MCP/builtin sets are rebuilt —
+    // mirror of the Chat Completions conversion, which sorts by function
+    // name. Hosted tools have no wire name; they stay after function tools
+    // in their deterministic declaration order.
+    tools.sort_by(|a, b| match (a, b) {
+        (rs::Tool::Function(af), rs::Tool::Function(bf)) => af.name.cmp(&bf.name),
+        (rs::Tool::Function(_), _) => std::cmp::Ordering::Less,
+        (_, rs::Tool::Function(_)) => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    });
+
     for hosted in &req.hosted_tools {
         match hosted {
             HostedTool::WebSearch { allowed_domains } => {
@@ -3660,6 +3672,47 @@ mod tests {
             panic!("Expected Items input");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn responses_tools_sorted_alphabetically_function_before_hosted() {
+        let mut req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+            .with_tools(vec![
+                ToolSpec {
+                    name: "zz_last".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "aa_first".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "mm_middle".to_string(),
+                    description: None,
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ]);
+        req.hosted_tools = vec![HostedTool::WebSearch {
+            allowed_domains: None,
+        }];
+
+        let responses_req: rs::CreateResponse = (&req).into();
+        let tools = responses_req.tools.expect("tools should be set");
+        let names: Vec<String> = tools
+            .iter()
+            .map(|t| match t {
+                rs::Tool::Function(f) => f.name.clone(),
+                rs::Tool::WebSearch(_) => "web_search".to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            ["aa_first", "mm_middle", "zz_last", "web_search"],
+            "function tools sorted for DeepSeek prefix-cache stability; hosted tools last"
+        );
     }
 
     #[test]

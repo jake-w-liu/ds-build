@@ -2793,21 +2793,21 @@ mod tests {
 
         // 2 headers + 3 rows = 5 entries
         assert_eq!(result.len(), 5);
-        // Groups are sorted alphabetically: fw-1 before ds.
-        // Header positions: 0 (fw-1), 2 (ds)
+        // Groups are sorted alphabetically: "ds" before "fw-1" ('d' < 'f').
+        // Header positions: 0 (ds), 3 (fw-1)
         assert_eq!(non_sel.len(), 5);
         assert!(non_sel[0], "first entry should be header (non-selectable)");
         assert!(!non_sel[1], "second entry should be selectable row");
-        assert!(non_sel[2], "third entry should be header (non-selectable)");
-        assert!(!non_sel[3], "fourth entry should be selectable row");
+        assert!(!non_sel[2], "third entry should be selectable row");
+        assert!(non_sel[3], "fourth entry should be header (non-selectable)");
         assert!(!non_sel[4], "fifth entry should be selectable row");
 
         // Verify headers
         assert!(
-            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
+            matches!(&result[0], crate::views::picker::PickerEntry::Header { label } if label == &"ds")
         );
         assert!(
-            matches!(&result[2], crate::views::picker::PickerEntry::Header { label } if label == &"ds")
+            matches!(&result[3], crate::views::picker::PickerEntry::Header { label } if label == &"fw-1")
         );
     }
 
@@ -3271,9 +3271,10 @@ mod tests {
 
     #[test]
     fn hero_box_height_accounts_for_borders_and_padding() {
-        // At h >= 26, logo07 is used (7 lines). With menu_height=3:
-        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(7, 6) = 7.
-        // hero_box_height = 2 (borders) + 2 (v_pad) + 7 = 11.
+        // The full logo is 8 lines (logo07.txt). With menu_height=3:
+        // right_col = version(1) + subtitle(0) + info_gap(0) + info(0)
+        //              + gap(1) + menu(3) = 5, inner = max(8, 5) = 8.
+        // hero_box_height = 2 (borders) + 2 (v_pad) + 8 = 12.
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3281,7 +3282,7 @@ mod tests {
             ..Default::default()
         });
         assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_box.height, 11);
+        assert_eq!(layout.hero_box.height, 12);
     }
 
     #[test]
@@ -3361,7 +3362,9 @@ mod tests {
         // A real announcement can't disable the hero box: the slot is clamped to
         // whatever still fits (the renderer trails a `…`), so the box stays
         // active rather than falling back to the stacked layout.
-        let area = Rect::new(0, 0, 100, 17);
+        // Tightest fit with the 8-line logo: min_content_height(0, 3, 0, 0)
+        // = box(12) + flex gap(1) + fixed_below(5) = 18.
+        let area = Rect::new(0, 0, 100, 18);
         let a = long_ann();
         let without = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,

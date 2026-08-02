@@ -1,12 +1,18 @@
-//! Web search client — DuckDuckGo HTML scraping via POST.
+//! Web search client — configured backend (Responses API) with a
+//! DuckDuckGo HTML scraping fallback.
 //!
-//! No API key required. Uses POST to the DDG HTML (non-JS) search endpoint,
-//! which returns plain HTML results. Uses `native-tls` (OS TLS stack)
-//! so the TLS fingerprint matches a real browser.
+//! When `WebSearchConfig::Enabled` carries a `base_url`/`api_key`/`model`,
+//! `search()` first calls that backend's `/responses` endpoint with a
+//! `web_search` hosted tool (the documented contract: "Calls the Responses
+//! API with web search capability"). If the backend request fails (network,
+//! auth, unsupported endpoint), the client falls back to DuckDuckGo HTML
+//! scraping via POST.
 //!
-//! The DDG HTML endpoint blocks GET requests with a visual CAPTCHA
-//! ("select all squares containing a duck"), but POST requests with
-//! browser-like headers and a Referer consistently return real results.
+//! DDG requires no API key and uses `native-tls` (OS TLS stack) so the TLS
+//! fingerprint matches a real browser. The DDG HTML endpoint blocks GET
+//! requests with a visual CAPTCHA ("select all squares containing a duck"),
+//! but POST requests with browser-like headers and a Referer consistently
+//! return real results.
 //!
 //! The DDG Instant Answer API (`api.duckduckgo.com`) is intentionally NOT
 //! used: it only returns structured data for dictionary/definition queries,
@@ -35,10 +41,20 @@ const DDG_MAX_RETRIES: usize = 2;
 /// Backoff multiplier (seconds) between retries.
 const DDG_RETRY_BACKOFF_SECS: u64 = 2;
 
-/// HTTP client that performs web searches via DuckDuckGo HTML scraping.
+/// HTTP client that performs web searches: configured Responses backend
+/// first, DuckDuckGo HTML scraping as the fallback.
 #[derive(Clone)]
 pub struct WebSearchClient {
     http: reqwest::Client,
+    backend: Option<WebSearchBackend>,
+}
+
+/// Configured Responses-API backend (the `Enabled` config's endpoint).
+#[derive(Debug, Clone)]
+struct WebSearchBackend {
+    base_url: String,
+    api_key: String,
+    model: String,
 }
 
 impl WebSearchClient {
@@ -46,7 +62,14 @@ impl WebSearchClient {
         config: &WebSearchConfig,
         _api_key_provider: Option<SharedApiKeyProvider>,
     ) -> Result<Self, ds_tool_runtime::ToolError> {
-        let WebSearchConfig::Enabled { extra_headers, .. } = config else {
+        let WebSearchConfig::Enabled {
+            api_key,
+            base_url,
+            model,
+            extra_headers,
+            ..
+        } = config
+        else {
             return Err(ds_tool_runtime::ToolError::execution(
                 ds_tool_protocol::ToolId::new("web_search").expect("valid"),
                 "Cannot create WebSearchClient from disabled config".to_string(),
@@ -86,7 +109,17 @@ impl WebSearchClient {
                 )
             })?;
 
-        Ok(Self { http })
+        let backend = if base_url.trim().is_empty() {
+            None
+        } else {
+            Some(WebSearchBackend {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                api_key: api_key.clone(),
+                model: model.clone(),
+            })
+        };
+
+        Ok(Self { http, backend })
     }
 
     pub fn with_attribution_callback(
@@ -96,12 +129,27 @@ impl WebSearchClient {
         self
     }
 
-    /// Perform a web search via DuckDuckGo HTML scraping (POST).
+    /// Perform a web search: configured backend first, DDG on failure.
     pub async fn search(
         &self,
         query: &str,
         allowed_domains: Option<Vec<String>>,
     ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
+        if let Some(backend) = &self.backend {
+            match self
+                .search_via_backend(backend, query, allowed_domains.as_deref())
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "web_search backend failed; falling back to DuckDuckGo"
+                    );
+                }
+            }
+        }
+
         let results = self
             .search_ddg_html(query, allowed_domains.as_deref())
             .await?;
@@ -111,6 +159,108 @@ impl WebSearchClient {
             format!("No search results found for query: {query}")
         } else {
             format_results(&results)
+        };
+        Ok((content, citations))
+    }
+
+    /// Search via the configured Responses-API backend with a `web_search`
+    /// hosted tool. Returns the concatenated answer text plus any citation
+    /// URLs from output annotations.
+    async fn search_via_backend(
+        &self,
+        backend: &WebSearchBackend,
+        query: &str,
+        allowed_domains: Option<&[String]>,
+    ) -> Result<(String, Vec<String>), ds_tool_runtime::ToolError> {
+        let tool_id = ds_tool_protocol::ToolId::new("web_search").expect("valid");
+        let mut tools_json = serde_json::json!({
+            "type": "web_search",
+            "web_search": {},
+        });
+        if let Some(domains) = allowed_domains.filter(|d| !d.is_empty()) {
+            tools_json["web_search"]["filters"] = serde_json::json!({
+                "allowed_domains": domains,
+            });
+        }
+        let body = serde_json::json!({
+            "model": backend.model,
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": query,
+                }],
+            }],
+            "tools": [tools_json],
+            "stream": false,
+        });
+
+        let url = format!("{}/responses", backend.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&backend.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                ds_tool_runtime::ToolError::execution(
+                    tool_id.clone(),
+                    format!("backend search request failed: {e}"),
+                )
+            })?;
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ds_tool_runtime::ToolError::execution(
+                tool_id.clone(),
+                format!("backend search returned HTTP {status}: {text}"),
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            ds_tool_runtime::ToolError::execution(
+                tool_id.clone(),
+                format!("backend search returned unparseable response: {e}"),
+            )
+        })?;
+
+        // Collect message output items: output_text parts become content,
+        // url_citation annotations become citations (verify() requires at
+        // least one citation for web_search).
+        let mut content_parts: Vec<String> = Vec::new();
+        let mut citations: Vec<String> = Vec::new();
+        if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
+            for item in output {
+                if item.get("type").and_then(|t| t.as_str()) != Some("message") {
+                    continue;
+                }
+                if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                    for part in content {
+                        match part.get("type").and_then(|t| t.as_str()) {
+                            Some("output_text") => {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    content_parts.push(text.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                        if let Some(anns) = part.get("annotations").and_then(|a| a.as_array()) {
+                            for ann in anns {
+                                if let Some(url) = ann.get("url").and_then(|u| u.as_str()) {
+                                    citations.push(url.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let content = if content_parts.is_empty() {
+            format!("No search results found for query: {query}")
+        } else {
+            content_parts.join("\n")
         };
         Ok((content, citations))
     }
@@ -399,6 +549,97 @@ fn format_results(results: &[SearchResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn backend_path_sends_responses_request_and_parses_output() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .and(header("authorization", "Bearer enterprise-key"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "enterprise-search",
+                "tools": [{
+                    "type": "web_search",
+                    "web_search": {
+                        "filters": { "allowed_domains": ["example.com"] }
+                    }
+                }],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 1,
+                "model": "enterprise-search",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "search result",
+                        "annotations": [{
+                            "type": "url_citation",
+                            "url": "https://example.com/result"
+                        }]
+                    }]
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = WebSearchConfig::Enabled {
+            api_key: "enterprise-key".into(),
+            base_url: server.uri(),
+            model: "enterprise-search".into(),
+            extra_headers: Default::default(),
+            alpha_test_key: None,
+        };
+        let client = WebSearchClient::new(&config, None).unwrap();
+        let (content, citations) = client
+            .search(
+                "test query",
+                Some(vec!["example.com".to_string()]),
+            )
+            .await
+            .unwrap();
+        assert!(content.contains("search result"), "got: {content}");
+        assert_eq!(citations, vec!["https://example.com/result"]);
+    }
+
+    #[tokio::test]
+    async fn backend_path_reports_http_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = WebSearchConfig::Enabled {
+            api_key: "bad-key".into(),
+            base_url: server.uri(),
+            model: "enterprise-search".into(),
+            extra_headers: Default::default(),
+            alpha_test_key: None,
+        };
+        let client = WebSearchClient::new(&config, None).unwrap();
+        // Test the backend leg directly (search() would fall back to DDG).
+        let backend = client.backend.as_ref().expect("backend configured");
+        let err = client
+            .search_via_backend(backend, "test query", None)
+            .await
+            .expect_err("401 must surface from the backend path");
+        assert!(
+            err.to_string().contains("401"),
+            "expected HTTP 401 in error, got: {err}"
+        );
+    }
 
     #[test]
     fn test_url_decode() {

@@ -104,7 +104,10 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         apply_soft_default_permission_mode(
             app,
             root.as_ref().and_then(|r| r.get("ui")),
-            remote_opt.as_deref(),
+            // Presence-aware: `Some(None)` is an explicit null (disarm to
+            // Ask unless TOML wins) — distinct from the omitted-field case,
+            // which never reaches this applier (guarded above).
+            Some(remote_opt.as_deref()),
         );
     }
 
@@ -317,9 +320,26 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
 pub(super) fn apply_soft_default_permission_mode(
     app: &mut AppView,
     effective_ui: Option<&toml::Value>,
-    remote: Option<&str>,
+    remote: Option<Option<&str>>,
 ) {
-    let mode = ds_shell::util::config::resolve_permission_mode(effective_ui, remote);
+    // Presence-aware remote: `Some(None)` (explicit null) means the server
+    // cleared the mode — resolve as Ask unless the TOML still owns it. A
+    // bare `None` (field omitted) never reaches this applier in production;
+    // it falls back to the plain product-default resolution.
+    let (mode, display) = match remote {
+        Some(Some(s)) => (
+            ds_shell::util::config::resolve_permission_mode(effective_ui, Some(s)),
+            ds_shell::util::config::resolved_display_permission_mode(effective_ui, Some(s)),
+        ),
+        Some(None) => (
+            ds_shell::util::config::resolve_permission_mode(effective_ui, Some("ask")),
+            ds_shell::util::config::resolved_display_permission_mode(effective_ui, Some("ask")),
+        ),
+        None => (
+            ds_shell::util::config::resolve_permission_mode(effective_ui, None),
+            ds_shell::util::config::resolved_display_permission_mode(effective_ui, None),
+        ),
+    };
     app.default_yolo = mode.is_always_approve() && app.yolo_policy_block.is_none();
     let auto = mode.is_auto() && app.auto_mode_gate && !app.default_yolo;
     app.current_ui.permission_mode = Some(if auto {
@@ -327,8 +347,7 @@ pub(super) fn apply_soft_default_permission_mode(
     } else if app.default_yolo {
         "always-approve".to_string()
     } else {
-        ds_shell::util::config::resolved_display_permission_mode(effective_ui, remote)
-            .to_string()
+        display.to_string()
     });
 }
 

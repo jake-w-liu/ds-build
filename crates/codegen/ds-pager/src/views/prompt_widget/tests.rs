@@ -1693,8 +1693,8 @@
             agent_client_protocol::ModelInfo::new(model_id, "DS 4.5".to_string()),
         );
 
-        // Type "/model gr" and position cursor at end (in args).
-        pw.textarea.insert_str("/model gr");
+        // Type "/model DS" and position cursor at end (in args).
+        pw.textarea.insert_str("/model DS");
         pw.refresh_slash(&models);
 
         let snap = pw.slash_snapshot();
