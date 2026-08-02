@@ -795,72 +795,82 @@ impl CompactionsRemaining {
     }
 }
 
-/// Reasoning effort level. `None`/`Minimal` are omitted on the Anthropic Messages API.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// DeepSeek reasoning effort. **Only** these values exist:
+///
+/// | Variant | Wire |
+/// |---------|------|
+/// | [`None`](Self::None) | `none` (thinking off) |
+/// | [`Low`](Self::Low) | `low` |
+/// | [`High`](Self::High) | `high` |
+/// | [`Max`](Self::Max) | `max` (product default) |
+///
+/// Foreign tokens (`minimal`, `medium`, `xhigh`) are accepted **only** on
+/// parse and map into this set; they are never stored or sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ReasoningEffort {
     None,
-    Minimal,
     Low,
-    Medium,
     High,
-    /// Maximum reasoning depth. Wire name is `max` (DeepSeek chat completions);
-    /// `xhigh` is accepted as an alias on deserialize.
     #[default]
-    #[serde(rename = "max", alias = "xhigh")]
-    Xhigh,
+    Max,
 }
 
 impl ReasoningEffort {
+    /// Any of the four DeepSeek tokens (including off).
+    pub fn is_deepseek_token(self) -> bool {
+        matches!(self, Self::None | Self::Low | Self::High | Self::Max)
+    }
+
+    /// Map to async-openai Responses effort (no `max` variant there).
+    /// Wire body is rewritten `xhigh`→`max` by [`crate::patch_deepseek_responses_effort`].
     pub fn to_responses_api(self) -> crate::rs::ReasoningEffort {
         match self {
             Self::None => crate::rs::ReasoningEffort::None,
-            // Align with Chat Completions / Messages: Minimal means thinking off.
-            // DeepSeek Responses documents `none` (not `minimal`) to disable.
-            Self::Minimal => crate::rs::ReasoningEffort::None,
             Self::Low => crate::rs::ReasoningEffort::Low,
-            Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
-            // async-openai has no `max` variant; wire is rewritten to `"max"` by
-            // [`crate::patch_deepseek_responses_effort`] after serialize.
-            Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
+            Self::Max => crate::rs::ReasoningEffort::Xhigh,
         }
     }
 
-    /// Inverse of [`to_responses_api`](Self::to_responses_api): the effort the
-    /// Responses API echoes back on `response.reasoning.effort`.
     pub fn from_responses_api(effort: crate::rs::ReasoningEffort) -> Self {
         match effort {
-            crate::rs::ReasoningEffort::None => Self::None,
-            crate::rs::ReasoningEffort::Minimal => Self::Minimal,
+            crate::rs::ReasoningEffort::None | crate::rs::ReasoningEffort::Minimal => Self::None,
             crate::rs::ReasoningEffort::Low => Self::Low,
-            crate::rs::ReasoningEffort::Medium => Self::Medium,
-            crate::rs::ReasoningEffort::High => Self::High,
-            crate::rs::ReasoningEffort::Xhigh => Self::Xhigh,
+            crate::rs::ReasoningEffort::Medium | crate::rs::ReasoningEffort::High => Self::High,
+            crate::rs::ReasoningEffort::Xhigh => Self::Max,
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::Minimal => "minimal",
             Self::Low => "low",
-            Self::Medium => "medium",
             Self::High => "high",
-            // DeepSeek V4 chat completions accept high|max; max is highest.
-            Self::Xhigh => "max",
+            Self::Max => "max",
         }
     }
 
-    /// Anthropic Messages API `output_config.effort` string; `None` for unsupported variants.
+    /// Messages `output_config.effort`; off → omit field.
     pub fn to_messages_api(self) -> Option<&'static str> {
         match self {
-            Self::None | Self::Minimal => None,
+            Self::None => None,
             Self::Low => Some("low"),
-            Self::Medium => Some("medium"),
             Self::High => Some("high"),
-            Self::Xhigh => Some("max"),
+            Self::Max => Some("max"),
         }
+    }
+}
+
+impl serde::Serialize for ReasoningEffort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -875,20 +885,21 @@ impl std::str::FromStr for ReasoningEffort {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "none" => Ok(Self::None),
-            "minimal" => Ok(Self::Minimal),
+            "none" | "off" | "minimal" => Ok(Self::None),
             "low" => Ok(Self::Low),
-            "medium" => Ok(Self::Medium),
-            "high" => Ok(Self::High),
-            "xhigh" | "max" => Ok(Self::Xhigh), // max is a CLI/UX alias of xhigh
+            "high" | "medium" => Ok(Self::High),
+            "max" => Ok(Self::Max),
+            // Not a DeepSeek tier; chat API maps it toward high — we reject as
+            // a product token so menus never show it. Accept only as typo→max
+            // for old saved prefs that meant "highest".
+            "xhigh" => Ok(Self::Max),
             _ => Err(format!(
-                "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
+                "invalid reasoning effort: {s:?} (DeepSeek: none, low, high, max)"
             )),
         }
     }
 }
 
-/// Canonical wire parse only (`max` → `Xhigh`); remapped menu ids need a model catalog.
 pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
@@ -943,8 +954,7 @@ pub struct ReasoningEffortOption {
     pub default: bool,
 }
 
-/// Deserialization shape accepting either a bare canonical value string
-/// (`"xhigh"`) or a table with `value` required and everything else optional.
+/// Deserialization shape: bare DeepSeek token (`"max"`) or a table with `value`.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RawReasoningEffortOption {
@@ -959,8 +969,7 @@ enum RawReasoningEffortOption {
     },
 }
 
-/// Uppercase the first character of an id for a default label; `"xhigh"` becomes
-/// `"Xhigh"`, `"deep"` becomes `"Deep"`.
+/// Uppercase first character for a default label (`max` → `Max`).
 fn humanize_effort_id(id: &str) -> String {
     let mut chars = id.chars();
     match chars.next() {
@@ -980,11 +989,10 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
                     .parse::<ReasoningEffort>()
                     .map_err(serde::de::Error::custom)?;
                 let id = value.as_str().to_string();
-                let label = humanize_effort_id(&id);
                 ReasoningEffortOption {
-                    id,
+                    id: id.clone(),
                     value,
-                    label,
+                    label: humanize_effort_id(&id),
                     description: None,
                     default: false,
                 }
@@ -997,7 +1005,7 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
                 default,
             } => {
                 let id = id.unwrap_or_else(|| value.as_str().to_string());
-                let label = label.unwrap_or_else(|| humanize_effort_id(&id));
+                let label = label.unwrap_or_else(|| humanize_effort_id(value.as_str()));
                 ReasoningEffortOption {
                     id,
                     value,
@@ -1010,22 +1018,38 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffortOption {
     }
 }
 
-/// Parse a JSON array of reasoning-effort options element-by-element, skipping
-/// (and warning on) any entry whose `value` fails to parse (forward-compat for
-/// tiers a newer server introduces). The single home for the skip-invalid rule,
-/// shared by the meta reader and the remote `/models` parser.
+/// Parse menu entries: selectable DeepSeek levels only (`low`|`high`|`max`), deduped.
 pub fn parse_reasoning_effort_options(arr: &[serde_json::Value]) -> Vec<ReasoningEffortOption> {
-    arr.iter()
-        .filter_map(
-            |el| match serde_json::from_value::<ReasoningEffortOption>(el.clone()) {
-                Ok(opt) => Some(opt),
-                Err(err) => {
-                    tracing::warn!(value = %el, error = %err, "reasoningEfforts: skipping invalid entry");
-                    None
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for el in arr {
+        match serde_json::from_value::<ReasoningEffortOption>(el.clone()) {
+            Ok(opt) => {
+                if !opt.value.is_deepseek_token() {
+                    continue;
                 }
-            },
-        )
-        .collect()
+                if !seen.insert(opt.value) {
+                    continue;
+                }
+                // Force DeepSeek id so custom ids like "xhigh" never surface.
+                out.push(ReasoningEffortOption {
+                    id: opt.value.as_str().to_string(),
+                    value: opt.value,
+                    label: if opt.label.is_empty() {
+                        humanize_effort_id(opt.value.as_str())
+                    } else {
+                        opt.label
+                    },
+                    description: opt.description,
+                    default: opt.default || opt.value == ReasoningEffort::Max,
+                });
+            }
+            Err(err) => {
+                tracing::warn!(value = %el, error = %err, "reasoningEfforts: skipping invalid entry");
+            }
+        }
+    }
+    out
 }
 
 /// Parse the per-model reasoning-effort menu from a model's ACP `meta`. Returns
@@ -1246,11 +1270,9 @@ mod tests {
     fn reasoning_effort_serde_lowercase_round_trip() {
         for v in [
             ReasoningEffort::None,
-            ReasoningEffort::Minimal,
             ReasoningEffort::Low,
-            ReasoningEffort::Medium,
             ReasoningEffort::High,
-            ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
         ] {
             let json = serde_json::to_string(&v).unwrap();
             assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
@@ -1258,39 +1280,47 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        // `max` is the primary wire name for highest effort (DeepSeek).
         assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
+        // Legacy inbound only — never product variants.
         assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"xhigh\"").unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"medium\"").unwrap(),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"minimal\"").unwrap(),
+            ReasoningEffort::None
         );
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_max_as_xhigh() {
+    fn reasoning_effort_from_str_deepseek_tokens() {
         assert_eq!(
             "max".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "MAX".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "xhigh".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
-        assert_eq!(ReasoningEffort::Xhigh.as_str(), "max");
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
     }
 
     #[test]
     fn parse_canonical_effort_token_helper() {
         assert_eq!(
             parse_canonical_effort_token("max"),
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
         );
         assert_eq!(
             parse_canonical_effort_token("high"),
@@ -1307,7 +1337,7 @@ mod tests {
             opt,
             ReasoningEffortOption {
                 id: "max".to_string(),
-                value: ReasoningEffort::Xhigh,
+                value: ReasoningEffort::Max,
                 label: "Max".to_string(),
                 description: None,
                 default: false,
@@ -1315,7 +1345,7 @@ mod tests {
         );
         // Alias still accepted.
         let opt2: ReasoningEffortOption = serde_json::from_value(json!("xhigh")).unwrap();
-        assert_eq!(opt2.value, ReasoningEffort::Xhigh);
+        assert_eq!(opt2.value, ReasoningEffort::Max);
         assert_eq!(opt2.id, "max");
     }
 
@@ -1340,7 +1370,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(opt.id, "deep");
-        assert_eq!(opt.value, ReasoningEffort::Xhigh);
+        assert_eq!(opt.value, ReasoningEffort::Max);
         assert_eq!(opt.label, "Deep");
         assert_eq!(opt.description.as_deref(), Some("Maximum reasoning"));
         assert!(opt.default);
@@ -1394,16 +1424,16 @@ mod tests {
     fn reasoning_efforts_meta_value_round_trips() {
         let opts = vec![
             ReasoningEffortOption {
-                id: "deep".to_string(),
-                value: ReasoningEffort::Xhigh,
-                label: "Deep".to_string(),
+                id: "max".to_string(),
+                value: ReasoningEffort::Max,
+                label: "Max".to_string(),
                 description: Some("Maximum reasoning".to_string()),
                 default: true,
             },
             ReasoningEffortOption {
-                id: "balanced".to_string(),
-                value: ReasoningEffort::Medium,
-                label: "Balanced".to_string(),
+                id: "high".to_string(),
+                value: ReasoningEffort::High,
+                label: "High".to_string(),
                 description: None,
                 default: false,
             },
@@ -1450,7 +1480,7 @@ mod tests {
         let ok = as_map(serde_json::json!({"reasoningEffort": "xhigh"}));
         assert_eq!(
             parse_reasoning_effort_meta(Some(&ok)),
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
         );
         let bad_type = as_map(serde_json::json!({"reasoningEffort": 3}));
         assert_eq!(parse_reasoning_effort_meta(Some(&bad_type)), None);

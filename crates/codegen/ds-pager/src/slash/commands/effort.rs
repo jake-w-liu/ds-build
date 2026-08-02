@@ -149,17 +149,19 @@ mod tests {
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id.clone(), info);
         state.current = Some(id);
-        state.reasoning_effort = Some(ReasoningEffort::Medium);
+        state.reasoning_effort = Some(ReasoningEffort::High);
         let mut ctx = dummy_exec_ctx(&state);
         let result = EffortCommand.run(&mut ctx, "");
         match result {
             CommandResult::Error(msg) => {
                 assert!(msg.contains("Usage: /effort"));
-                // Legacy menu option ids only — not none/minimal.
-                assert!(msg.contains("xhigh|high|medium|low"), "msg={msg}");
-                assert!(msg.contains("current: medium"));
+                // DeepSeek menu ids only.
+                assert!(msg.contains("max|high|low"), "msg={msg}");
+                assert!(msg.contains("current: high"));
                 assert!(!msg.contains("none"));
                 assert!(!msg.contains("minimal"));
+                assert!(!msg.contains("medium"));
+                assert!(!msg.contains("xhigh"));
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -177,9 +179,10 @@ mod tests {
             CommandResult::Error(msg) => {
                 assert!(msg.contains("unknown effort level 'turbo'"), "msg={msg}");
                 assert!(msg.contains("use one of:"), "msg={msg}");
-                assert!(msg.contains("xhigh"), "msg={msg}");
+                assert!(msg.contains("max"), "msg={msg}");
                 assert!(!msg.contains("none"), "msg={msg}");
                 assert!(!msg.contains("minimal"), "msg={msg}");
+                assert!(!msg.contains("xhigh"), "msg={msg}");
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -204,8 +207,7 @@ mod tests {
 
     #[test]
     fn none_and_minimal_rejected_when_model_menu_omits_them() {
-        // Legacy fallback menu is low..xhigh — `none`/`minimal` used to pass
-        // through and 400 on deepseek-v4-pro.5; reject at the TUI instead.
+        // DeepSeek fallback is max|high|low — off tokens rejected unless catalog offers them.
         let mut state = ModelState::default();
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id.clone(), info);
@@ -271,7 +273,7 @@ mod tests {
         let info = acp::ModelInfo::new(id.clone(), "Reasoning X".to_string()).meta(
             serde_json::json!({
                 "supportsReasoningEffort": true,
-                "reasoningEfforts": [{ "id": "deep", "value": "xhigh", "label": "Deep" }],
+                "reasoningEfforts": [{ "id": "deep", "value": "max", "label": "Deep" }],
             })
             .as_object()
             .cloned(),
@@ -279,13 +281,13 @@ mod tests {
         state.available.insert(id.clone(), info);
         state.current = Some(id.clone());
         let mut ctx = dummy_exec_ctx(&state);
-        // The rendered row inserts the id; `/effort deep` must send `xhigh`.
-        match EffortCommand.run(&mut ctx, "deep") {
+        // Catalog value max; id forced to DeepSeek token "max" on parse.
+        match EffortCommand.run(&mut ctx, "max") {
             CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
                 assert_eq!(model_id, id);
-                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
+                assert_eq!(effort, Some(ReasoningEffort::Max));
             }
-            other => panic!("expected SwitchModel with remapped effort, got {other:?}"),
+            other => panic!("expected SwitchModel with max effort, got {other:?}"),
         }
     }
 
@@ -355,12 +357,11 @@ mod tests {
         };
         let items = cmd.suggest_args(&ctx, "").unwrap();
         assert_eq!(items.len(), EFFORT_LEVELS.len());
-        assert_eq!(items[0].insert_text, "xhigh");
+        assert_eq!(items[0].insert_text, "max");
         assert_eq!(items[1].insert_text, "high");
         assert_eq!(items[1].display, "high (active)");
-        assert_eq!(items[2].insert_text, "medium");
-        assert_eq!(items[3].insert_text, "low");
+        assert_eq!(items[2].insert_text, "low");
         assert!(items[0].match_text.starts_with("a "));
-        assert!(items[3].match_text.starts_with("d "));
+        assert!(items[2].match_text.starts_with("c "));
     }
 }

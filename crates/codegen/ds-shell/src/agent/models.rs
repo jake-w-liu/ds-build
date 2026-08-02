@@ -2085,9 +2085,8 @@ fn model_offers_reasoning_effort(info: &config::ModelInfo, effort: ReasoningEffo
         matches!(
             effort,
             ReasoningEffort::Low
-                | ReasoningEffort::Medium
                 | ReasoningEffort::High
-                | ReasoningEffort::Xhigh
+                | ReasoningEffort::Max
         )
     } else {
         info.reasoning_efforts.iter().any(|opt| opt.value == effort)
@@ -2448,7 +2447,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("ds-test-models-manager-seed");
         let auth_manager = Arc::new(AuthManager::new(&tmp, DsComConfig::default()));
         let mut cfg = config::Config::default();
-        cfg.models.default_reasoning_effort = Some(ReasoningEffort::Xhigh);
+        cfg.models.default_reasoning_effort = Some(ReasoningEffort::Max);
         let mgr = ModelsManager::new(
             None,
             IndexMap::new(),
@@ -2456,7 +2455,7 @@ mod tests {
             auth_manager,
             cfg,
         );
-        assert_eq!(mgr.current_reasoning_effort(), Some(ReasoningEffort::Xhigh),);
+        assert_eq!(mgr.current_reasoning_effort(), Some(ReasoningEffort::Max),);
     }
 
     #[test]
@@ -2578,14 +2577,14 @@ mod tests {
                 reasoning_efforts: vec![
                     ReasoningEffortOption {
                         id: "balanced".to_string(),
-                        value: ReasoningEffort::Medium,
+                        value: ReasoningEffort::High,
                         label: "Balanced".to_string(),
                         description: None,
                         default: false,
                     },
                     ReasoningEffortOption {
                         id: "deep".to_string(),
-                        value: ReasoningEffort::Xhigh,
+                        value: ReasoningEffort::Max,
                         label: "Deep".to_string(),
                         description: None,
                         default: true,
@@ -2606,7 +2605,7 @@ mod tests {
         );
         assert_eq!(
             info.reasoning_effort,
-            Some(ReasoningEffort::Xhigh),
+            Some(ReasoningEffort::Max),
             "derived default = marked-default option value"
         );
         assert!(!catalog["plain"].info.supports_reasoning_effort);
@@ -2625,7 +2624,7 @@ mod tests {
         assert!(mgr.model_supports_reasoning_effort("menu-only"));
         assert_eq!(
             mgr.model_default_reasoning_effort("menu-only"),
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
         );
         assert_eq!(mgr.model_reasoning_efforts("menu-only").len(), 2);
         assert!(!mgr.model_supports_reasoning_effort("plain"));

@@ -6644,7 +6644,7 @@ reasoning_effort = "low"
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "deep".to_string(),
-                value: ReasoningEffort::Xhigh,
+                value: ReasoningEffort::Max,
                 label: "Deep".to_string(),
                 description: None,
                 default: false,
@@ -6676,7 +6676,7 @@ reasoning_effort = "low"
         let mut models = IndexMap::new();
         let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
         entry.info.supports_reasoning_effort = true;
-        entry.info.reasoning_effort = Some(ReasoningEffort::Medium);
+        entry.info.reasoning_effort = Some(ReasoningEffort::High);
         models.insert("m".to_string(), entry);
         let meta = to_acp_model_info(&models)
             .values()
@@ -6720,14 +6720,14 @@ reasoning_effort = "low"
         entry.info.reasoning_efforts = vec![
             ReasoningEffortOption {
                 id: "balanced".to_string(),
-                value: ReasoningEffort::Medium,
+                value: ReasoningEffort::High,
                 label: "Balanced".to_string(),
                 description: None,
                 default: false,
             },
             ReasoningEffortOption {
                 id: "deep".to_string(),
-                value: ReasoningEffort::Xhigh,
+                value: ReasoningEffort::Max,
                 label: "Deep".to_string(),
                 description: None,
                 default: false,
@@ -10810,7 +10810,7 @@ default = "deepseek-v4-pro.5"
         assert_eq!(custom.reasoning_efforts[0].label, "High");
         assert!(custom.reasoning_efforts[0].default);
         assert_eq!(custom.reasoning_efforts[1].id, "deep");
-        assert_eq!(custom.reasoning_efforts[1].value, ReasoningEffort::Xhigh);
+        assert_eq!(custom.reasoning_efforts[1].value, ReasoningEffort::Max);
         let shorthand = &resolved.get("shorthand").expect("shorthand model").info;
         let ids: Vec<_> = shorthand
             .reasoning_efforts

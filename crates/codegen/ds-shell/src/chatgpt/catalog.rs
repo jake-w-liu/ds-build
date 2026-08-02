@@ -245,20 +245,8 @@ fn clean_text(value: String, max_chars: usize) -> Option<String> {
 }
 
 fn parse_wire_effort(value: &str) -> Option<ReasoningEffort> {
-    match value {
-        "none" => Some(ReasoningEffort::None),
-        "minimal" => Some(ReasoningEffort::Minimal),
-        "low" => Some(ReasoningEffort::Low),
-        "medium" => Some(ReasoningEffort::Medium),
-        "high" => Some(ReasoningEffort::High),
-        "xhigh" => Some(ReasoningEffort::Xhigh),
-        // `max` is distinct from `xhigh` on current Codex catalogs and
-        // `ultra` is a client-side composite policy. ds-build's existing
-        // ReasoningEffort intentionally has neither. Omitting them is safer
-        // than silently sending a different effort or changing DeepSeek's enum.
-        "max" | "ultra" => None,
-        _ => None,
-    }
+    // DeepSeek product enum: none|low|high|max (parse accepts a few legacy aliases).
+    value.parse().ok()
 }
 
 fn specs_to_entries(

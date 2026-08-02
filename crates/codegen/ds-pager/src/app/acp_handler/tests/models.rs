@@ -22,10 +22,10 @@
         agent
             .session
             .models
-            .set_current(id, Some(ReasoningEffort::Xhigh));
+            .set_current(id, Some(ReasoningEffort::Max));
         assert_eq!(
             agent.session.models.reasoning_effort,
-            Some(ReasoningEffort::Xhigh)
+            Some(ReasoningEffort::Max)
         );
 
         let notif = make_reasoning_models_update_notif("reason-model", "high");
@@ -34,7 +34,7 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
             agent.session.models.reasoning_effort,
-            Some(ReasoningEffort::Xhigh),
+            Some(ReasoningEffort::Max),
             "models/update broadcast must not clobber a user-set per-session effort"
         );
     }

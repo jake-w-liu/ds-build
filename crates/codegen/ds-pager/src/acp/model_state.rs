@@ -231,7 +231,7 @@ impl ModelState {
         {
             return Some(option.value);
         }
-        // Canonical level (e.g. "high", "max"→xhigh) only if the model menu
+        // Canonical level (e.g. high, max) only if the model menu
         // actually offers that value — not free-form power-user aliases that
         // would 400 on the server (e.g. `none` on deepseek-v4-pro.5).
         let parsed = token.parse::<ReasoningEffort>().ok()?;
@@ -400,8 +400,8 @@ mod tests {
             id.clone(),
             model_with_effort("ds-build", "DS Build", "high"),
         );
-        state.set_current(id.clone(), Some(ReasoningEffort::Xhigh));
-        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        state.set_current(id.clone(), Some(ReasoningEffort::Max));
+        assert_eq!(state.reasoning_effort, Some(ReasoningEffort::Max));
 
         // The broadcast carries the model's static default (high) for the same model.
         let mut refreshed = IndexMap::new();
@@ -413,7 +413,7 @@ mod tests {
 
         assert_eq!(
             state.reasoning_effort,
-            Some(ReasoningEffort::Xhigh),
+            Some(ReasoningEffort::Max),
             "catalog refresh must not clobber a user-set per-session effort"
         );
     }
@@ -426,7 +426,7 @@ mod tests {
             id_a.clone(),
             model_with_effort("model-a", "Model A", "high"),
         );
-        state.set_current(id_a.clone(), Some(ReasoningEffort::Xhigh));
+        state.set_current(id_a.clone(), Some(ReasoningEffort::Max));
 
         // Refresh drops model-a; fall back to model-b whose default is low.
         let id_b = acp::ModelId::new(Arc::from("model-b"));
@@ -467,15 +467,17 @@ mod tests {
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
             "reasoningEfforts": [
-                { "id": "balanced", "value": "medium", "label": "Balanced" },
-                { "id": "deep", "value": "xhigh", "label": "Deep", "description": "Max" },
+                { "id": "balanced", "value": "high", "label": "High" },
+                { "id": "deep", "value": "max", "label": "Max", "description": "Max" },
             ],
         })));
         let opts = state.reasoning_effort_options();
         assert_eq!(opts.len(), 2);
-        assert_eq!(opts[0].label, "Balanced");
-        assert_eq!(opts[0].value, ReasoningEffort::Medium);
-        assert_eq!(opts[1].id, "deep");
+        // Menu ids are DeepSeek tokens only (custom catalog ids remapped).
+        assert_eq!(opts[0].id, "high");
+        assert_eq!(opts[0].value, ReasoningEffort::High);
+        assert_eq!(opts[1].id, "max");
+        assert_eq!(opts[1].value, ReasoningEffort::Max);
         assert_eq!(opts[1].description.as_deref(), Some("Max"));
     }
 
@@ -501,7 +503,7 @@ mod tests {
             .into_iter()
             .map(|o| o.id)
             .collect();
-        assert_eq!(ids, ["xhigh", "high", "medium", "low"]);
+        assert_eq!(ids, ["max", "high", "low"]);
     }
 
     #[test]
@@ -521,7 +523,7 @@ mod tests {
                 .into_iter()
                 .map(|o| o.id)
                 .collect();
-            assert_eq!(ids, ["xhigh", "high", "medium", "low"], "for meta {meta}");
+            assert_eq!(ids, ["max", "high", "low"], "for meta {meta}");
         }
     }
 
@@ -530,20 +532,19 @@ mod tests {
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
             "reasoningEfforts": [
-                { "id": "deep", "value": "xhigh", "label": "Deep" },
+                { "id": "deep", "value": "max", "label": "Max" },
                 { "id": "high", "value": "high", "label": "High" },
             ],
         })));
-        // Design-2 remap: the typed id resolves to its canonical wire value.
+        // Catalog values collapse to DeepSeek menu ids.
         assert_eq!(
-            state.resolve_effort_token("deep"),
-            Some(ReasoningEffort::Xhigh)
+            state.resolve_effort_token("max"),
+            Some(ReasoningEffort::Max)
         );
         assert_eq!(
-            state.resolve_effort_token("DEEP"),
-            Some(ReasoningEffort::Xhigh)
+            state.resolve_effort_token("MAX"),
+            Some(ReasoningEffort::Max)
         );
-        // Canonical level offered by the menu is accepted by value.
         assert_eq!(
             state.resolve_effort_token("high"),
             Some(ReasoningEffort::High)
@@ -612,7 +613,7 @@ mod tests {
 
     #[test]
     fn resolve_effort_token_legacy_menu_rejects_none() {
-        // supportsReasoningEffort without a server list → built-in low..xhigh.
+        // supportsReasoningEffort without a server list → built-in max|high|low.
         let state = state_with_meta(Some(serde_json::json!({
             "supportsReasoningEffort": true,
         })));

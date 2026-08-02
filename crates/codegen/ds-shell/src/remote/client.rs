@@ -1432,7 +1432,7 @@ mod tests {
         );
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert!(result.supports_reasoning_effort);
-        assert_eq!(result.reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(result.reasoning_effort, Some(ReasoningEffort::Max));
         let value = serde_json::json!({ "model" : "x", "context_window" : 256_000 });
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert!(!result.supports_reasoning_effort);
@@ -1449,7 +1449,7 @@ mod tests {
         let result = parse_remote_model_value(&value, "https://default.url").unwrap();
         assert_eq!(result.reasoning_efforts.len(), 2);
         assert_eq!(result.reasoning_efforts[0].id, "deep");
-        assert_eq!(result.reasoning_efforts[0].value, ReasoningEffort::Xhigh);
+        assert_eq!(result.reasoning_efforts[0].value, ReasoningEffort::Max);
         assert_eq!(result.reasoning_efforts[1].value, ReasoningEffort::Low);
         for value in [
             serde_json::json!(

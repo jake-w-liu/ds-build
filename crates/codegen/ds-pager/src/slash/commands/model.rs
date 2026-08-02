@@ -1,6 +1,6 @@
 //! `/model` (alias `/m`) — switch model + (optionally) reasoning effort.
 //! Chained autocomplete: pick a reasoning-supported model → trailing space
-//! re-opens the dropdown into a `low|medium|high|xhigh` sub-menu.
+//! re-opens the dropdown into a `low|high|max` sub-menu.
 
 use agent_client_protocol as acp;
 use ds_shell::sampling::types::supports_reasoning_effort_meta;
@@ -256,8 +256,8 @@ mod tests {
             Some(("Reasoning X", "high"))
         );
         assert_eq!(
-            split_trailing_token("reasoning-x  xhigh"),
-            Some(("reasoning-x", "xhigh"))
+            split_trailing_token("reasoning-x  max"),
+            Some(("reasoning-x", "max"))
         );
         // No interior whitespace → nothing to split off.
         assert!(split_trailing_token("reasoning-x-pro").is_none());
@@ -309,19 +309,15 @@ mod tests {
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
         // Args query has a trailing space -> effort phase. Items come out
-        // ordered xhigh -> low (strongest first) per EFFORT_LEVELS.
+        // ordered max -> low (strongest first) per EFFORT_LEVELS.
         let items = cmd.suggest_args(&ctx, "Reasoning X ").unwrap();
-        assert_eq!(items.len(), 4);
-        assert_eq!(items[0].insert_text, "Reasoning X xhigh");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].insert_text, "Reasoning X max");
         assert_eq!(items[1].insert_text, "Reasoning X high");
-        assert_eq!(items[2].insert_text, "Reasoning X medium");
-        assert_eq!(items[3].insert_text, "Reasoning X low");
-        // Display is just the level so the user sees a clean column.
-        assert_eq!(items[0].display, "xhigh");
-        // match_text carries the sort-key prefix that forces the matcher's
-        // alphabetical tiebreak to render rows in EFFORT_LEVELS order.
+        assert_eq!(items[2].insert_text, "Reasoning X low");
+        assert_eq!(items[0].display, "max");
         assert!(items[0].match_text.starts_with("a "));
-        assert!(items[3].match_text.starts_with("d "));
+        assert!(items[2].match_text.starts_with("c "));
     }
 
     #[test]
@@ -337,9 +333,9 @@ mod tests {
             has_session_announcements: false,
             screen_mode: crate::app::ScreenMode::Fullscreen,
         };
-        // Still in effort phase; matcher upstream narrows to high / xhigh.
+        // Still in effort phase (full list returned; matcher filters upstream).
         let items = cmd.suggest_args(&ctx, "Reasoning X h").unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 3);
     }
 
     #[test]
@@ -367,11 +363,11 @@ mod tests {
         let (id, info) = model_with_reasoning("reasoning-x", "Reasoning X");
         state.available.insert(id, info);
         let mut ctx = dummy_exec_ctx(&state);
-        let result = ModelCommand.run(&mut ctx, "Reasoning X xhigh");
+        let result = ModelCommand.run(&mut ctx, "Reasoning X max");
         match result {
             CommandResult::Action(Action::SwitchModel { model_id, effort }) => {
                 assert_eq!(model_id.0.as_ref(), "reasoning-x");
-                assert_eq!(effort, Some(ReasoningEffort::Xhigh));
+                assert_eq!(effort, Some(ReasoningEffort::Max));
             }
             other => panic!("expected SwitchModel with effort, got {other:?}"),
         }

@@ -688,7 +688,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
 
     assert_eq!(
         app.agents[&id].session.models.reasoning_effort,
-        Some(ReasoningEffort::Xhigh)
+        Some(ReasoningEffort::Max)
     );
 
     assert_eq!(effects.len(), 1);
@@ -700,7 +700,7 @@ fn switch_model_complete_persists_resolved_effort_from_catalog_meta() {
             assert_eq!(*mid, model_id);
             assert_eq!(
                 *reasoning_effort,
-                Some(ReasoningEffort::Xhigh),
+                Some(ReasoningEffort::Max),
                 "persisted effort must mirror the live UI effort so a \
                      fresh chat does not reset reasoning to a stale default",
             );

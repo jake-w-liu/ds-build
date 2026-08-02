@@ -1829,15 +1829,12 @@ impl SamplingClient {
             request.model = Some(self.defaults.model.clone());
         }
 
-        // Sampling params are no-ops under active DeepSeek thinking (effort
-        // low|high|max). Leave them free when effort is unset or explicitly off
-        // (none|minimal → thinking.type=disabled on chat wire).
+        // Sampling params are no-ops under active DeepSeek thinking (low|high|max).
         let thinking_on = matches!(
             request.reasoning_effort,
             Some(ds_sampling_types::ReasoningEffort::Low)
-                | Some(ds_sampling_types::ReasoningEffort::Medium)
                 | Some(ds_sampling_types::ReasoningEffort::High)
-                | Some(ds_sampling_types::ReasoningEffort::Xhigh)
+                | Some(ds_sampling_types::ReasoningEffort::Max)
         );
         if thinking_on {
             request.temperature = None;

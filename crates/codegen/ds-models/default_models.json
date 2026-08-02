@@ -28,7 +28,7 @@
       "supported_in_api": true,
       "supports_reasoning_effort": true,
       "reasoning_effort": "max",
-      "reasoning_efforts": ["high", "max"]
+      "reasoning_efforts": ["low", "high", "max"]
     }
   ]
 }

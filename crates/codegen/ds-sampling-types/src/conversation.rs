@@ -2088,14 +2088,10 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 },
             });
 
-        // DeepSeek Chat Completions thinking (official docs + reasonix):
-        // - effort low|high|max → thinking.type=enabled + reasoning_effort
-        // - effort none|minimal → thinking.type=disabled, omit effort depth
-        // - effort unset → omit both (server default: thinking on)
-        // Never pair thinking.type=enabled with effort "none" (that was a bug).
+        // DeepSeek Chat Completions: low|high|max enable thinking; none disables.
         let (thinking, reasoning_effort) = match req.reasoning_effort {
             None => (None, None),
-            Some(crate::ReasoningEffort::None) | Some(crate::ReasoningEffort::Minimal) => {
+            Some(crate::ReasoningEffort::None) => {
                 (Some(crate::ChatThinkingMode::disabled()), None)
             }
             Some(e) => (Some(crate::ChatThinkingMode::enabled()), Some(e)),
@@ -2218,14 +2214,13 @@ impl From<&ConversationRequest> for rs::CreateResponse {
     }
 }
 
-/// Effort levels that enable model thinking (not off/unset).
+/// Effort levels that enable model thinking (DeepSeek: low|high|max).
 fn thinking_effort_active(effort: Option<crate::ReasoningEffort>) -> bool {
     matches!(
         effort,
         Some(crate::ReasoningEffort::Low)
-            | Some(crate::ReasoningEffort::Medium)
             | Some(crate::ReasoningEffort::High)
-            | Some(crate::ReasoningEffort::Xhigh)
+            | Some(crate::ReasoningEffort::Max)
     )
 }
 
@@ -2298,6 +2293,7 @@ pub fn patch_deepseek_responses_effort(body: &mut serde_json::Value) {
     let rewritten = match effort.as_str() {
         "xhigh" => "max",
         "minimal" => "none",
+        "medium" => "high", // never a DeepSeek tier
         _ => return,
     };
     if let Some(slot) = body.pointer_mut("/reasoning/effort") {
@@ -4064,7 +4060,7 @@ mod tests {
         let ConversationItem::Assistant(a) = items.last().expect("trailing Assistant") else {
             panic!("Expected Assistant item");
         };
-        assert_eq!(a.reasoning_effort, Some(crate::ReasoningEffort::Xhigh));
+        assert_eq!(a.reasoning_effort, Some(crate::ReasoningEffort::Max));
 
         // Round-trips through the persisted representation.
         let json = serde_json::to_string(&items.last().unwrap()).unwrap();
@@ -4073,7 +4069,7 @@ mod tests {
         let ConversationItem::Assistant(b) = back else {
             panic!("Expected Assistant item");
         };
-        assert_eq!(b.reasoning_effort, Some(crate::ReasoningEffort::Xhigh));
+        assert_eq!(b.reasoning_effort, Some(crate::ReasoningEffort::Max));
     }
 
     // ============================================================================
@@ -5169,9 +5165,8 @@ mod tests {
     fn test_messages_request_wire_format_for_supported_variants() {
         for (variant, expected) in [
             (crate::ReasoningEffort::Low, "low"),
-            (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
-            (crate::ReasoningEffort::Xhigh, "max"),
+            (crate::ReasoningEffort::Max, "max"),
         ] {
             let req = messages_test_request(Some(variant));
             let msgs = build_messages_request(&req);
@@ -5195,7 +5190,6 @@ mod tests {
         let none_or_unsupported = [
             None,
             Some(crate::ReasoningEffort::None),
-            Some(crate::ReasoningEffort::Minimal),
         ];
         for input in none_or_unsupported {
             let req = messages_test_request(input);
@@ -5236,9 +5230,8 @@ mod tests {
     fn test_chat_completion_request_carries_reasoning_effort_top_level() {
         for (variant, expected) in [
             (crate::ReasoningEffort::Low, "low"),
-            (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
-            (crate::ReasoningEffort::Xhigh, "max"),
+            (crate::ReasoningEffort::Max, "max"),
         ] {
             let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("test");
@@ -5298,10 +5291,7 @@ mod tests {
     /// Effort none/minimal must disable thinking, not enable it with effort "none".
     #[test]
     fn test_chat_completion_request_disables_thinking_for_effort_none() {
-        for effort in [
-            crate::ReasoningEffort::None,
-            crate::ReasoningEffort::Minimal,
-        ] {
+        for effort in [crate::ReasoningEffort::None] {
             let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("deepseek-v4-pro");
             let req = ConversationRequest {
@@ -5420,13 +5410,12 @@ mod tests {
         // Minimal maps to Responses `none` (thinking off). Xhigh still serializes
         // as async-openai's `xhigh` here; wire rewrite to DeepSeek `max` is
         // `patch_deepseek_responses_effort` (applied at send time).
+        // Max → async-openai serializes as "xhigh"; patch rewrites to "max" at send.
         for (variant, expected) in [
             (crate::ReasoningEffort::None, "none"),
-            (crate::ReasoningEffort::Minimal, "none"),
             (crate::ReasoningEffort::Low, "low"),
-            (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
-            (crate::ReasoningEffort::Xhigh, "xhigh"),
+            (crate::ReasoningEffort::Max, "xhigh"),
         ] {
             let req = ConversationRequest {
                 reasoning_effort: Some(variant),
@@ -5465,8 +5454,8 @@ mod tests {
             "minimal must become none (thinking off); got: {body:#}"
         );
 
-        // Leave documented tokens alone.
-        for keep in ["none", "low", "high", "max", "medium"] {
+        // DeepSeek tokens left alone.
+        for keep in ["none", "low", "high", "max"] {
             let mut body = serde_json::json!({ "reasoning": { "effort": keep } });
             patch_deepseek_responses_effort(&mut body);
             assert_eq!(
@@ -5479,7 +5468,7 @@ mod tests {
     #[test]
     fn responses_xhigh_reaches_deepseek_wire_as_max_after_patch() {
         let req = ConversationRequest {
-            reasoning_effort: Some(crate::ReasoningEffort::Xhigh),
+            reasoning_effort: Some(crate::ReasoningEffort::Max),
             ..ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("deepseek-v4-flash")
         };

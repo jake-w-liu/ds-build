@@ -4,12 +4,11 @@ use ds_sampling_types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::session::unified_list::SessionKind;
 
-pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 5] = [
-    ReasoningEffort::Minimal,
+/// DeepSeek-native picker only: `low` | `high` | `max` (no medium/minimal/xhigh).
+pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 3] = [
     ReasoningEffort::Low,
-    ReasoningEffort::Medium,
     ReasoningEffort::High,
-    ReasoningEffort::Xhigh,
+    ReasoningEffort::Max, // wire id `max`
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,17 +53,15 @@ impl DsSessionDetail {
 fn effort_label(effort: ReasoningEffort) -> String {
     match effort {
         ReasoningEffort::None => "None",
-        ReasoningEffort::Minimal => "Minimal",
         ReasoningEffort::Low => "Low",
-        ReasoningEffort::Medium => "Medium",
         ReasoningEffort::High => "High",
-        ReasoningEffort::Xhigh => "X-High",
+        ReasoningEffort::Max => "Max",
     }
     .to_string()
 }
 
-/// The built-in session-picker modes used when the model has no server list.
-/// Reproduces the historical five rows and their labels.
+/// Built-in session-picker modes when the model has no catalog list.
+/// DeepSeek-only: low / high / max (default max is marked).
 pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
     SELECTABLE_REASONING_EFFORTS
         .iter()
@@ -73,7 +70,7 @@ pub(crate) fn legacy_session_effort_options() -> Vec<ReasoningEffortOption> {
             value: effort,
             label: effort_label(effort),
             description: None,
-            default: false,
+            default: effort == ReasoningEffort::Max,
         })
         .collect()
 }

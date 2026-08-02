@@ -271,9 +271,9 @@ mod merge_roster_tests {
     #[test]
     fn dormant_row_carries_persisted_reasoning_effort() {
         let mut s = summary("dorm", Some("Dormant"), 1_000);
-        s.reasoning_effort = Some(ReasoningEffort::Xhigh);
+        s.reasoning_effort = Some(ReasoningEffort::Max);
         let out = merge_roster(vec![], vec![s]);
-        assert_eq!(out[0].reasoning_effort, Some(ReasoningEffort::Xhigh));
+        assert_eq!(out[0].reasoning_effort, Some(ReasoningEffort::Max));
     }
 
     #[test]
@@ -292,12 +292,12 @@ mod merge_roster_tests {
     #[test]
     fn reasoning_effort_serializes_as_camel_case_and_skips_when_none() {
         let with_effort = RosterEntry {
-            reasoning_effort: Some(ReasoningEffort::Xhigh),
+            reasoning_effort: Some(ReasoningEffort::Max),
             ..resident("a", RosterActivity::Idle, 1)
         };
         let json = serde_json::to_string(&with_effort).unwrap();
         assert!(
-            json.contains("\"reasoningEffort\":\"xhigh\""),
+            json.contains("\"reasoningEffort\":\"max\""),
             "effort must be camelCase and snake_case-valued: {json}"
         );
 

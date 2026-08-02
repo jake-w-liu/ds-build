@@ -28,7 +28,7 @@ fn models_with_current(supports: bool) -> ModelState {
     let mut models = ModelState::default();
     models.available.insert(id.clone(), info);
     models.current = Some(id);
-    models.reasoning_effort = Some(ReasoningEffort::Medium);
+    models.reasoning_effort = Some(ReasoningEffort::High);
     models
 }
 
@@ -54,7 +54,7 @@ fn effort_only_resolves_remapped_menu_id() {
         DeferredSwitchOutcome {
             switch: Some((
                 models.current.clone().unwrap(),
-                Some(ReasoningEffort::Xhigh)
+                Some(ReasoningEffort::Max)
             )),
             effort_error: None,
         }
@@ -142,7 +142,7 @@ fn stashed_model_re_resolves_remap_when_effort_missing() {
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((current, Some(ReasoningEffort::Xhigh))),
+            switch: Some((current, Some(ReasoningEffort::Max))),
             effort_error: None,
         }
     );
@@ -191,7 +191,7 @@ fn effort_only_accepts_max_as_xhigh() {
         DeferredSwitchOutcome {
             switch: Some((
                 models.current.clone().unwrap(),
-                Some(ReasoningEffort::Xhigh)
+                Some(ReasoningEffort::Max)
             )),
             effort_error: None,
         }

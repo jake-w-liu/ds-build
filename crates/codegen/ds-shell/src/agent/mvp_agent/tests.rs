@@ -1272,7 +1272,7 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
     };
     let pinned = acp::SessionId::new("sess-pinned");
     let mut handle = make_test_handle("effort-model", false, None);
-    handle.reasoning_effort = Some(ReasoningEffort::Xhigh);
+    handle.reasoning_effort = Some(ReasoningEffort::Max);
     agent.sessions.borrow_mut().insert(pinned.clone(), handle);
     assert_eq!(
         read_effort(&agent.model_state(Some(&pinned))).as_deref(),
