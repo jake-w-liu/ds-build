@@ -2088,14 +2088,25 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                 },
             });
 
-        // DeepSeek Chat Completions thinking toggle: pair with reasoning_effort
-        // so the wire matches official docs (`thinking.type` + effort depth).
-        let thinking = req
-            .reasoning_effort
-            .map(|_| crate::ChatThinkingMode::enabled());
-        // Thinking mode ignores sampling params (DeepSeek docs); omit so the
-        // wire is honest and matches reasonix/dscode DeepSeek adapters.
-        let (temperature, top_p) = if thinking.is_some() {
+        // DeepSeek Chat Completions thinking (official docs + reasonix):
+        // - effort low|high|max → thinking.type=enabled + reasoning_effort
+        // - effort none|minimal → thinking.type=disabled, omit effort depth
+        // - effort unset → omit both (server default: thinking on)
+        // Never pair thinking.type=enabled with effort "none" (that was a bug).
+        let (thinking, reasoning_effort) = match req.reasoning_effort {
+            None => (None, None),
+            Some(crate::ReasoningEffort::None) | Some(crate::ReasoningEffort::Minimal) => {
+                (Some(crate::ChatThinkingMode::disabled()), None)
+            }
+            Some(e) => (Some(crate::ChatThinkingMode::enabled()), Some(e)),
+        };
+        // Thinking mode ignores sampling params (DeepSeek docs); omit only when
+        // thinking is enabled so disabled/off paths can still sample.
+        let thinking_enabled = matches!(
+            thinking.as_ref().map(|t| t.type_),
+            Some(crate::ChatThinkingType::Enabled)
+        );
+        let (temperature, top_p) = if thinking_enabled {
             (None, None)
         } else {
             (req.temperature, req.top_p)
@@ -2114,7 +2125,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             tool_choice,
             search_parameters: None,
             response_format,
-            reasoning_effort: req.reasoning_effort,
+            reasoning_effort,
             thinking,
             x_ds_conv_id: req.x_ds_conv_id,
             x_ds_req_id: req.x_ds_req_id,
@@ -2187,15 +2198,35 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             store: None,
             stream: None,
             stream_options: None,
-            temperature: req.temperature,
+            // Active thinking ignores sampling params (DeepSeek docs).
+            temperature: if thinking_effort_active(req.reasoning_effort) {
+                None
+            } else {
+                req.temperature
+            },
             text,
             tool_choice,
             tools: if tools.is_empty() { None } else { Some(tools) },
             top_logprobs: None,
-            top_p: req.top_p,
+            top_p: if thinking_effort_active(req.reasoning_effort) {
+                None
+            } else {
+                req.top_p
+            },
             truncation: None,
         }
     }
+}
+
+/// Effort levels that enable model thinking (not off/unset).
+fn thinking_effort_active(effort: Option<crate::ReasoningEffort>) -> bool {
+    matches!(
+        effort,
+        Some(crate::ReasoningEffort::Low)
+            | Some(crate::ReasoningEffort::Medium)
+            | Some(crate::ReasoningEffort::High)
+            | Some(crate::ReasoningEffort::Xhigh)
+    )
 }
 
 /// Build the [`rs::InputParam`] for a Responses API request.
@@ -3297,8 +3328,13 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
         system,
         tools,
         tool_choice,
-        temperature: req.temperature,
-        top_p: req.top_p,
+        // Thinking configs ignore sampling; keep wire honest.
+        temperature: if thinking.is_some() {
+            None
+        } else {
+            req.temperature
+        },
+        top_p: if thinking.is_some() { None } else { req.top_p },
         top_k: None,
         stream: None, // Set by caller
         stop_sequences: None,
@@ -5149,11 +5185,30 @@ mod tests {
         }
     }
 
+    /// OpenAI rejects `null` for this field on some models, so it must be omitted.
+    #[test]
+    fn test_chat_completion_request_omits_reasoning_effort_when_unset() {
+        let req =
+            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test");
+        let chat: ChatCompletionRequest = req.into();
+        let json = serde_json::to_value(&chat).unwrap();
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "reasoning_effort must be absent when unset; got: {json:#}",
+        );
+        assert!(
+            json.get("thinking").is_none(),
+            "thinking must be absent when reasoning_effort is unset; got: {json:#}",
+        );
+    }
+
+    /// When effort is the explicit None *variant*, we no longer emit wire
+    /// `reasoning_effort: "none"` with thinking enabled — that combination was
+    /// invalid for DeepSeek. See
+    /// `test_chat_completion_request_disables_thinking_for_effort_none`.
     #[test]
     fn test_chat_completion_request_carries_reasoning_effort_top_level() {
         for (variant, expected) in [
-            (crate::ReasoningEffort::None, "none"),
-            (crate::ReasoningEffort::Minimal, "minimal"),
             (crate::ReasoningEffort::Low, "low"),
             (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
@@ -5172,24 +5227,12 @@ mod tests {
                 Some(expected),
                 "{variant:?} should serialize as top-level reasoning_effort={expected:?}; got: {json:#}",
             );
+            assert_eq!(
+                json.pointer("/thinking/type").and_then(|v| v.as_str()),
+                Some("enabled"),
+                "{variant:?} must enable thinking; got: {json:#}",
+            );
         }
-    }
-
-    /// OpenAI rejects `null` for this field on some models, so it must be omitted.
-    #[test]
-    fn test_chat_completion_request_omits_reasoning_effort_when_unset() {
-        let req =
-            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test");
-        let chat: ChatCompletionRequest = req.into();
-        let json = serde_json::to_value(&chat).unwrap();
-        assert!(
-            json.get("reasoning_effort").is_none(),
-            "reasoning_effort must be absent when unset; got: {json:#}",
-        );
-        assert!(
-            json.get("thinking").is_none(),
-            "thinking must be absent when reasoning_effort is unset; got: {json:#}",
-        );
     }
 
     /// DeepSeek Chat Completions thinking toggle pairs with reasoning_effort
@@ -5224,6 +5267,39 @@ mod tests {
             json.get("top_p").is_none(),
             "top_p must be omitted under thinking mode; got: {json:#}"
         );
+    }
+
+    /// Effort none/minimal must disable thinking, not enable it with effort "none".
+    #[test]
+    fn test_chat_completion_request_disables_thinking_for_effort_none() {
+        for effort in [
+            crate::ReasoningEffort::None,
+            crate::ReasoningEffort::Minimal,
+        ] {
+            let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+                .with_model("deepseek-v4-pro");
+            let req = ConversationRequest {
+                reasoning_effort: Some(effort),
+                temperature: Some(0.5),
+                ..req
+            };
+            let chat: ChatCompletionRequest = req.into();
+            let json = serde_json::to_value(&chat).unwrap();
+            assert_eq!(
+                json.pointer("/thinking/type").and_then(|v| v.as_str()),
+                Some("disabled"),
+                "{effort:?} must set thinking.type=disabled; got: {json:#}"
+            );
+            assert!(
+                json.get("reasoning_effort").is_none(),
+                "{effort:?} must omit reasoning_effort depth; got: {json:#}"
+            );
+            assert_eq!(
+                json.get("temperature").and_then(|v| v.as_f64()),
+                Some(0.5),
+                "{effort:?} disabled thinking may keep temperature; got: {json:#}"
+            );
+        }
     }
 
     #[test]

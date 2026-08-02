@@ -813,18 +813,22 @@ impl SamplingClient {
             request.max_tokens = self.defaults.max_completion_tokens;
         }
 
-        // DeepSeek thinking mode ignores temperature/top_p; do not re-inject
-        // sampler defaults when thinking is active (keeps wire cache-honest).
-        if request.thinking.is_none() {
+        // DeepSeek thinking mode ignores temperature/top_p only when
+        // thinking.type=enabled. Disabled / unset thinking may still sample.
+        let thinking_on = matches!(
+            request.thinking.as_ref().map(|t| t.type_),
+            Some(ds_sampling_types::ChatThinkingType::Enabled)
+        );
+        if thinking_on {
+            request.temperature = None;
+            request.top_p = None;
+        } else {
             if request.temperature.is_none() {
                 request.temperature = self.defaults.temperature;
             }
             if request.top_p.is_none() {
                 request.top_p = self.defaults.top_p;
             }
-        } else {
-            request.temperature = None;
-            request.top_p = None;
         }
 
         Ok(request)
@@ -1107,14 +1111,30 @@ impl SamplingClient {
             request.inner.model = Some(self.defaults.model.clone());
         }
 
-        // Apply temperature default if not specified
-        if request.inner.temperature.is_none() {
-            request.inner.temperature = self.defaults.temperature;
-        }
-
-        // Apply top_p default if not specified
-        if request.inner.top_p.is_none() {
-            request.inner.top_p = self.defaults.top_p;
+        // Active thinking ignores sampling; do not re-inject defaults after
+        // ConversationRequest conversion cleared them.
+        let thinking_on = request
+            .inner
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort)
+            .is_some_and(|e| {
+                !matches!(
+                    e,
+                    ds_sampling_types::rs::ReasoningEffort::None
+                        | ds_sampling_types::rs::ReasoningEffort::Minimal
+                )
+            });
+        if thinking_on {
+            request.inner.temperature = None;
+            request.inner.top_p = None;
+        } else {
+            if request.inner.temperature.is_none() {
+                request.inner.temperature = self.defaults.temperature;
+            }
+            if request.inner.top_p.is_none() {
+                request.inner.top_p = self.defaults.top_p;
+            }
         }
 
         // Apply max_output_tokens default if not specified
@@ -1495,14 +1515,18 @@ impl SamplingClient {
                 .unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS);
         }
 
-        // Apply temperature default if not specified
-        if request.inner.temperature.is_none() {
-            request.inner.temperature = self.defaults.temperature;
-        }
-
-        // Apply top_p default if not specified
-        if request.inner.top_p.is_none() {
-            request.inner.top_p = self.defaults.top_p;
+        // When Messages thinking is configured, do not re-inject sampling.
+        let thinking_on = request.inner.thinking.is_some();
+        if thinking_on {
+            request.inner.temperature = None;
+            request.inner.top_p = None;
+        } else {
+            if request.inner.temperature.is_none() {
+                request.inner.temperature = self.defaults.temperature;
+            }
+            if request.inner.top_p.is_none() {
+                request.inner.top_p = self.defaults.top_p;
+            }
         }
 
         Ok(())
@@ -1802,19 +1826,26 @@ impl SamplingClient {
             request.model = Some(self.defaults.model.clone());
         }
 
-        // Sampling params are no-ops under DeepSeek thinking mode; leave them
-        // unset when reasoning_effort is present so Chat Completions conversion
-        // can omit them cleanly.
-        if request.reasoning_effort.is_none() {
+        // Sampling params are no-ops under active DeepSeek thinking (effort
+        // low|high|max). Leave them free when effort is unset or explicitly off
+        // (none|minimal → thinking.type=disabled on chat wire).
+        let thinking_on = matches!(
+            request.reasoning_effort,
+            Some(ds_sampling_types::ReasoningEffort::Low)
+                | Some(ds_sampling_types::ReasoningEffort::Medium)
+                | Some(ds_sampling_types::ReasoningEffort::High)
+                | Some(ds_sampling_types::ReasoningEffort::Xhigh)
+        );
+        if thinking_on {
+            request.temperature = None;
+            request.top_p = None;
+        } else {
             if request.temperature.is_none() {
                 request.temperature = self.defaults.temperature;
             }
             if request.top_p.is_none() {
                 request.top_p = self.defaults.top_p;
             }
-        } else {
-            request.temperature = None;
-            request.top_p = None;
         }
 
         if request.max_output_tokens.is_none() {

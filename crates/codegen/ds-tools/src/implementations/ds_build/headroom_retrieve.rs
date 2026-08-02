@@ -116,7 +116,7 @@ impl ds_tool_runtime::Tool for HeadroomRetrieveTool {
                 } else {
                     "Headroom compression is currently off (store may still hold older entries). \
                      The original may have been evicted, or was never compressed. \
-                     Enable with `/headroom on` or DS_HEADROOM=1 to compress new results."
+                     Re-enable with `/headroom on` (or unset DS_HEADROOM / set DS_HEADROOM=1)."
                         .to_string()
                 };
                 Ok(ToolOutput::Text(
