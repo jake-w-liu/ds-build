@@ -1,10 +1,14 @@
 //! Local Headroom compression for large tool results.
 //!
-//! When enabled (`DS_HEADROOM=1` or [`set_enabled`]), large tool-result bodies
-//! in the *request clone* are replaced with a short preview + hash marker.
-//! Exact originals stay in a process-local store and can be pulled back via the
-//! `headroom_retrieve` tool. Conversation state on disk / in the actor is not
-//! mutated — only the outbound `ConversationRequest` items.
+//! When enabled (default, or `DS_HEADROOM=1` / [`set_enabled`]), large
+//! tool-result bodies in the *request clone* are replaced with a short preview
+//! + hash marker. Exact originals stay in a process-local store and can be
+//! pulled back via the `headroom_retrieve` tool. Conversation state on disk /
+//! in the actor is not mutated — only the outbound `ConversationRequest` items.
+//!
+//! Default-on for DeepSeek fitness: snipping oversized tool results keeps the
+//! prompt prefix smaller and the automatic disk cache warmer (cf. reasonix
+//! `tool_result_snip_ratio`). Opt out with `DS_HEADROOM=0` or `/headroom off`.
 //!
 //! Ported from cloud-code's built-in Headroom (preview + store + retrieve).
 
@@ -15,7 +19,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use ds_token_estimation::estimate_tokens;
 use sha2::{Digest, Sha256};
 
-/// Env: enable Headroom for this process (`1`/`true`/`on`).
+/// Env: Headroom toggle for this process.
+///
+/// Unset → **enabled** (DeepSeek-optimized default). Explicit `0`/`false`/`off`
+/// disables; `1`/`true`/`on` enables.
 pub const ENV_HEADROOM: &str = "DS_HEADROOM";
 /// Env: minimum tool-result size (bytes) before compression is attempted.
 pub const ENV_MIN_CHARS: &str = "DS_HEADROOM_MIN_CHARS";
@@ -136,26 +143,43 @@ fn with_store<R>(f: impl FnOnce(&mut Store) -> R) -> R {
 }
 
 /// Whether Headroom is currently enabled.
+///
+/// Default is **on** when `DS_HEADROOM` is unset, so long DeepSeek sessions
+/// snip large tool results without requiring config. Set `DS_HEADROOM=0` to
+/// disable.
 pub fn is_enabled() -> bool {
     if ENABLED_SET.load(Ordering::Relaxed) {
         return ENABLED_OVERRIDE.load(Ordering::Relaxed);
     }
-    env_truthy(ENV_HEADROOM)
+    env_headroom_enabled()
+}
+
+/// Parse `DS_HEADROOM`: unset → true; explicit falsy → false; otherwise true.
+fn env_headroom_enabled() -> bool {
+    match std::env::var(ENV_HEADROOM) {
+        Err(_) => true,
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !matches!(
+                t.as_str(),
+                "0" | "false" | "no" | "off" | "disable" | "disabled"
+            )
+        }
+    }
 }
 
 /// Force enable/disable for this process (slash `/headroom on|off`).
 pub fn set_enabled(enabled: bool) {
     ENABLED_SET.store(true, Ordering::Relaxed);
     ENABLED_OVERRIDE.store(enabled, Ordering::Relaxed);
-    if enabled {
-        // Also set env so child subagents inherit when possible.
-        // SAFETY: single-threaded toggle from slash command / tests; process-wide flag.
-        unsafe {
+    // Propagate to env so child subagents inherit. Use "0" for off (not
+    // remove_var) because unset now means default-on.
+    // SAFETY: single-threaded toggle from slash command / tests; process-wide flag.
+    unsafe {
+        if enabled {
             std::env::set_var(ENV_HEADROOM, "1");
-        }
-    } else {
-        unsafe {
-            std::env::remove_var(ENV_HEADROOM);
+        } else {
+            std::env::set_var(ENV_HEADROOM, "0");
         }
     }
 }
@@ -826,6 +850,27 @@ mod tests {
         set_enabled(true);
         set_min_chars_override(50);
         set_keep_lines_override(6);
+    }
+
+    #[test]
+    fn default_enabled_when_env_unset() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        // Clear any process override and env so default path is hit.
+        unsafe {
+            std::env::remove_var(ENV_HEADROOM);
+        }
+        assert!(
+            is_enabled(),
+            "DeepSeek-optimized default: headroom on when DS_HEADROOM unset"
+        );
+        unsafe {
+            std::env::set_var(ENV_HEADROOM, "0");
+        }
+        assert!(!is_enabled(), "DS_HEADROOM=0 must disable");
+        unsafe {
+            std::env::remove_var(ENV_HEADROOM);
+        }
     }
 
     fn big_lines(n: usize, mid_secret: Option<(usize, &str)>) -> String {

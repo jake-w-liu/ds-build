@@ -1844,18 +1844,20 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
             }
             ConversationItem::Assistant(_) => {
                 let mut msg = conversation_item_to_chat_message(item);
-                if !pending_reasoning.is_empty() {
-                    msg.reasoning_content = Some(pending_reasoning.join("\n"));
-                    pending_reasoning.clear();
-                } else if !msg.tool_calls.is_empty() {
-                    // DeepSeek thinking mode 400s assistant tool_calls turns
-                    // when the reasoning_content KEY is absent from the JSON
-                    // ("must be passed back"). Empty string is accepted; only
-                    // a missing key fails. Always emit the field on tool_calls
-                    // turns (matches official tool-call + thinking docs and
-                    // deepseek-reasonix wire behavior).
-                    msg.reasoning_content = Some(String::new());
+                // DeepSeek thinking mode (official docs + reasonix):
+                // - tool_calls turns MUST carry the reasoning_content JSON key
+                //   (empty string accepted; missing key → 400).
+                // - non-tool turns: CoT need not re-enter the context and is
+                //   ignored by the API if sent — omit it to keep the prompt
+                //   smaller and the prefix-cache tail cheaper.
+                if !msg.tool_calls.is_empty() {
+                    msg.reasoning_content = Some(if pending_reasoning.is_empty() {
+                        String::new()
+                    } else {
+                        pending_reasoning.join("\n")
+                    });
                 }
+                pending_reasoning.clear();
                 out.push(msg);
             }
             ConversationItem::BackendToolCall(_) => {
@@ -2053,12 +2055,15 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
             None
         } else {
-            Some(
-                req.tools
-                    .into_iter()
-                    .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
-                    .collect(),
-            )
+            // Stable alphabetical order keeps the tools prefix byte-stable for
+            // DeepSeek's automatic prefix cache when MCP/builtin sets are rebuilt.
+            let mut defs: Vec<ToolDefinition> = req
+                .tools
+                .into_iter()
+                .map(|t| ToolDefinition::function(t.name, t.description, t.parameters))
+                .collect();
+            defs.sort_by(|a, b| a.function.name.cmp(&b.function.name));
+            Some(defs)
         };
 
         // only set `tool_choice` when there are `tools` to avoid OpenAI client errors
@@ -2088,13 +2093,20 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         let thinking = req
             .reasoning_effort
             .map(|_| crate::ChatThinkingMode::enabled());
+        // Thinking mode ignores sampling params (DeepSeek docs); omit so the
+        // wire is honest and matches reasonix/dscode DeepSeek adapters.
+        let (temperature, top_p) = if thinking.is_some() {
+            (None, None)
+        } else {
+            (req.temperature, req.top_p)
+        };
 
         ChatCompletionRequest {
             model: req.model,
             messages,
-            temperature: req.temperature,
+            temperature,
             max_tokens: req.max_output_tokens,
-            top_p: req.top_p,
+            top_p,
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
@@ -4731,8 +4743,9 @@ mod tests {
         assert!(chat_req.tools.is_some());
         let tools = chat_req.tools.unwrap();
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].function.name, "read_file");
-        assert_eq!(tools[1].function.name, "bash");
+        // Alphabetical for DeepSeek prefix-cache stability.
+        assert_eq!(tools[0].function.name, "bash");
+        assert_eq!(tools[1].function.name, "read_file");
     }
 
     #[test]
@@ -5187,6 +5200,8 @@ mod tests {
             .with_model("deepseek-v4-flash");
         let req = ConversationRequest {
             reasoning_effort: Some(crate::ReasoningEffort::High),
+            temperature: Some(0.7),
+            top_p: Some(0.95),
             ..req
         };
         let chat: ChatCompletionRequest = req.into();
@@ -5201,6 +5216,43 @@ mod tests {
             Some("enabled"),
             "thinking.type=enabled must accompany reasoning_effort; got: {json:#}",
         );
+        assert!(
+            json.get("temperature").is_none(),
+            "temperature must be omitted under thinking mode; got: {json:#}"
+        );
+        assert!(
+            json.get("top_p").is_none(),
+            "top_p must be omitted under thinking mode; got: {json:#}"
+        );
+    }
+
+    #[test]
+    fn chat_completion_request_sorts_tools_for_prefix_cache_stability() {
+        let req = ConversationRequest {
+            tools: vec![
+                ToolSpec {
+                    name: "zeta".into(),
+                    description: Some("z".into()),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+                ToolSpec {
+                    name: "alpha".into(),
+                    description: Some("a".into()),
+                    parameters: serde_json::json!({"type": "object"}),
+                },
+            ],
+            ..ConversationRequest::from_items(vec![ConversationItem::user("hi")])
+                .with_model("deepseek-v4-pro")
+        };
+        let chat: ChatCompletionRequest = req.into();
+        let names: Vec<_> = chat
+            .tools
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
     }
 
     /// DeepSeek thinking + tool_calls requires the reasoning_content KEY on the
@@ -8515,7 +8567,8 @@ mod tests {
     }
 
     #[test]
-    fn conversation_to_chat_messages_folds_reasoning_into_following_assistant() {
+    fn conversation_to_chat_messages_omits_reasoning_on_non_tool_assistant() {
+        // DeepSeek multi-turn without tool calls: CoT need not re-enter context.
         let items = vec![
             ConversationItem::user("hi"),
             ConversationItem::Reasoning(rs::ReasoningItem {
@@ -8540,14 +8593,13 @@ mod tests {
         ];
 
         let msgs = conversation_to_chat_messages(items);
-        assert_eq!(msgs.len(), 2, "user + assistant; reasoning items folded");
+        assert_eq!(msgs.len(), 2, "user + assistant; reasoning items folded away");
         assert_eq!(msgs[0].role, Role::User);
         assert_eq!(msgs[1].role, Role::Assistant);
         assert_eq!(msgs[1].text_content(), "answer");
-        assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
-            Some("thinking step 1\nthinking step 2"),
-            "reasoning text joined and attached to the assistant"
+        assert!(
+            msgs[1].reasoning_content.is_none(),
+            "non-tool assistant must omit reasoning_content for DeepSeek multi-turn cost fitness"
         );
     }
 
@@ -8615,15 +8667,14 @@ mod tests {
             None,
             "reasoning lands on the real assistant, not the synthetic BTC message"
         );
-        // The real assistant turn keeps the reasoning that preceded the
-        // backend tool call.
+        // Chat Completions / DeepSeek: only tool_calls assistants carry
+        // reasoning_content. A plain-text final answer omits CoT (Responses
+        // path still keeps reasoning siblings via build_responses_input).
         assert_eq!(msgs[2].role, Role::Assistant);
         assert_eq!(msgs[2].text_content(), "answer");
-        assert_eq!(
-            msgs[2].reasoning_content.as_deref(),
-            Some("thinking before search"),
-            "reasoning preceding a BackendToolCall folds onto the following \
-             assistant rather than being dropped"
+        assert!(
+            msgs[2].reasoning_content.is_none(),
+            "non-tool final assistant omits reasoning_content on chat wire"
         );
     }
 
@@ -8952,10 +9003,11 @@ mod tests {
         let msgs = conversation_to_chat_messages(siblings);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, Role::Assistant);
-        assert_eq!(
-            msgs[0].reasoning_content.as_deref(),
-            Some("step-by-step"),
-            "reconstructed sibling folded onto assistant.reasoning_content"
+        // Non-tool assistant: DeepSeek multi-turn omits CoT on the chat wire
+        // (siblings still exist for Responses path / local history).
+        assert!(
+            msgs[0].reasoning_content.is_none(),
+            "legacy reasoning sibling is not re-sent on non-tool chat assistant"
         );
     }
 

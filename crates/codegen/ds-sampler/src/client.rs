@@ -813,12 +813,18 @@ impl SamplingClient {
             request.max_tokens = self.defaults.max_completion_tokens;
         }
 
-        if request.temperature.is_none() {
-            request.temperature = self.defaults.temperature;
-        }
-
-        if request.top_p.is_none() {
-            request.top_p = self.defaults.top_p;
+        // DeepSeek thinking mode ignores temperature/top_p; do not re-inject
+        // sampler defaults when thinking is active (keeps wire cache-honest).
+        if request.thinking.is_none() {
+            if request.temperature.is_none() {
+                request.temperature = self.defaults.temperature;
+            }
+            if request.top_p.is_none() {
+                request.top_p = self.defaults.top_p;
+            }
+        } else {
+            request.temperature = None;
+            request.top_p = None;
         }
 
         Ok(request)
@@ -1796,12 +1802,19 @@ impl SamplingClient {
             request.model = Some(self.defaults.model.clone());
         }
 
-        if request.temperature.is_none() {
-            request.temperature = self.defaults.temperature;
-        }
-
-        if request.top_p.is_none() {
-            request.top_p = self.defaults.top_p;
+        // Sampling params are no-ops under DeepSeek thinking mode; leave them
+        // unset when reasoning_effort is present so Chat Completions conversion
+        // can omit them cleanly.
+        if request.reasoning_effort.is_none() {
+            if request.temperature.is_none() {
+                request.temperature = self.defaults.temperature;
+            }
+            if request.top_p.is_none() {
+                request.top_p = self.defaults.top_p;
+            }
+        } else {
+            request.temperature = None;
+            request.top_p = None;
         }
 
         if request.max_output_tokens.is_none() {

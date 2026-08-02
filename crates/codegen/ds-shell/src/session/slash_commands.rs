@@ -114,7 +114,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
     BuiltinCommand {
         name: "headroom",
-        description: "Compress large tool results in prompts (token savings); use headroom_retrieve for exact content",
+        description: "Compress large tool results in prompts (on by default for DeepSeek cache fitness); headroom_retrieve for exact content",
         argument_hint: Some("on|off|status|stats"),
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
