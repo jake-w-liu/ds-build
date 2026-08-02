@@ -1117,7 +1117,7 @@ impl SamplingClient {
             .inner
             .reasoning
             .as_ref()
-            .and_then(|r| r.effort)
+            .and_then(|r| r.effort.as_ref())
             .is_some_and(|e| {
                 !matches!(
                     e,
