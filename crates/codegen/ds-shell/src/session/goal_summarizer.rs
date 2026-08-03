@@ -175,7 +175,7 @@ impl ChannelSpawner {
                 capability_mode: Some(SubagentCapabilityMode::ReadOnly),
                 ..Default::default()
             },
-            run_in_background: false,
+            run_in_background: Some(false),
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
             fork_context: false,

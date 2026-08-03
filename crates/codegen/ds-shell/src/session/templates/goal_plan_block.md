@@ -19,9 +19,11 @@ Plan: {PLAN_PATH}
   the shipped code in-repo, and write the captured run output to your scratch dir
   (the one the goal rules name; never shared `/tmp/...`). Fix any missing
   observation before calling the goal complete.
-- For `math` goals: use `attacker-math` and/or direct computation to challenge
-  the final artifact independently. Cover every requested result and the
-  acceptance-critical reasoning behind it; check domains, signs, units,
+- For `math` goals: spawn a PARALLEL batch of `attacker-math` critics — one
+  per requested result/regime/claim (up to 24 concurrently, `background: true`,
+  then collect all outputs before gating) — and/or use direct computation to
+  challenge the final artifact independently. Cover every requested result and
+  the acceptance-critical reasoning behind it; check domains, signs, units,
   conditions, regimes, and numerical error where applicable. Keep supporting
   evidence in `{SCRATCH}` when useful, but do not create ceremony the task does
   not require.

@@ -156,9 +156,16 @@ pub fn read_usage(path: &std::path::Path) -> Result<Vec<UsageRow>> {
     Ok(out)
 }
 
-/// Append a wire row + usage row to the capture files.
+/// Append a wire row + usage row to the capture files. Serialized with a
+/// process-wide mutex: with parallel subagent traffic the mock serves many
+/// requests concurrently, and `writeln!` on an O_APPEND fd is not atomic for
+/// multi-write buffers — interleaved rows corrupt wire.jsonl.
 fn persist(out_dir: &std::path::Path, wire: &WireRequest, row: Option<&UsageRow>) -> Result<()> {
     use std::io::Write;
+    static PERSIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = PERSIST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut w = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -298,6 +305,36 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Collect subagent ids from tool results in the request conversation
+/// (spawn results carry `subagent_id: <uuid>`); de-duped, order preserved.
+fn harvest_subagent_ids(body: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    let Some(messages) = body.get("messages").and_then(|m| m.as_array()) else {
+        return ids;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("tool") {
+            continue;
+        }
+        let content = match msg.get("content") {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => continue,
+        };
+        for chunk in content.split("subagent_id:") {
+            let id = chunk
+                .trim_start()
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                .next()
+                .unwrap_or("");
+            if id.len() == 36 && id.chars().filter(|c| *c == '-').count() == 4 && !ids.contains(&id.to_string()) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 /// Mock-mode request handling (scripted, deterministic).
 async fn mock_request(
     cfg: &ServerConfig,
@@ -357,6 +394,18 @@ async fn mock_request(
         };
         match cfg.script.get(idx) {
             Some(MockItem::Tool { name, args }) => {
+                let mut args = args.clone();
+                // Harvest subagent ids from executed spawn results so a
+                // scripted get_command_or_subagent_output can collect them.
+                if name == "get_command_or_subagent_output" {
+                    let ids = harvest_subagent_ids(body);
+                    if let Some(list) = args.get_mut("task_ids").and_then(|v| v.as_array_mut()) {
+                        *list = ids
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect();
+                    }
+                }
                 let call_id = format!("call_h_{idx}");
                 (
                     String::new(),
@@ -370,10 +419,32 @@ async fn mock_request(
                     "tool_calls",
                 )
             }
+            Some(MockItem::Batch(items)) => {
+                // A true parallel batch: ALL tool calls in ONE response.
+                let calls: Vec<Value> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(j, (name, args))| {
+                        json!({
+                            "index": j,
+                            "id": format!("call_h_{idx}_{j}"),
+                            "type": "function",
+                            "function": { "name": name, "arguments": args.to_string() }
+                        })
+                    })
+                    .collect();
+                (
+                    String::new(),
+                    format!("reasoning step {idx}: plan the parallel batch"),
+                    Some(Value::Array(calls)),
+                    "tool_calls",
+                )
+            }
             Some(MockItem::Text { text }) => (text.clone(), String::new(), None::<Value>, "stop"),
             None => ("ok".to_string(), String::new(), None::<Value>, "stop"),
         }
     } else {
+        // Subagent / aux conversations: plain completion.
         ("ok".to_string(), String::new(), None::<Value>, "stop")
     };
 

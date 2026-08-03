@@ -9,7 +9,7 @@
 //!   [`ds_headroom::retrieve`] / [`ds_headroom::retrieve_formatted`];
 //! - the completion gate drives [`ds_tools::verification::completion::check_completion`].
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::mock::WireRequest;
 
@@ -288,6 +288,127 @@ pub fn check_conversation_to_chat_messages_reasoning_rule() -> Failures {
     failures
 }
 
+// ---------------------------------------------------------------------------
+// Parallel attacker batch (orchestration upgrade)
+// ---------------------------------------------------------------------------
+
+/// Assert the parallel-batch contract on captured wire data: ALL `n`
+/// attacker-math spawns appear as tool_calls in ONE assistant message (a
+/// single response = a true parallel batch), each with
+/// `run_in_background: true`; a follow-up `get_command_or_subagent_output`
+/// collects all `n` subagent ids.
+pub fn check_parallel_attackers(wire: &[WireRequest], conv_id: &str, n: usize) -> Failures {
+    let mut failures = Vec::new();
+    let mut batch: Vec<&Value> = Vec::new();
+    for w in wire {
+        if w.conv_id != conv_id || !w.path.ends_with("/chat/completions") {
+            continue;
+        }
+        let Some(messages) = w.body.get("messages").and_then(|m| m.as_array()) else {
+            continue;
+        };
+        for msg in messages {
+            let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            let spawns: Vec<&Value> = tcs
+                .iter()
+                .filter(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        == Some("spawn_subagent")
+                })
+                .collect();
+            if spawns.len() > batch.len() {
+                batch = spawns; // largest single-response spawn set
+            }
+        }
+    }
+    if batch.len() < n {
+        failures.push(format!(
+            "parallel batch: expected {n} spawn tool calls in ONE response, found {}",
+            batch.len()
+        ));
+        return failures;
+    }
+    for (i, tc) in batch.iter().enumerate() {
+        let args = tc
+            .get("function")
+            .and_then(|f| f.get("arguments"))
+            .and_then(|a| a.as_str())
+            .and_then(|a| serde_json::from_str::<Value>(a).ok())
+            .unwrap_or(Value::Null);
+        if args.get("subagent_type").and_then(|v| v.as_str()) != Some("attacker-math") {
+            failures.push(format!("spawn #{i}: subagent_type != attacker-math ({args})"));
+        }
+        if args.get("run_in_background").and_then(|v| v.as_bool()) != Some(true) {
+            failures.push(format!("spawn #{i}: run_in_background != true ({args})"));
+        }
+    }
+    // All n ids collected by a get_command_or_subagent_output call.
+    let mut collected: Vec<String> = Vec::new();
+    for w in wire {
+        if w.conv_id != conv_id {
+            continue;
+        }
+        if let Some(messages) = w.body.get("messages").and_then(|m| m.as_array()) {
+            for msg in messages {
+                if let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                    for tc in tcs {
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("");
+                        if name == "get_command_or_subagent_output" {
+                            if let Some(args) = tc
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .and_then(|a| a.as_str())
+                                .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                            {
+                                if let Some(ids) = args.get("task_ids").and_then(|v| v.as_array()) {
+                                    collected.extend(
+                                        ids.iter().filter_map(|v| v.as_str().map(str::to_string)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Every harvested spawn-result id must be in the collected set.
+    let result_ids: std::collections::HashSet<String> = tool_results_for_conv(wire, conv_id)
+        .iter()
+        .flat_map(|(_, c)| harvest_ids_from_text(c))
+        .collect();
+    if result_ids.is_empty() {
+        failures.push("parallel batch: no subagent ids harvested from spawn results".into());
+    } else {
+        for id in &result_ids {
+            if !collected.contains(id) {
+                failures.push(format!("parallel batch: subagent {id} never collected by fetch"));
+            }
+        }
+    }
+    if batch.is_empty() {
+        failures.push("parallel batch: no request carried any spawn_subagent call".into());
+    }
+    failures
+}
+
+/// Extract 36-char uuid-ish tokens from a text (spawn result ids).
+fn harvest_ids_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '-')))
+        .filter(|t| t.len() == 36 && t.chars().filter(|c| *c == '-').count() == 4)
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +532,59 @@ mod tests {
     #[test]
     fn shipped_serializer_places_reasoning_on_tool_calls_only() {
         assert!(check_conversation_to_chat_messages_reasoning_rule().is_empty());
+    }
+
+    #[test]
+    fn parallel_batch_check_accepts_batch_and_rejects_serial() {
+        let id = |n: usize| format!("019fc7a1-0000-0000-0000-{n:012}");
+        // Batch request: 2 spawns in one request.
+        let batch = req(
+            1,
+            "c",
+            json!({"messages": [{"role": "assistant", "tool_calls": [
+                {"id": "t1", "function": {"name": "spawn_subagent", "arguments": json!({
+                    "prompt": "check A", "description": "a", "subagent_type": "attacker-math",
+                    "run_in_background": true}).to_string()}},
+                {"id": "t2", "function": {"name": "spawn_subagent", "arguments": json!({
+                    "prompt": "check B", "description": "b", "subagent_type": "attacker-math",
+                    "run_in_background": true}).to_string()}}
+            ]}]}),
+        );
+        // Follow-up request carrying the two spawn tool results.
+        let results = req(
+            2,
+            "c",
+            json!({"messages": [
+                {"role": "tool", "tool_call_id": "t1",
+                 "content": format!("Subagent started in background. subagent_id: {}", id(1))},
+                {"role": "tool", "tool_call_id": "t2",
+                 "content": format!("Subagent started in background. subagent_id: {}", id(2))}
+            ]}),
+        );
+        // Fetch collecting both.
+        let fetch = req(
+            3,
+            "c",
+            json!({"messages": [{"role": "assistant", "tool_calls": [
+                {"id": "f1", "function": {"name": "get_command_or_subagent_output", "arguments": json!({
+                    "task_ids": [id(1), id(2)], "timeout_ms": 120000}).to_string()}}
+            ]}]}),
+        );
+        let failures = check_parallel_attackers(&[batch.clone(), results.clone(), fetch], "c", 2);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // Serial violation: only 1 spawn; fetch collects nothing.
+        let serial = req(
+            4,
+            "c",
+            json!({"messages": [{"role": "assistant", "tool_calls": [
+                {"id": "s1", "function": {"name": "spawn_subagent", "arguments": json!({
+                    "prompt": "x", "description": "x", "subagent_type": "attacker-math",
+                    "run_in_background": true}).to_string()}}
+            ]}]}),
+        );
+        let f = check_parallel_attackers(&[serial], "c", 2);
+        assert!(!f.is_empty());
+        assert!(f.iter().any(|e| e.contains("expected 2 spawn tool calls")));
     }
 }

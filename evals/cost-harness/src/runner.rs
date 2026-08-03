@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::assertions::{
     check_completion_gate, check_compression_reduction, check_conversation_to_chat_messages_reasoning_rule,
-    check_headroom_wire_and_roundtrip, check_wire_reasoning_rules,
+    check_headroom_wire_and_roundtrip, check_parallel_attackers, check_wire_reasoning_rules,
 };
 use crate::mock::{RecordingServer, ServerConfig};
 use crate::report::{
@@ -195,12 +195,18 @@ async fn run_scenario(
 
     let markers_ok = check_markers(&sc, &invocation_outputs, &mut failure_notes);
     let mut wire_assertions = check_wire_reasoning_rules(&wire);
-    // Headroom wire-marker contract applies to scenarios whose big read
+    // Headroom wire-marker contract applies only to scenarios whose big read
     // reaches a request built by the request-builder path. The compaction
-    // scenario's summary replaces the tool result before it is re-sent, so
-    // the marker check would be vacuous there — its contract is "compaction
-    // fires + session completes" (asserted below).
-    if sc.id != "compaction" {
+    // scenario's summary replaces the tool result before it is re-sent, and
+    // parallel_attackers never reads the fixture — both would make the marker
+    // check vacuous. Their contracts are asserted separately.
+    let scripts_read_file = sc.script.iter().any(|i| {
+        matches!(
+            i,
+            crate::scenarios::MockItem::Tool { name, .. } if name == "read_file"
+        )
+    });
+    if scripts_read_file {
         if let Some(formatted) = &formatted_fixture_a {
             wire_assertions.extend(check_headroom_wire_and_roundtrip(
                 &wire,
@@ -212,6 +218,16 @@ async fn run_scenario(
     }
     if sc.id == "round_trip" {
         wire_assertions.extend(check_round_trip_specifics(&wire, &session_id, &run_dir));
+    }
+    if sc.id == "parallel_attackers" {
+        let n = sc
+            .script
+            .iter()
+            .filter(|i| {
+                matches!(i, crate::scenarios::MockItem::Tool { name, .. } if name == "spawn_subagent")
+            })
+            .count();
+        wire_assertions.extend(check_parallel_attackers(&wire, &session_id, n));
     }
     if sc.assert_compaction {
         let fired = rows.iter().any(|r| r.is_compaction());

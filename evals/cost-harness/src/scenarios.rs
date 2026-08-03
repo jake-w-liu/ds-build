@@ -14,6 +14,8 @@ pub enum MockItem {
     /// Emit a `tool_calls` stream (with reasoning_content delta) for `name`
     /// with `args`. The agent executes the tool for real.
     Tool { name: String, args: serde_json::Value },
+    /// Emit MULTIPLE tool calls in ONE response — a true parallel batch.
+    Batch(Vec<(String, serde_json::Value)>),
     /// Emit a plain text stream (no reasoning).
     Text { text: String },
 }
@@ -274,6 +276,60 @@ pub fn big_tool(target: &str) -> Scenario {
     }
 }
 
+/// Scenario (e): parallel adversarial review — the upgrade's core proof.
+/// One model turn spawns N attacker-math critics in a SINGLE parallel batch
+/// (run_in_background=true, one scoped assignment each), then one turn
+/// collects ALL outputs before the final text. Asserts: all N spawns in one
+/// request, attacker-* background respected (no limit rejection), all N ids
+/// harvested into the fetch call, session completes.
+pub fn parallel_attackers(target: &str, n: usize) -> Scenario {
+    let fa = big_fixture(target);
+    let spawns: Vec<(String, serde_json::Value)> = (0..n)
+        .map(|i| {
+            (
+                "spawn_subagent".to_string(),
+                json!({
+                    "prompt": format!(
+                        "Scoped adversarial review #{i}: independently recompute the final result \
+                         for fixture_a.txt line {} (the {target} line) — residual, units, regimes. \
+                         Report verdict + evidence only.",
+                        i + 1
+                    ),
+                    "description": format!("parallel attacker #{i}"),
+                    "subagent_type": "attacker-math",
+                    "run_in_background": true
+                }),
+            )
+        })
+        .collect();
+    let mut script = vec![MockItem::Batch(spawns)];
+    script.push(MockItem::tool(
+        "get_command_or_subagent_output",
+        json!({
+            "task_ids": ["__SUBAGENT_IDS__"],
+            "timeout_ms": 300_000
+        }),
+    ));
+    script.push(MockItem::text("PARALLEL_ATTACKERS_DONE"));
+    Scenario {
+        id: "parallel_attackers",
+        context_window: 1_000_000,
+        script,
+        user_turns: vec![format!(
+            "Spawn {n} attacker-math critics IN PARALLEL (background), one per scoped check on \
+             the file {}, then collect every output before replying: PARALLEL_ATTACKERS_DONE",
+            fa_path()
+        )],
+        max_turns_per_invocation: 12,
+        expected_markers: vec!["PARALLEL_ATTACKERS_DONE".into()],
+        fixtures: vec![("fixture_a.txt".into(), fa)],
+        assert_compaction: false,
+        min_usage_rows: 8,
+        subagents: true,
+        web_search: false,
+    }
+}
+
 pub fn all_scenarios() -> Vec<Scenario> {
     // The retrieve hash for round_trip is computed at run time from the real
     // fixture content via the shipped ds_headroom functions; the placeholder
@@ -284,6 +340,7 @@ pub fn all_scenarios() -> Vec<Scenario> {
         compaction("TARGETWORD_C"),
         round_trip("TARGETWORD_R", "<hash-computed-at-runtime>"),
         big_tool("TARGETWORD_B"),
+        parallel_attackers("TARGETWORD_P", 4),
     ]
 }
 
@@ -323,6 +380,13 @@ pub fn substitute_scenario(mut sc: Scenario, cwd: &std::path::Path, hash: &str) 
                 let s = subst(&s).replace("<hash-computed-at-runtime>", hash);
                 *args = serde_json::from_str(&s).expect("substitution keeps valid JSON");
             }
+            MockItem::Batch(items) => {
+                for (_, args) in items {
+                    let s = serde_json::to_string(args).unwrap();
+                    let s = subst(&s).replace("<hash-computed-at-runtime>", hash);
+                    *args = serde_json::from_str(&s).expect("substitution keeps valid JSON");
+                }
+            }
             MockItem::Text { text } => *text = subst(text),
         }
     }
@@ -358,8 +422,11 @@ mod tests {
     fn scenario_scripts_have_tool_then_text_shape() {
         for sc in all_scenarios() {
             assert!(
-                matches!(sc.script.first(), Some(MockItem::Tool { .. })),
-                "{}: first script item must be a tool call",
+                matches!(
+                    sc.script.first(),
+                    Some(MockItem::Tool { .. }) | Some(MockItem::Batch(_))
+                ),
+                "{}: first script item must be a tool call or parallel batch",
                 sc.id
             );
             assert!(

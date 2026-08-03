@@ -214,8 +214,10 @@ only checks that something exists, compiles, or parses is evidence, not gating.
 **Math/physics research correctness.** When the deliverable contains
 mathematical derivations, physical formulations, simulations, proofs, or
 quantitative results, set `## Goal kind` to `math`. Include one `gating` step
-that uses `attacker-math` or direct independent computation against the
-actual final artifact. It must cover every requested result and the consequential
+that spawns a PARALLEL batch of `attacker-math` critics — one per requested
+result/regime/claim (up to 24 concurrently; spawn all with background, then
+collect every output before gating) — or uses direct independent computation
+against the actual final artifact. It must cover every requested result and the consequential
 reasoning whose failure could change those results, then select checks suited to
 the claim: residual/substitution, dimensions, BC/IC, signs and branches,
 special or limiting regimes, conservation, numerical convergence/error, or an

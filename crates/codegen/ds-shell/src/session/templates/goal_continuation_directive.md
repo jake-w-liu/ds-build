@@ -21,7 +21,8 @@ Before calling `{goal_tool}(completed: true)`, run the
 plan's `## Verification plan` steps yourself and confirm the observations
 it lists hold — the harness re-checks against those SAME steps each attempt
 and inlines any outstanding verifier gaps above. For math/physics research,
-recheck the changed final artifact with `attacker-math` or direct independent
-computation. Cover every requested result and rerun the checks affected by the
-edit; scale deeper checks to the risk of the claim.
+recheck the changed final artifact with a PARALLEL batch of `attacker-math`
+critics (one per requested result/regime/claim, up to 24 concurrently) or
+direct independent computation. Cover every requested result and rerun the
+checks affected by the edit; scale deeper checks to the risk of the claim.
 </system-reminder>

@@ -20,6 +20,7 @@ Cost-aware stress/verification harness for the DS Build DeepSeek pipeline.
 | `compaction` | 20k | two large reads push the stored-conversation estimate past the 85% auto-compact line → `ds-compact-*` request on the wire → session continues and completes |
 | `round_trip` | 1M | read_file (large) → in-session `headroom_retrieve` (byte-exact original) → bash → web_search (backend 400 → DuckDuckGo fallback) → subagent spawn ("Build finished." must NOT gate) |
 | `big_tool` | 1M | one large read; runs ON → OFF → ON for the savings A/B |
+| `parallel_attackers` | 1M | N attacker-math critics spawned in ONE parallel batch (background=true, scoped assignments), all outputs collected before the final text — proves the parallel adversarial-review upgrade |
 
 ## Modes
 
@@ -108,6 +109,15 @@ reported (cache_read trajectory), never asserted equal.
 - **Headroom A/B (measured, both modes):** mock $0.002474 (ON) vs $0.004590
   (OFF) = 46% cheaper; live $0.0005–0.0008 (ON) vs $0.0033–0.0036 (OFF) =
   ~84% cheaper, with real cache hits at 81–91%.
+- **Parallel adversarial review (orchestration upgrade, 0.1.75+):** attacker-*
+  critics previously hard-forced foreground and capped at 3 per turn (the
+  model spawned one, waited, spawned the next — the observed "only 1
+  subagent" behavior). Now: caps raised to 24 live / 24 attackers per turn,
+  an explicit `run_in_background: true` overrides the attacker foreground
+  default, and the orchestration guidance teaches single-batch parallel
+  decomposition (one attacker per result/regime/claim, collect ALL before
+  gating). The `parallel_attackers` scenario proves the runtime path: 4
+  attacker-math spawns in ONE model response, all collected.
 
 ## Key hygiene
 

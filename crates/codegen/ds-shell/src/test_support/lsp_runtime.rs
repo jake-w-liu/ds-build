@@ -166,7 +166,7 @@ pub(crate) fn make_request(
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
-        run_in_background: false,
+        run_in_background: Some(false),
         surface_completion: true,
         fork_context: false,
         result_tx: tx,

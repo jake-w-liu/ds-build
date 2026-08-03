@@ -32,17 +32,20 @@ pub struct TaskToolInput {
 
     /// Whether to run the subagent in the background.
     ///
-    /// Returns immediately with a subagent_id. Use the task output tool to
-    /// retrieve results. This is set to true by default.
+    /// `None` (omitted) = agent default: background for most agents,
+    /// foreground for attacker-* critics (they gate acceptance). `Some(true)`
+    /// = background (returns immediately with a subagent_id; use the task
+    /// output tool to retrieve results) — pass this to run parallel batches
+    /// of independent agents. `Some(false)` = foreground (the parent turn
+    /// waits for the result before continuing).
     #[schemars(
-        description = "Returns immediately with a subagent_id. Use the task output tool to \
-            retrieve results. This is set to true by default."
+        description = "None (omitted) = agent default (background for most agents, foreground \
+            for attacker-* critics). Some(true) = background: returns immediately with a \
+            subagent_id, use the task output tool to retrieve results — use for parallel \
+            batches of independent agents. Some(false) = foreground: the parent turn waits."
     )]
-    #[serde(
-        default = "default_true",
-        deserialize_with = "crate::serde_lenient::deserialize_lenient_bool"
-    )]
-    pub run_in_background: bool,
+    #[serde(default)]
+    pub run_in_background: Option<bool>,
 
     /// Capability mode controlling the child's tool access.
     #[schemars(
@@ -140,10 +143,6 @@ pub fn sanitize_optional_arg(value: Option<String>) -> Option<String> {
             Some(trimmed.to_string())
         }
     })
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// Capability mode controlling which tool classes a child agent can use.
@@ -847,6 +846,10 @@ pub const ATTACKER_MATH_PROMPT: &str = concat!(
     "=== NO FILE EDITS ===\n",
     "You have NO file editing tools. Do not create, modify, or delete workspace files.\n",
     "You MAY run shell commands (Python/SymPy, numerical checks) to recompute independently.\n\n",
+    "=== SCOPED ASSIGNMENT ===\n",
+    "You receive ONE scoped review assignment (a single result, regime, problem, or claim).\n",
+    "Focus your independent recomputation on that scope and return a verdict with evidence.\n",
+    "Do not sprawl across the whole deliverable — other critics cover other scopes in parallel.\n\n",
     "=== REVIEW THE FULL DELIVERABLE, PROPORTIONAL TO RISK ===\n",
     "Do not sample only convenient sections. Check every requested result and the\n",
     "consequential reasoning whose failure could change a conclusion. For a short\n",
@@ -992,14 +995,15 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          {agent_lines}\n\n\
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. Defaults to true for most agents; attacker-* critics force foreground (must finish before the turn completes).\n\
+         - {run_in_background_param}: None/omitted = agent default (background for most agents, foreground for attacker-* critics). Pass true to run several agents in parallel (returns immediately; collect with {background_retrieval_tool}). Pass false for a foreground gate that must finish before you continue.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
          ## Orchestration bounds (hard platform limits)\n\
-         - MAX 8 live subagents at once (pending+running); wait or cancel before spawning more.\n\
-         - MAX 3 attacker-* subagents live per turn (Stage 3 adversarial review).\n\
+         - MAX 24 live subagents at once (pending+running); wait or cancel before spawning more.\n\
+         - MAX 24 attacker-* subagents live per turn (Stage 3 adversarial review).\n\
          - Prefer explore for read-only evidence; general-purpose when edits are required.\n\
-         - Prefer background only for non-gating evidence. Use attacker-code / attacker-math / attacker-research for acceptance-critical review (foreground).\n\
+         - PARALLEL DECOMPOSITION: when work splits into independent units (per-result, per-regime, per-problem, per-claim, per-file), spawn one subagent per unit in a SINGLE parallel batch ({run_in_background_param}=true), then collect EVERY output with {background_retrieval_tool} before proceeding. Do not serialize independent checks — a 20-problem sheet gets ~20 parallel workers, not one worker per hour.\n\
+         - attacker-* default to foreground (final acceptance gate). For parallel adversarial review, pass {run_in_background_param}=true explicitly — spawn one attacker per independent check/result/regime in one batch, then collect ALL outputs before gating on them.\n\
          - No nested subagent trees (children cannot spawn further subagents).\n\
          - Subagents must return distilled findings with file:line (or equation/problem labels) — no raw dumps.\n\n\
          Resuming a previous agent (resume_from):\n\
@@ -1225,20 +1229,25 @@ mod tests {
     }
 
     #[test]
-    fn task_tool_input_defaults_background_true() {
+    fn task_tool_input_background_is_optional_with_agent_default_semantics() {
+        // Omitted → None (agent definition decides: background for most,
+        // foreground for attacker-*). Explicit true/false win over defaults.
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
-        assert!(
-            input.run_in_background,
-            "run_in_background should default to true"
-        );
+        assert_eq!(input.run_in_background, None);
 
         let foreground: TaskToolInput = serde_json::from_str(
             r#"{"description": "test", "prompt": "do it", "run_in_background": false}"#,
         )
         .unwrap();
-        assert!(!foreground.run_in_background);
+        assert_eq!(foreground.run_in_background, Some(false));
+
+        let background: TaskToolInput = serde_json::from_str(
+            r#"{"description": "test", "prompt": "do it", "run_in_background": true}"#,
+        )
+        .unwrap();
+        assert_eq!(background.run_in_background, Some(true));
     }
 
     #[test]
@@ -1262,7 +1271,7 @@ mod tests {
             prompt: "p".into(),
             description: "d".into(),
             subagent_type: default_subagent_type(),
-            run_in_background: false,
+            run_in_background: Some(false),
             capability_mode: None,
             isolation: None,
             resume_from: None,
@@ -1313,11 +1322,12 @@ mod tests {
         assert!(desc.contains("- **code-reviewer**: Reviews code."));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: Returns immediately with a subagent_id. Use get_task_output to retrieve results. Defaults to true for most agents; attacker-* critics force foreground"
+            "run_in_background: None/omitted = agent default (background for most agents, foreground for attacker-* critics)"
         ));
         assert!(desc.contains("## Orchestration bounds (hard platform limits)"));
-        assert!(desc.contains("MAX 8 live subagents"));
-        assert!(desc.contains("MAX 3 attacker-*"));
+        assert!(desc.contains("MAX 24 live subagents"));
+        assert!(desc.contains("MAX 24 attacker-*"));
+        assert!(desc.contains("PARALLEL DECOMPOSITION"));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
     }
@@ -1524,7 +1534,7 @@ mod tests {
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. Defaults to true for most agents; attacker-* critics force foreground"
+            "${{ params.task.run_in_background }}: None/omitted = agent default (background for most agents, foreground for attacker-* critics)"
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
         assert!(desc.contains("## Orchestration bounds (hard platform limits)"));

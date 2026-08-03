@@ -298,13 +298,15 @@ impl SubagentCoordinator {
     pub(crate) const MAX_COMPLETED_RETAINED: usize = 64;
 
     /// Hard cap on concurrent pending+active subagents. Matches the Fable
-    /// orchestration bound ("MAX 8 live at once") so the platform enforces
-    /// what the system prompt asks the model to respect.
-    pub(crate) const MAX_LIVE_SUBAGENTS: usize = 8;
+    /// orchestration bound ("MAX 24 live at once") so the platform enforces
+    /// what the system prompt asks the model to respect. Sized for parallel
+    /// decomposition (e.g. a 20-problem sheet spawning one worker per unit).
+    pub(crate) const MAX_LIVE_SUBAGENTS: usize = 24;
 
     /// Max concurrent acceptance-critical attacker subagents for one parent
-    /// prompt (Fable Stage 3: "MAX 3 attacker subagents").
-    pub(crate) const MAX_ATTACKERS_PER_PROMPT: usize = 3;
+    /// prompt (Fable Stage 3: "MAX 24 attacker subagents" — one per
+    /// independent check/result/regime in a parallel batch).
+    pub(crate) const MAX_ATTACKERS_PER_PROMPT: usize = 24;
 
     /// Cap on undrained between-turn completion summaries. Each holds an
     /// `Arc` of the full output; without a drain path (or if Completions

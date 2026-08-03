@@ -2088,7 +2088,7 @@ fn send_pre_spawn_failure(
         surface_completion,
         ..
     } = request;
-    if run_in_background {
+    if run_in_background.unwrap_or(false) {
         let notification_subagent_id = id.clone();
         coordinator.borrow_mut().record_pre_spawn_failure(
             id,

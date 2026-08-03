@@ -42,6 +42,25 @@ pub(super) fn task_model_override_error(
         is_session_auth,
     )
 }
+/// Resolve the effective background policy for a spawn.
+///
+/// - `definition_background`: the agent definition's default (attacker-* set
+///   `Some(false)` so their acceptance gate finishes in the foreground).
+/// - `requested`: the caller's explicit `run_in_background` (None = omitted).
+///
+/// An EXPLICIT caller choice always wins — that is how parallel batches of
+/// attackers are expressed (`Some(true)`). Omitted → definition default;
+/// neither set → background (the spawn tool's historical default).
+fn resolve_background_policy(
+    definition_background: Option<bool>,
+    requested: Option<bool>,
+) -> bool {
+    match (definition_background, requested) {
+        (Some(forced), None) => forced,
+        (_, Some(explicit)) => explicit,
+        (None, None) => true,
+    }
+}
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -63,10 +82,6 @@ pub(crate) async fn handle_subagent_request(
     gateway: &GatewaySender,
 ) {
     let start = std::time::Instant::now();
-    let mut parent_wait_guard = (!request.run_in_background)
-        .then(|| crate::tools::tool_context::BlockingWaitGuard::enter(
-            ctx.parent_blocking_wait_depth.clone(),
-        ));
     let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx)
     else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
@@ -92,14 +107,16 @@ pub(crate) async fn handle_subagent_request(
         }
         _ => {}
     }
-    // Agent definition wins for background policy: critics/validators set
-    // `background: false` and must finish in the foreground before completion.
-    // Previously `request.run_in_background || definition.background` ignored
-    // an agent-forced foreground when the model left the default `true`.
-    let run_in_background = match definition.background {
-        Some(forced) => forced,
-        None => request.run_in_background,
-    };
+    // Background policy: an agent definition's `background` is the DEFAULT
+    // when the caller omits the flag (critics/attackers default to foreground
+    // so the acceptance gate finishes before completion). An EXPLICIT
+    // `run_in_background` on the spawn request always wins — that is how
+    // parallel batches of attackers are expressed.
+    let run_in_background = resolve_background_policy(definition.background, request.run_in_background);
+    let mut parent_wait_guard = (!run_in_background)
+        .then(|| crate::tools::tool_context::BlockingWaitGuard::enter(
+            ctx.parent_blocking_wait_depth.clone(),
+        ));
     let cancel_token = CancellationToken::new();
     // Hard platform cap on concurrent live subagents (pending + active).
     {
@@ -1347,7 +1364,7 @@ pub(crate) async fn handle_subagent_request(
     let wait_outcome = {
         let fut = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone());
         tokio::pin!(fut);
-        if !request.run_in_background {
+        if !run_in_background {
             /// How the bounded foreground wait ended.
             enum ForegroundWait {
                 /// The child finished (or was cancelled) within the budget.
@@ -1385,7 +1402,7 @@ pub(crate) async fn handle_subagent_request(
                         "foreground subagent await abandoned by its parent turn; detaching child to background (child keeps running)",
                     );
                     if !cancel_token.is_cancelled() {
-                        request.run_in_background = true;
+                        request.run_in_background = Some(true);
                         coordinator.borrow_mut().mark_backgrounded(&request.id);
                     }
                     fut.await
@@ -1406,7 +1423,7 @@ pub(crate) async fn handle_subagent_request(
                             });
                     }
                     parent_wait_guard.take();
-                    request.run_in_background = true;
+                    request.run_in_background = Some(true);
                     coordinator.borrow_mut().mark_backgrounded(&request.id);
                     fut.await
                 }
@@ -1992,8 +2009,11 @@ pub(crate) async fn handle_subagent_request(
             coord.is_explicitly_killed(&request.id),
         )
     };
+    // A foreground child that was detached/auto-backgrounded mid-await is
+    // background from here on (affects auto-wake + idle reminders).
+    let run_in_background = run_in_background || request.run_in_background == Some(true);
     let will_wake = should_auto_wake_subagent(
-        request.run_in_background,
+        run_in_background,
         result.cancelled,
         ctx.auto_wake_enabled,
         block_waited,
@@ -2042,5 +2062,37 @@ pub(crate) async fn handle_subagent_request(
     }
     if let Some(tx) = result_tx.take() {
         let _ = tx.send(result);
+    }
+}
+
+#[cfg(test)]
+mod background_policy_tests {
+    use super::resolve_background_policy;
+
+    #[test]
+    fn attacker_default_is_foreground_when_omitted() {
+        // attacker-math sets background: Some(false); model omits the flag.
+        assert!(!resolve_background_policy(Some(false), None));
+    }
+
+    #[test]
+    fn explicit_background_true_overrides_attacker_foreground_default() {
+        // The parallel-batch expression: model passes background=true.
+        assert!(resolve_background_policy(Some(false), Some(true)));
+    }
+
+    #[test]
+    fn explicit_background_false_overrides_agent_background_default() {
+        assert!(!resolve_background_policy(Some(true), Some(false)));
+    }
+
+    #[test]
+    fn neither_set_defaults_to_background() {
+        assert!(resolve_background_policy(None, None));
+    }
+
+    #[test]
+    fn non_attacker_definition_default_respected() {
+        assert!(resolve_background_policy(Some(true), None));
     }
 }

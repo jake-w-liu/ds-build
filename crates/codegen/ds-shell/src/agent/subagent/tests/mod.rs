@@ -575,7 +575,7 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
-        run_in_background: true,
+        run_in_background: Some(true),
         surface_completion: true,
         fork_context: false,
         result_tx,
@@ -1039,7 +1039,7 @@ fn at_live_capacity_tracks_pending_and_active() {
     let mut coordinator = SubagentCoordinator::new();
     assert!(!coordinator.at_live_capacity());
     assert_eq!(coordinator.live_count(), 0);
-    assert_eq!(SubagentCoordinator::MAX_LIVE_SUBAGENTS, 8);
+    assert_eq!(SubagentCoordinator::MAX_LIVE_SUBAGENTS, 24);
     for i in 0..SubagentCoordinator::MAX_LIVE_SUBAGENTS {
         coordinator.insert_pending(PendingSubagent {
             subagent_id: format!("p-{i}"),
@@ -2079,7 +2079,7 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         resume_from: None,
         cwd: None,
         runtime_overrides: Default::default(),
-        run_in_background: false,
+        run_in_background: Some(false),
         surface_completion: false,
         fork_context,
         result_tx,
@@ -2695,7 +2695,7 @@ fn make_background_request(
     subagent_type: &str,
 ) -> (SubagentRequest, oneshot::Receiver<SubagentResult>) {
     let (mut req, rx) = make_request(subagent_type);
-    req.run_in_background = true;
+    req.run_in_background = Some(true);
     (req, rx)
 }
 #[tokio::test]

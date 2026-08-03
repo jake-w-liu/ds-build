@@ -50,12 +50,15 @@ pub struct SubagentRequest {
     pub cwd: Option<String>,
     /// Runtime overrides for the child agent.
     pub runtime_overrides: SubagentRuntimeOverrides,
-    /// Whether this subagent was launched with `run_in_background: true`.
+    /// Background policy for this spawn.
     ///
-    /// Background subagents survive parent-turn cancellation — they are
-    /// excluded from `cancel_by_parent_prompt_id` so the user can poll
-    /// results later via `get_task_output`.
-    pub run_in_background: bool,
+    /// `None` = agent-definition default (foreground for attacker-* critics,
+    /// background for most agents). `Some(true)` = background — survives
+    /// parent-turn cancellation and is polled via `get_task_output`;
+    /// `Some(false)` = foreground (parent waits). An explicit value always
+    /// wins over the agent default, which is how parallel attacker batches
+    /// are expressed.
+    pub run_in_background: Option<bool>,
     /// When false, the subagent's completion is NOT buffered for the
     /// between-turn "idle completion" reminder — used by harness-internal
     /// subagents like the goal planner/classifier that the model must never see.
