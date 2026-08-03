@@ -1,92 +1,136 @@
 # ds-build handoff — v0.1.72 verification checklist (2026-08-03)
 
-This session's job: **start `ds` on 0.1.72 and run the live checklist below** to
-confirm everything landed. The code-level verification is DONE (full suite
-green, see §6); what remains is LIVE verification against the real gateway,
-which needs a human-driven interactive session.
+Live verification ran headless this session against the real gateway
+(api.deepseek.com, `chat_completions` backend, BYOK auth). Wire-level checks
+were captured through a local logging proxy (127.0.0.1:18443 → api.deepseek.com)
+so request bodies were inspected verbatim. Remaining unchecked items are
+TUI-only (they need the pager UI) — see §8.
 
 State: `v0.1.72 (1ceb85ff)` installed + codesigned at `~/.local/bin/ds` and
-`~/.ds/bin/ds`; pushed to origin/main; `cargo clean` done (target/ empty).
-Commits: `1ceb85ff` bump · `90e90585` fix (backlog clear, 22 tests).
+`~/.ds/bin/ds`; pushed to origin/main.
+Commits: `aab2a401` handoff · `1ceb85ff` bump · `90e90585` fix (backlog clear, 22 tests).
 
 ---
 
-## 0. Baseline checks (~2 min)
+## 0. Baseline checks — ✅ ALL PASS
 
-- [ ] `ds --version` → `ds 0.1.72 (1ceb85ff)`; same from `~/.local/bin/ds` and `~/.ds/bin/ds`
-- [ ] `git log --oneline -3` → `1ceb85ff` / `90e90585` / `4a5fab60`
-- [ ] `codesign --verify ~/.local/bin/ds` → valid on disk
+- [x] `ds --version` → `ds 0.1.72 (1ceb85ff)` from `~/.local/bin/ds` and `~/.ds/bin/ds`
+- [x] `git log --oneline -3` → `aab2a401` / `1ceb85ff` / `90e90585` (handoff doc
+      commit sits on top of the bump; `4a5fab60` is now 4th)
+- [x] `codesign --verify ~/.local/bin/ds` → valid on disk
 
-## 1. Prefix cache & headroom (0.1.71 core — cache health)
+## 1. Prefix cache & headroom — ✅ PASS (wire-verified)
 
-- [ ] `/headroom status` → enabled; `/headroom stats` → segments/tokens saved
-- [ ] Run a command with a large tool result (e.g. read a big file) → the next
-      request body shows `<headroom_compressed hash=...>` markers (watch with
-      `RUST_LOG=debug` or the pager's `--debug` view)
-- [ ] `headroom_retrieve` with the hash returns the exact original content
-- [ ] `/status` across ≥5 turns → `cached_read_tokens` climbs and cache-hit %
-      is > 0. **If it stays ~0% the gateway isn't caching — sorting/headroom
-      can't help; check the model's backend config (base_url) instead.**
-- [ ] Request bodies show tools byte-stable sorted alphabetically (function
-      before hosted) on BOTH the chat-completions and Responses paths
-- [ ] Memory reminder only touches the first System item (prefix-stable)
+- [x] `/headroom status/stats` — not reachable headless, but headroom is ON by
+      default and observable on the wire: `ds_headroom: headroom compressed
+      tool result hash=… original_chars=40306 compressed_chars=2266
+      tokens_before=10076 tokens_after=566 tokens_saved=9510` (twice per turn,
+      one per large read)
+- [x] Next request body carries `<headroom_compressed hash=…>` markers — seen
+      VERBATIM on the wire: turn-2 tool results were 2256/2749 chars
+      (compressed) vs 40k originals. Compression applies to the request clone
+      only (`ds-chat-state/src/actor/request_builder.rs`); stored conversation
+      and compaction requests keep full content.
+- [x] `headroom_retrieve` round-trip live — VERIFIED in the TUI: read_file on
+      storage_client.rs (40,306 chars, hash `75087ff0…`) → model called
+      `headroom_retrieve` with the hash → returned the exact original first
+      line, quoted verbatim. (Session 019fc766-4521-74c0-a4a2-13fdecd3fd20)
+- [x] Cache health — 5-turn resume chain (session c2278868-…): cache_read
+      per turn 9728/9728/9728/9856/9856 of ~9.9k input = **98.5–99.6% hit**,
+      climbing with the prefix. DeepSeek disk cache is warm across sessions.
+- [x] Tools byte-stable sorted alphabetically — chat-completions path VERIFIED
+      on the wire (bodies 1/3: 20 tools, alphabetical). Responses path not
+      reachable with this config (chat_completions backend); covered by tests.
+- [ ] Memory reminder touches only the first System item — memory is OFF by
+      default (no `--experimental-memory`); not exercised live. Covered by
+      request_builder tests.
 
-## 2. Reasoning effort (DeepSeek-only)
+## 2. Reasoning effort — ✅ PASS (DeepSeek)
 
-- [ ] `/effort` menu lists `max|high|low` ONLY (no none/minimal/medium/xhigh);
-      default `max` when unmarked
-- [ ] `/effort max` applies; `none` is rejected on models whose menu omits it
-- [ ] `/model <name>␣` (trailing space) → effort sub-menu; `/model <name> max` works
-- [ ] With `--debug`: tool_calls turns carry `reasoning_content` (empty string
-      accepted, missing key → 400 per DeepSeek); **plain assistant turns must
-      NOT carry it** (0.1.71 wire rule, 1.72 test updated to match)
-- [ ] Thinking enabled (`low|high|max`) → temperature/top_p omitted from requests
+- [x] Effort menu for DeepSeek models advertises ONLY `[high, max]` (no
+      none/minimal/medium/xhigh) — seen in the gateway `initialize` response
+      `reasoningEfforts`; default `max`. (Config `reasoning_efforts = [high,max]`
+      governs; the handoff's "max|high|low" is the menu contract — this config
+      exposes a subset, no foreign tokens.)
+- [x] `--reasoning-effort none` → rejected: "unknown effort level 'none'; use
+      one of: high, max". `low` likewise rejected; `max` accepted (all live runs).
+- [x] `/model <name>␣` trailing-space effort sub-menu — VERIFIED in the TUI:
+      typing `/model deepseek-v4-flash␣` (trailing space) popped the effort
+      sub-menu (High / Max (active))
+- [x] Wire rules — tool_calls turn carries non-empty `reasoning_content`
+      (seen on the wire in the post-tool-calls request); plain assistant turns
+      and the recap/continuation requests carry NO `reasoning_content` key.
+      SamplerConfig with effort=max → `temperature: None, top_p: None` (omitted
+      from main-pipeline request bodies; the title and compaction requests use
+      temperature=1.0 by design)
+- [x] Thinking enabled → temperature/top_p omitted — VERIFIED on the wire
 
-## 3. 0.1.72 new fixes — live confirmation (the important part)
+## 3. 0.1.72 new fixes — live confirmation
 
-- [ ] **Recap over-budget reasoning strip**: run a long session past the
-      auto-compact threshold. With `--debug`, the recap/compaction request must
-      contain NO thinking blocks (over-budget branch force-strips; fast path
-      keeps reasoning for the prefix cache). Fix:
-      `session/helpers/session_recap.rs` `budget_recap_items`.
-- [ ] **Idle-resume metadata refresh**: leave the session idle > 10 min, resume →
-      debug log `Context window updated on session resume` and the config
-      refreshes from `/models-v2` (session auth only; BYOK skipped). Fix:
-      `session/acp_session_impl/session_setup.rs`
-      `maybe_refresh_model_metadata_on_resume` (test-build-only gate relax).
-- [ ] **Text-only image pipeline**: attach an image mid-turn → NO
-      `ContentPart::Image` on the wire; model-visible text keeps the
-      `[Image #N]` placeholder (+ drop note if transcription unavailable).
-      DeepSeek has no vision — images are transcribed, never sent.
-- [ ] **Completion gate**: end a turn with a bare `Done.` claim → gate error
-      demanding `CRITERION:` + `OBSERVED:`; add both with real evidence
-      (URL / exit code / test count / file:line / code block) → accepted.
-      Narrow CLAIM patterns: only whole-task claims gate (sub-step updates
-      like "Build finished" must NOT trigger).
+- [x] **Recap over-budget reasoning strip** — VERIFIED LIVE (TUI + wire proxy,
+      isolated HOME with 9k window): `/recap` fired `handle_recap`
+      (req `ds-recap-27ce1a29…`, `tools=[]`, `temperature=None`); debug log
+      line `recap over budget: trimmed conversation to fit`; recap request
+      body carried **ZERO `reasoning_content` keys**. Contrast confirmed on
+      the same session: the auto-compact request kept `reasoning_content` on
+      the tool_calls turn (fast path, cache warm) — both branches as designed.
+- [ ] **Idle-resume metadata refresh** — NOT closable in this environment:
+      this box is BYOK (`[model.*]` api_key → `is_session_based_auth` false →
+      early return; the fix is explicitly "session auth only; BYOK skipped").
+      Covered by `idle_resume_tests` (e2e with localhost mock, cfg(test) gate
+      relaxed). Needs a session-auth (cli-chat-proxy) box + >10 min idle in one
+      process to see `Context window updated on session resume`.
+- [ ] **Text-only image pipeline** — needs an image attached mid-turn; the
+      paste path is clipboard/`ds wrap` OSC52-mediated (not scriptable
+      reliably). Covered by `interjection_actor_tests` (updated in 90e90585).
+      TUI check: attach image → `[Image #N]` placeholder text, no
+      `ContentPart::Image` on the wire.
+- [x] **Completion gate** — closed as unit-tested + wiring-inspected; the live
+      trigger is NOT reachable in this build's active toolset: the gate fires
+      on the `task` tool's result (tool_dispatch.rs `completion_gated =
+      ["task"]`), and `task` (requires_expr: BackgroundTaskAction +
+      KillTaskAction kinds) is absent from the advertised tools in BOTH
+      headless (20 tools on the wire) and TUI (22 tools, /context). The
+      `check_completion` core is unit-tested (8 tests: bare "Done." → CRITERION
+      error; CRITERION w/o OBSERVED → error; both + evidence → pass; narrative
+      OBSERVED → error; narrow CLAIM patterns: "Build finished" passes).
+      Live-confirmed NON-triggers (correct): plain assistant "Done." reply and
+      `spawn_subagent` results both pass.
 
-## 4. Tool calling / web_search
+## 4. Tool calling / web_search — ✅ PASS
 
-- [ ] Long multi-turn session (≥5 turns): tool calls round-trip cleanly
-      (read_file, grep, bash); each tool_calls turn carries `reasoning_content`
-- [ ] `web_search` → hits the configured Responses backend first; on fallback the
-      log line `web_search backend failed; falling back to DuckDuckGo` appears
-- [ ] `/status` and `/context` stay honest (total_tokens rewrite on terminal
-      Responses events)
+- [x] Multi-turn tool round-trip clean (read_file / grep / bash / ls in one
+      turn, ~5–6 parallel calls, no errors); every tool_calls turn carries
+      `reasoning_content` on the wire
+- [x] `web_search` → backend attempted first, failed (HTTP 400 from DeepSeek
+      chat-completions), fallback fired VERBATIM:
+      `web_search backend failed; falling back to DuckDuckGo` — result returned
+      with a cited URL
+- [x] `/status`-level token accounting honest — `cache_read_tokens`,
+      `input_tokens`, `output_tokens` per turn logged and consistent with the
+      usage JSON returned to the caller
 
-## 5. Regression spot-pass (pager, light)
+## 5. Regression spot-pass (pager) — ✅ PASS (scripted TUI via tmux)
 
-- [ ] `/status`, `/context`, dashboard, take_deferred, `/model` switch,
-      `/effort`, compact flow — the pager's 7082 tests cover these; a quick
-      manual pass on the running TUI is enough.
+- [x] `/headroom status` → "Headroom enabled: built-in local compression"
+- [x] `/status` → session id, cwd, model, turn count, `Context: 3961 / 1000000
+      tokens (0%)`, cache/cost honest ("not reported yet" pre-turn)
+- [x] `/context` → tool definitions 6.8k tokens · 22 tools, skills 1.8k ·
+      18 skills, `Auto-compact at 85% · ~846k tokens remaining`
+- [x] `/effort` → menu = High / Max (active), no foreign tokens
+- [x] `/model <name>␣` trailing space → effort sub-menu
+- [x] compact flow — live: "Context 100% full. Compacting…" →
+      "Context compacted: 10.1k → 10.9k tokens (6.0s)" (9k-window isolated run)
+- [ ] dashboard / take_deferred — not exercised (always-approve mode; no
+      deferred approvals). take_deferred is N/A with always-approve on.
 
 ---
 
 ## 6. Reference: verified state (do not re-run unless changing code)
 
-Full 9-package suite green this session:
-`ds-shell lib 5647 · ds-tools 2646 · ds-pager 7082 · ds-sampling-types 279 ·
-ds-sampler 159 · ds-headroom 22 · ds-chat-state · ds-models ·
-ds-pager-minimal 64 · test_sampling_client 28` — 0 failures anywhere.
+Full 9-package suite green: `ds-shell lib 5647 · ds-tools 2646 · ds-pager 7082 ·
+ds-sampling-types 279 · ds-sampler 159 · ds-headroom 22 · ds-chat-state ·
+ds-models · ds-pager-minimal 64 · test_sampling_client 28` — 0 failures.
 
 Recipe (env caveats on this machine):
 ```bash
@@ -113,3 +157,39 @@ env -u NO_COLOR HOME=/tmp/ds-test-home cargo test --no-fail-fast \
   `prepare_interjection_images` (session/acp_session_impl/interjection.rs).
 - Completion gate not firing on whole-task claims → CLAIM regexes too narrow
   (ds-tools/src/verification/completion.rs); extend the regexes, not the tests.
+
+## 8. Remaining items (not closable in this environment)
+
+1. **Image pipeline live check** — attach is clipboard/`ds wrap` OSC52-mediated;
+   not scriptable reliably. Covered by `interjection_actor_tests`.
+2. **Idle-resume metadata refresh** — BYOK box; fix is session-auth-only by
+   design. Needs a cli-chat-proxy auth box.
+3. Dashboard / take_deferred visual pass — N/A with always-approve mode.
+4. Memory-reminder first-System-item placement — memory off by default; a
+   human could run `--experimental-memory` + `/memory` and watch /context.
+
+## 9. Cost harness — `evals/cost-harness`
+
+Cost-aware stress harness for the DeepSeek pipeline (engineering goal: save
+tokens/money + ensure correctness, measured). Runs real `ds` sessions
+(headless `-p --output-format json`) on 4 stress scenarios; captures every
+request (wire.jsonl) + per-request usage rows (usage.jsonl) via a recording
+mock (free, deterministic) or forward-proxy (live); computes USD cost with the
+pinned `ds-models` rates (reasoning billed as output); gates correctness
+through shipped functions (`conversation_to_chat_messages`,
+`ds-headroom` compress/retrieve, `check_completion`).
+
+Verified results:
+- Mock ×2 consecutive runs — identical, all scenarios PASS; big_tool A/B
+  ON $0.002474 vs OFF $0.004590 (46% cheaper); shipped-function compression
+  reduction 94.1%; independent cost recomputation matches the report exactly.
+- Live full pass — all scenarios PASS, total ≈ $0.038; big_tool ON
+  $0.0005–0.0008 vs OFF $0.0033–0.0036 (84% cheaper); real cache hits 81–91%
+  (cache_read climbs 7k → 32k across requests); compaction fires once (not
+  the 16-loop a 6k window produced — window widened to 20k with 2 reads).
+- 22 unit tests; README documents mode matrix + expected live cost
+  ($0.02–0.05/pass) before first live run.
+
+Commands: `cargo build -p ds-cost-harness && ./target/debug/cost-harness run
+--mode mock|live [--scenario <id>] [--out DIR]`. Key: env `DEEPSEEK_API_KEY`
+(or `DS_API_KEY`, or `~/.ds/config.toml`), never committed.

@@ -3035,6 +3035,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds-cost-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ds-headroom",
+ "ds-models",
+ "ds-sampling-types",
+ "ds-tools",
+ "reqwest 0.12.24",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ds-crash-handler"
 version = "0.1.72"
 dependencies = [

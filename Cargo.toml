@@ -53,6 +53,7 @@ members = [
     "crates/codegen/ds-tools-api",
     "crates/codegen/ds-update",
     "crates/codegen/ds-version",
+    "evals/cost-harness",
     "crates/codegen/ds-voice",
     "crates/codegen/ds-workspace",
     "crates/codegen/ds-workspace-client",
