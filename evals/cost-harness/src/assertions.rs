@@ -342,8 +342,14 @@ pub fn check_parallel_attackers(wire: &[WireRequest], conv_id: &str, n: usize) -
         if args.get("subagent_type").and_then(|v| v.as_str()) != Some("attacker-math") {
             failures.push(format!("spawn #{i}: subagent_type != attacker-math ({args})"));
         }
-        if args.get("run_in_background").and_then(|v| v.as_bool()) != Some(true) {
-            failures.push(format!("spawn #{i}: run_in_background != true ({args})"));
+        // The tool accepts both spellings ("background" is the claude alias);
+        // the model may emit either.
+        let bg = args
+            .get("run_in_background")
+            .or_else(|| args.get("background"))
+            .and_then(|v| v.as_bool());
+        if bg != Some(true) {
+            failures.push(format!("spawn #{i}: background != true ({args})"));
         }
     }
     // All n ids collected by a get_command_or_subagent_output call.
