@@ -2607,6 +2607,8 @@ Apply the compact define → gather → act → verify → report loop:
   size. Use direct tools when they are the clearest evidence; use foreground
   critics when an independent review would materially reduce uncertainty.
   Subagent counts and fixed evidence rituals are not completion criteria.
+- Prefer the cheapest verification that still constitutes real evidence: avoid
+  redundant tool calls, re-reads, and padded output.
 - For math, physics, and quantitative research, preserve definitions, domains,
   conventions, governing relations, branches, units, and BC/IC as applicable.
   Challenge every requested result and the consequential reasoning behind it
@@ -2637,6 +2639,8 @@ mod structure_template_tests {
             "named",
             "risk",
             "equivalent",
+            "cheapest verification",
+            "redundant tool calls",
         ] {
             assert!(
                 rendered.to_ascii_lowercase().contains(required),
