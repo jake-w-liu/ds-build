@@ -52,11 +52,13 @@ async fn queue_send_now_keeps_prompt_block_images_on_promoted_row() {
         .await;
 }
 
-/// Draining an image-bearing interjection injects structured
-/// `ContentPart::Image` parts (base64 data URL) on the synthetic user
-/// message, preserving `SyntheticReason::Interjection`.
+/// Draining an image-bearing interjection on a text-only (DeepSeek) session
+/// model never attaches `ContentPart::Image` parts: the image pipeline
+/// transcribes (or drops with a notice) instead, while the wrapped text keeps
+/// the `[Image #N]` placeholder and the synthetic user message keeps
+/// `SyntheticReason::Interjection`.
 #[tokio::test]
-async fn drain_interjection_with_images_attaches_image_parts() {
+async fn drain_interjection_text_only_model_never_attaches_image_parts() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -85,11 +87,10 @@ async fn drain_interjection_with_images_attaches_image_parts() {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(image_urls.len(), 1, "image part must be attached");
-            assert!(
-                image_urls[0].starts_with("data:image/"),
-                "inline base64 data URL expected, got {}",
-                &image_urls[0][..image_urls[0].len().min(32)]
+            assert_eq!(
+                image_urls.len(),
+                0,
+                "text-only session models must never receive image parts"
             );
             let text = conversation.last().unwrap().text_content();
             assert!(
@@ -210,9 +211,11 @@ async fn drain_interjection_expands_skill_slash_reference() {
 }
 
 /// `format_interjection`'s large-prompt truncation applies to the TEXT only —
-/// image data rides structurally and is never truncated or inlined.
+/// and on a text-only (DeepSeek) session model the image never becomes text:
+/// no base64 payload is inlined into the truncated message and no
+/// `ContentPart::Image` is attached.
 #[tokio::test]
-async fn drain_interjection_truncation_never_touches_image_data() {
+async fn drain_interjection_truncation_text_only_model_never_inlines_image_data() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -234,17 +237,22 @@ async fn drain_interjection_truncation_never_touches_image_data() {
             };
             let text = conversation.last().unwrap().text_content();
             assert!(text.contains("[truncated]"), "oversized text must truncate");
-            let image_url = user_item
+            assert!(
+                !text.contains(&original_image.data),
+                "image payload must never be inlined into truncated text"
+            );
+            let image_urls: Vec<&str> = user_item
                 .content
                 .iter()
-                .find_map(|p| match p {
+                .filter_map(|p| match p {
                     ds_sampling_types::ContentPart::Image { url } => Some(url.as_ref()),
                     _ => None,
                 })
-                .expect("image part must survive truncation");
-            assert!(
-                image_url.ends_with(&original_image.data),
-                "image payload must be byte-identical (never truncated)"
+                .collect();
+            assert_eq!(
+                image_urls.len(),
+                0,
+                "text-only session models must never receive image parts"
             );
         })
         .await;

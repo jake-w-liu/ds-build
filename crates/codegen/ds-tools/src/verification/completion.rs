@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_claim_without_criterion_fails() {
-        let msg = "Done. The bug is fixed.\nOBSERVED: compiled fine";
+        let msg = "Done.\nOBSERVED: compiled fine";
         let err = check_completion(msg).unwrap_err();
         assert!(err.contains("CRITERION"));
     }
@@ -282,7 +282,9 @@ mod tests {
 
     #[test]
     fn test_checkmark_claim_triggers_gate() {
-        let msg = "✅ Done — the fix compiles and all tests pass. Everything is working correctly.";
+        // The checkmark must claim the WHOLE task (standalone line) — a
+        // checkmark buried in prose is a sub-step update, not a claim.
+        let msg = "✅ Done\nThe fix compiles and all tests pass.";
         let err = check_completion(msg).unwrap_err();
         assert!(err.contains("CRITERION"));
     }

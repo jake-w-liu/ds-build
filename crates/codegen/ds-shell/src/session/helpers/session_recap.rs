@@ -143,8 +143,12 @@ pub(crate) fn budget_recap_items(
     }
 
     // Normalize the trailing boundary BEFORE trimming (ordering matters — see doc).
+    // Over budget the prefix cache is lost once we trim, so reasoning is
+    // force-stripped regardless of the backend flag (stale thinking blocks
+    // would only risk strict-backend rejections). Matches the doc contract
+    // "Over budget — strip reasoning".
     let mut snapshot =
-        compaction_utils::prepare_conversation_for_verbatim_summarization(conversation, strip_reasoning);
+        compaction_utils::prepare_conversation_for_verbatim_summarization(conversation, true);
     pop_trailing_tool_run(&mut snapshot);
     let mut items = compaction_utils::fit_conversation_to_budget(snapshot, snapshot_budget);
     let post_tokens = estimate_conversation_tokens(&items);

@@ -1337,7 +1337,11 @@ mod tests {
         let headers = seen_headers.lock().unwrap();
         let headers = headers.last().unwrap();
         assert_eq!(headers.authorization.as_deref(), Some("Bearer token"));
-        assert_eq!(headers.token_auth.as_deref(), Some("ds-cli"));
+        assert_eq!(
+            headers.token_auth.as_deref(),
+            None,
+            "X-DS-Token-Auth is decommissioned — Bearer auth only"
+        );
         assert_eq!(headers.user_id.as_deref(), Some("user-1"));
         assert_eq!(headers.email.as_deref(), Some("test@example.com"));
         assert_eq!(headers.alpha_test_key, None);

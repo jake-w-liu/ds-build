@@ -389,14 +389,16 @@ async fn chat_completions_collect_synthesizes_reasoning_sibling() {
 
 /// Upgrade path: a legacy chat-completions session on disk —
 /// an assistant carrying inline `reasoning: {text}` — must, when loaded,
-/// reconstruct a sibling Reasoning item, which then folds into
-/// `reasoning_content` on the *correct* assistant message in the outgoing
-/// chat-completions request body. This ties the whole chain together:
+/// reconstruct a sibling Reasoning item. The DeepSeek wire contract folds
+/// `reasoning_content` ONLY onto tool_calls turns (missing key → 400 there;
+/// plain turns omit it so the prompt stays smaller and the prefix-cache tail
+/// cheaper), so a plain-text assistant turn must NOT carry the key. This ties
+/// the whole chain together:
 /// read_chat_history_sync (upgrade_legacy_reasoning) → ConversationRequest →
 /// `From<ConversationRequest> for ChatCompletionRequest`
 /// (conversation_to_chat_messages) → wire.
 #[tokio::test]
-async fn chat_completions_upgrade_folds_reconstructed_reasoning_into_request() {
+async fn chat_completions_upgrade_reconstructs_reasoning_and_omits_it_on_plain_turns() {
     // 1. Seed a legacy chat-completions chat_history.jsonl (inline reasoning
     //    on the assistant — the shape an older binary wrote).
     let dir = tempfile::tempdir().unwrap();
@@ -437,18 +439,19 @@ async fn chat_completions_upgrade_folds_reconstructed_reasoning_into_request() {
         .await
         .unwrap();
 
-    // 4. The reconstructed reasoning must land on the assistant's
-    //    reasoning_content in the wire request — not be dropped.
+    // 4. DeepSeek contract: plain-text assistant turns omit reasoning_content
+    //    (required only on tool_calls turns — covered by the
+    //    conversation_to_chat_messages unit tests).
     let body = server.request_bodies().pop().unwrap();
     let messages = body.get("messages").unwrap().as_array().unwrap();
     let assistant = messages
         .iter()
         .find(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
         .expect("assistant message present in request");
-    assert_eq!(
-        assistant.get("reasoning_content").and_then(Value::as_str),
-        Some("legacy chain of thought"),
-        "reconstructed reasoning must fold onto the assistant's reasoning_content; \
+    assert!(
+        assistant.get("reasoning_content").is_none(),
+        "plain assistant turns must omit reasoning_content on the wire \
+         (DeepSeek: the key is required only on tool_calls turns); \
          full messages: {messages:#?}"
     );
 }
@@ -1142,8 +1145,9 @@ async fn test_request_includes_tools() {
     // Verify tools were included
     let tools = body.get("tools").unwrap().as_array().unwrap();
     assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0]["function"]["name"], "read_file");
-    assert_eq!(tools[1]["function"]["name"], "bash");
+    // Byte-stable alphabetical order (prefix-cache invariant): "bash" < "read_file".
+    assert_eq!(tools[0]["function"]["name"], "bash");
+    assert_eq!(tools[1]["function"]["name"], "read_file");
 
     // Verify tool_choice
     assert_eq!(body.get("tool_choice").unwrap(), "auto");

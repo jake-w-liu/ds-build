@@ -946,8 +946,8 @@ fn evict_stale_completed_caps_map_size() {
     assert!(!coordinator.completed.contains_key("sub-0"));
 }
 
-#[test]
-fn move_to_completed_evicts_immediately() {
+#[tokio::test(flavor = "current_thread")]
+async fn move_to_completed_evicts_immediately() {
     let mut coordinator = SubagentCoordinator::new();
     // Fill completed to the cap with older entries, then finish one more via
     // move_to_completed — eviction must run without a query poll.

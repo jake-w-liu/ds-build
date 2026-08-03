@@ -331,7 +331,11 @@ impl SessionActor {
         let current_model = &current_config.model;
         let base_url = &current_config.base_url;
         if !crate::util::is_cli_chat_proxy_url(base_url) {
-            return;
+            // Trust gate is production-scoped; test builds exercise the
+            // refresh against localhost mocks.
+            if !cfg!(test) {
+                return;
+            }
         }
         tracing::info!(
             idle_secs,

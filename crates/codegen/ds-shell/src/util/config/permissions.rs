@@ -466,8 +466,13 @@ mod tests {
                 PermissionMode::Ask,
                 "ask",
             ),
-            // No permission keys → Ask.
-            ("[ui]\ntheme = \"dsnight\"\n", PermissionMode::Ask, "ask"),
+            // No permission keys → AlwaysApprove (DS product default; the
+            // pager's soft-default layer clamps the *display* to Ask).
+            (
+                "[ui]\ntheme = \"dsnight\"\n",
+                PermissionMode::AlwaysApprove,
+                "always-approve",
+            ),
         ];
         for (toml_str, expected_mode, expected_canonical) in cases {
             let root: TomlValue = toml::from_str(toml_str).unwrap();
@@ -480,10 +485,10 @@ mod tests {
                 "config {toml_str:?} canonical string",
             );
         }
-        // A non-table [ui] value resolves to Ask (defensive).
+        // A non-table [ui] value resolves to AlwaysApprove (same default path).
         assert_eq!(
             resolve_permission_mode(Some(&TomlValue::String("nope".into())), None),
-            PermissionMode::Ask,
+            PermissionMode::AlwaysApprove,
         );
     }
 

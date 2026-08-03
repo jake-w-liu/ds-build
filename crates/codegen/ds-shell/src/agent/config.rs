@@ -5052,17 +5052,21 @@ reasoning_effort = "low"
         }
     }
     #[test]
-    fn inject_url_derived_headers_adds_proxy_headers_for_cli_chat_proxy_url() {
+    /// DeepSeek: proprietary proxy identity headers are deliberately NOT
+    /// injected — `inject_url_derived_headers` is a no-op; Bearer auth is set
+    /// by the credential layers.
+    fn inject_url_derived_headers_injects_no_proxy_headers_for_cli_chat_proxy_url() {
         let mut headers = IndexMap::new();
         inject_url_derived_headers(&mut headers, None, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
-        assert_eq!(
-            headers.get("X-DS-Token-Auth").map(String::as_str),
-            Some("ds-cli")
+        assert!(
+            headers.get("X-DS-Token-Auth").is_none(),
+            "X-DS-Token-Auth must not be injected"
         );
-        assert_eq!(
-            headers.get("x-authenticateresponse").map(String::as_str),
-            Some("authenticate-response")
+        assert!(
+            headers.get("x-authenticateresponse").is_none(),
+            "x-authenticateresponse must not be injected"
         );
+        assert!(headers.is_empty(), "no headers may be derived from the URL");
     }
     #[test]
     fn inject_url_derived_headers_skips_proxy_headers_for_external_url() {
@@ -5080,9 +5084,9 @@ reasoning_effort = "low"
             headers.get("x-custom-byok").map(String::as_str),
             Some("value")
         );
-        assert_eq!(
-            headers.get("X-DS-Token-Auth").map(String::as_str),
-            Some("ds-cli")
+        assert!(
+            headers.get("X-DS-Token-Auth").is_none(),
+            "caller headers must not be joined by derived proxy identity headers"
         );
     }
     #[test]
@@ -5745,12 +5749,9 @@ reasoning_effort = "low"
         assert_eq!(config.auth_scheme, AuthScheme::Bearer);
         assert_eq!(config.api_key, Some("tok".to_string()));
         assert_eq!(config.base_url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
-        assert_eq!(
-            config
-                .extra_headers
-                .get("X-DS-Token-Auth")
-                .map(String::as_str),
-            Some("ds-cli")
+        assert!(
+            config.extra_headers.get("X-DS-Token-Auth").is_none(),
+            "proxy identity headers are decommissioned — Bearer auth only"
         );
     }
     /// Regression: without a session key, `resolve_credentials` falls through
@@ -8128,7 +8129,9 @@ reasoning_effort = "low"
         });
         let d = cfg.trace_upload_decision_debug();
         assert_eq!(d["trace_upload"], serde_json::json!(false));
-        assert_eq!(d["trace_upload_source"], serde_json::json!("default"));
+        // TelemetryConfig defaults trace_upload to Some(false), so the config
+        // layer owns the off default.
+        assert_eq!(d["trace_upload_source"], serde_json::json!("config"));
         assert_eq!(d["telemetry_mode"], serde_json::json!("false"));
         assert_eq!(d["in_remote_trace_upload_enabled"], serde_json::json!(true));
         assert_eq!(d["has_remote_settings"], serde_json::json!(true));
@@ -10856,15 +10859,25 @@ default = "deepseek-v4-pro.5"
     fn resolve_model_list_inherits_context_window_from_default_when_prefetched_has_fallback() {
         let cfg = Config::default();
         let default_cw = DEFAULT_CONTEXT_WINDOW;
-        let entry = prefetch_model_entry("ds-build", default_cw, ApiBackend::default());
+        let bundled_cw = default_model_entries(&EndpointsConfig::default())
+            .get("deepseek-v4-pro")
+            .expect("bundled deepseek-v4-pro")
+            .info
+            .context_window
+            .get();
+        let entry = prefetch_model_entry("deepseek-v4-pro", default_cw, ApiBackend::default());
         let mut prefetched = IndexMap::new();
-        prefetched.insert("ds-build".to_owned(), entry);
+        prefetched.insert("deepseek-v4-pro".to_owned(), entry);
         let resolved = resolve_model_list(&cfg, Some(prefetched));
-        let entry = resolved.get("ds-build").expect("model must exist");
+        let entry = resolved.get("deepseek-v4-pro").expect("model must exist");
         assert_ne!(
+            bundled_cw, default_cw,
+            "fixture requires a bundled default distinct from DEFAULT_CONTEXT_WINDOW"
+        );
+        assert_eq!(
             entry.info.context_window.get(),
-            default_cw,
-            "context_window should have been inherited from hardcoded default, not left at DEFAULT_CONTEXT_WINDOW"
+            bundled_cw,
+            "fallback marker (DEFAULT_CONTEXT_WINDOW) must be replaced by the bundled default"
         );
     }
     #[test]
@@ -10932,21 +10945,31 @@ default = "deepseek-v4-pro.5"
         let cfg = Config::default();
         let mut defs = default_model_entries(&EndpointsConfig::default());
         let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove("ds-build") {
-            p.insert("ds-build".to_string(), e);
+        if let Some(e) = defs.shift_remove("deepseek-v4-pro") {
+            p.insert("deepseek-v4-pro".to_string(), e);
         }
         let resolved = resolve_model_list(&cfg, Some(p));
-        assert!(resolved.contains_key("ds-build"));
+        assert!(resolved.contains_key("deepseek-v4-pro"));
+        assert!(
+            !resolved.contains_key("deepseek-v4-flash"),
+            "bundled entries absent from the prefetch must be pruned"
+        );
         let no_p = resolve_model_list(&cfg, None);
-        assert!(no_p.contains_key("ds-build"));
+        assert!(no_p.contains_key("deepseek-v4-pro"));
+        assert!(no_p.contains_key("deepseek-v4-flash"));
     }
     #[test]
     fn resolve_model_list_prefetch_visibility_matches_auth_and_server_list() {
         let cfg = Config::default();
         let mut defs = default_model_entries(&EndpointsConfig::default());
         let mut p = IndexMap::new();
-        if let Some(e) = defs.shift_remove("ds-build") {
-            p.insert("ds-build".to_string(), e);
+        if let Some(mut e) = defs.shift_remove("deepseek-v4-pro") {
+            // Server-listed, session-only model.
+            e.info.supported_in_api = false;
+            p.insert("deepseek-v4-pro".to_string(), e);
+        }
+        if let Some(e) = defs.shift_remove("deepseek-v4-flash") {
+            p.insert("deepseek-v4-flash".to_string(), e);
         }
         let resolved = resolve_model_list(&cfg, Some(p));
         let sess: Vec<_> = resolved
@@ -10957,8 +10980,12 @@ default = "deepseek-v4-pro.5"
             .values()
             .filter(|e| e.visible_for_auth(false))
             .collect();
-        assert_eq!(sess.len(), 1);
-        assert!(api.is_empty());
+        assert_eq!(sess.len(), 2, "session users see the full server list");
+        assert_eq!(
+            api.len(),
+            1,
+            "only supported_in_api entries are visible to API-key users"
+        );
     }
     #[test]
     fn resolve_model_list_keeps_prefetch_only_entries_and_prunes_defaults() {
@@ -11015,17 +11042,25 @@ default = "deepseek-v4-pro.5"
     fn plain_config_overlay_preserves_bundled_visibility() {
         let raw: toml::Value = toml::from_str(
             r#"
-            [model.ds-build]
+            [model.deepseek-v4-pro]
             context_window = 300000
             "#,
         )
         .unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let bundled_flag = default_model_entries(&EndpointsConfig::default())
+            .get("deepseek-v4-pro")
+            .expect("bundled deepseek-v4-pro")
+            .info
+            .supported_in_api;
         let resolved = resolve_model_list(&cfg, None);
-        let entry = resolved.get("ds-build").expect("ds-build must exist");
-        assert!(
-            !entry.visible_for_auth(false),
-            "non-BYOK config overlay must preserve bundled supported_in_api=false"
+        let entry = resolved
+            .get("deepseek-v4-pro")
+            .expect("deepseek-v4-pro must exist");
+        assert_eq!(entry.info.context_window.get(), 300_000, "overlay must apply");
+        assert_eq!(
+            entry.info.supported_in_api, bundled_flag,
+            "non-BYOK config overlay must preserve the bundled supported_in_api flag"
         );
     }
     #[test]

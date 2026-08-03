@@ -2852,7 +2852,7 @@ async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inheri
 #[test]
 fn key_prefix_truncates_to_8_chars() {
     let key = Some("eyJ0edsOiJhbGciOiJSUzI1NiJ9".to_string());
-    assert_eq!(key_prefix(& key), "eyJ0eds");
+    assert_eq!(key_prefix(& key), "eyJ0edsO");
 }
 #[test]
 fn key_prefix_short_key_not_truncated() {

@@ -1124,7 +1124,10 @@ fn subagents_config_models_without_enabled() {
             .unwrap();
         let sa = SubagentsConfig::resolve(None, &config, None);
         assert!(
-            ! sa.enabled, "explicit [subagents] section without enabled should be false"
+            sa.enabled,
+            "explicit [subagents] section without an `enabled` key keeps the \
+             enabled-by-default contract (only `enabled = false` or \
+             DS_SUBAGENTS=0 disables)"
         );
         assert_eq!(sa.models.len(), 1);
         assert_eq!(sa.models.get("explore").unwrap(), "ds-3-fast");
