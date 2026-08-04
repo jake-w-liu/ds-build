@@ -3959,7 +3959,12 @@ impl AgentView {
             && let Some(ref goal) = self.goal_state
         {
             let todos = self.todo.todos();
-            let overlay_rect = crate::views::goal_detail::goal_detail_area(area, goal, todos);
+            let overlay_rect = crate::views::goal_detail::goal_detail_area(
+                area,
+                goal,
+                todos,
+                &self.subagent_sessions,
+            );
             let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens: u64 = self
                 .subagent_sessions
@@ -3975,6 +3980,7 @@ impl AgentView {
                 tick,
                 self.context_state.as_ref().map(|c| c.used),
                 active_subagent_tokens,
+                &self.subagent_sessions,
                 self.hit_goal_close.hovered,
             );
             self.hit_goal_close.rect = close_rect;

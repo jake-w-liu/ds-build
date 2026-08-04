@@ -1006,6 +1006,8 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          - Prefer explore for read-only evidence; general-purpose when edits are required.\n\
          - No nested subagent trees (children cannot spawn further subagents).\n\
          - Subagents must return distilled findings with file:line (or equation/problem labels) — no raw dumps.\n\n\
+         ## Multi-phase workflow structure\n\
+         Structure non-trivial multi-agent work as named phases so progress stays legible (Plan → Execute → Verify, or domain-specific stages). Within a phase, fan out independent units in ONE parallel batch; do not advance to the next phase until every agent in the current phase has been collected. Name each subagent's description with a short phase-scoped label (e.g. `plan:deps`, `integrate:nodes`, `verify:auth`) so the workflow panel groups them correctly. Prefer phases over a single unbounded fan-out when later work depends on earlier results.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
          - The resumed agent must use the same subagent_type as the source.\n\n\
@@ -1327,6 +1329,8 @@ mod tests {
         assert!(desc.contains("## Orchestration bounds (hard platform limits)"));
         assert!(desc.contains("NO HARD CAP on concurrent subagents"));
         assert!(desc.contains("one agent per independent unit"));
+        assert!(desc.contains("## Multi-phase workflow structure"));
+        assert!(desc.contains("Plan → Execute → Verify"));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
     }

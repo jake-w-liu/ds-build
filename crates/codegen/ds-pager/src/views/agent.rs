@@ -102,8 +102,10 @@ pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
 /// prompt height + todo height. Shared widgets use these rects to render into.
 pub struct AgentViewLayout {
     pub status_bar: Rect,
-    /// Startup terminal-warning banner (between status bar and bg tasks/scrollback).
+    /// Startup terminal-warning banner (between status bar and catalog/scrollback).
     pub startup_warnings: Rect,
+    /// Combined tasks/workflow panel — laid out *below* the prompt (Claude
+    /// Code–style bottom task panel), not above scrollback.
     pub tasks: Rect,
     pub catalog: Rect,
     pub scrollback: Rect,
@@ -189,15 +191,15 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
+        // Vertical order (Claude Code–style): status/chrome at top, scrollback
+        // in the middle, prompt near the bottom, and the tasks/workflow panel
+        // *below* the prompt (not above scrollback). Catalog + todo stay above
+        // scrollback as secondary chrome.
         let mut constraints = vec![Constraint::Length(1)];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
         let pane_gap = if top_vpad == 0 { 0u16 } else { 1 };
-        if tasks_height > 0 {
-            constraints.push(Constraint::Length(pane_gap));
-            constraints.push(Constraint::Length(tasks_height));
-        }
         if catalog_height > 0 {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(catalog_height));
@@ -240,6 +242,19 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(voice_recording_height));
         }
         constraints.push(Constraint::Length(prompt_height));
+        // Tasks / workflow progress panel sits *below* the input (Claude Code
+        // task panel placement), then shortcuts.
+        let tasks_gap = if tasks_height > 0 {
+            if bottom_vpad == 0 { 0u16 } else { 1 }
+        } else {
+            0
+        };
+        if tasks_gap > 0 {
+            constraints.push(Constraint::Length(tasks_gap));
+        }
+        if tasks_height > 0 {
+            constraints.push(Constraint::Length(tasks_height));
+        }
         let shortcuts_gap = if bottom_vpad == 0 { 0u16 } else { 1 };
         if shortcuts_gap > 0 {
             constraints.push(Constraint::Length(shortcuts_gap));
@@ -256,16 +271,8 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
-        let tasks = if tasks_height > 0 {
-            i += 1;
-            let r = chunks[i];
-            i += 1;
-            r
-        } else {
-            Rect::default()
-        };
         let catalog = if catalog_height > 0 {
-            i += 1;
+            i += 1; // gap
             let r = chunks[i];
             i += 1;
             r
@@ -273,18 +280,18 @@ impl AgentViewLayout {
             Rect::default()
         };
         let todo = if todo_height > 0 {
-            i += 1;
+            i += 1; // gap
             let r = chunks[i];
             i += 1;
             r
         } else {
             Rect::default()
         };
-        i += 1;
+        i += 1; // status_gap
         let scrollback = chunks[i];
         i += 1;
         let btw = if btw_height > 0 {
-            i += 1;
+            i += 1; // gap
             let r = chunks[i];
             i += 1;
             r
@@ -343,6 +350,16 @@ impl AgentViewLayout {
         };
         let prompt = chunks[i];
         i += 1;
+        if tasks_gap > 0 {
+            i += 1;
+        }
+        let tasks = if tasks_height > 0 {
+            let r = chunks[i];
+            i += 1;
+            r
+        } else {
+            Rect::default()
+        };
         if shortcuts_gap > 0 {
             i += 1;
         }
@@ -1755,6 +1772,52 @@ mod tests {
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
     }
+
+    /// Tasks/workflow panel sits below the prompt (Claude Code placement),
+    /// not between the status bar and scrollback.
+    #[test]
+    fn tasks_panel_renders_below_prompt() {
+        let area = Rect::new(0, 0, 80, 40);
+        let layout_cfg = LayoutConfig::default();
+        let scrollbar_cfg = ScrollbarConfig::default();
+        let layout = AgentViewLayout::compute(
+            area,
+            &layout_cfg,
+            &scrollbar_cfg,
+            2, // prompt
+            4, // tasks
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            false,
+        );
+        assert_eq!(layout.tasks.height, 4);
+        assert!(
+            layout.tasks.y > layout.prompt.y,
+            "tasks.y={} must be below prompt.y={}",
+            layout.tasks.y,
+            layout.prompt.y
+        );
+        assert!(
+            layout.tasks.y >= layout.prompt.y + layout.prompt.height,
+            "tasks must start at or after prompt bottom"
+        );
+        assert!(
+            layout.scrollback.y + layout.scrollback.height <= layout.prompt.y,
+            "scrollback must end at or above the prompt"
+        );
+        assert!(layout.tasks.y < layout.shortcuts.y || layout.shortcuts.height == 0);
+    }
+
     #[test]
     fn plugin_cta_row_present_above_prompt() {
         let area = Rect::new(0, 0, 80, 40);

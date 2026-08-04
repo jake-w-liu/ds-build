@@ -47,3 +47,4 @@ pub mod tasks_pane;
 pub mod todo_pane;
 pub mod turn_status;
 pub mod welcome;
+pub mod workflow_panel;
