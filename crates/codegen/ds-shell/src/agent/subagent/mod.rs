@@ -50,13 +50,6 @@ pub(crate) fn is_attacker_subagent_type(subagent_type: &str) -> bool {
         "attacker-code" | "attacker-math" | "attacker-research"
     ) || subagent_type.starts_with("attacker-")
 }
-
-fn parent_prompt_matches(wanted: Option<&str>, actual: Option<&str>) -> bool {
-    match wanted {
-        None => true,
-        Some(w) => actual == Some(w),
-    }
-}
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {

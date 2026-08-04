@@ -32,17 +32,19 @@ pub struct TaskToolInput {
 
     /// Whether to run the subagent in the background.
     ///
-    /// `None` (omitted) = agent default: background for most agents,
-    /// foreground for attacker-* critics (they gate acceptance). `Some(true)`
-    /// = background (returns immediately with a subagent_id; use the task
-    /// output tool to retrieve results) — pass this to run parallel batches
-    /// of independent agents. `Some(false)` = foreground (the parent turn
-    /// waits for the result before continuing).
+    /// `None` (omitted) = inline: attacker-* critics finish in the foreground
+    /// (they gate acceptance); other agents also return the completed output
+    /// inline (auto-backgrounding only if they exceed the wait budget).
+    /// `Some(true)` = background (returns immediately with a subagent_id; use
+    /// the task output tool to retrieve results) — pass this to run parallel
+    /// batches of independent agents. `Some(false)` = foreground (the parent
+    /// turn waits for the result before continuing).
     #[schemars(
-        description = "None (omitted) = agent default (background for most agents, foreground \
-            for attacker-* critics). Some(true) = background: returns immediately with a \
-            subagent_id, use the task output tool to retrieve results — use for parallel \
-            batches of independent agents. Some(false) = foreground: the parent turn waits."
+        description = "None (omitted) = inline (attacker-* critics finish in the foreground; \
+            other agents return the completed output inline). Some(true) = background: returns \
+            immediately with a subagent_id, use the task output tool to retrieve results — use \
+            for parallel batches of independent agents. Some(false) = foreground: the parent \
+            turn waits."
     )]
     #[serde(default)]
     pub run_in_background: Option<bool>,
@@ -995,15 +997,13 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          {agent_lines}\n\n\
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
-         - {run_in_background_param}: None/omitted = agent default (background for most agents, foreground for attacker-* critics). Pass true to run several agents in parallel (returns immediately; collect with {background_retrieval_tool}). Pass false for a foreground gate that must finish before you continue.\n\
+         - {run_in_background_param}: None/omitted = attacker-* critics finish inline (foreground gate); other agents return the completed output inline too (they auto-background only if they exceed the wait budget). Pass true to run several agents in parallel (returns immediately; collect with {background_retrieval_tool}). Pass false to force an inline foreground wait.\n\
          - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
          ## Orchestration bounds (hard platform limits)\n\
-         - MAX 24 live subagents at once (pending+running); wait or cancel before spawning more.\n\
-         - MAX 24 attacker-* subagents live per turn (Stage 3 adversarial review).\n\
-         - Prefer explore for read-only evidence; general-purpose when edits are required.\n\
-         - PARALLEL DECOMPOSITION: when work splits into independent units (per-result, per-regime, per-problem, per-claim, per-file), spawn one subagent per unit in a SINGLE parallel batch ({run_in_background_param}=true), then collect EVERY output with {background_retrieval_tool} before proceeding. Do not serialize independent checks — a 20-problem sheet gets ~20 parallel workers, not one worker per hour.\n\
+         - NO HARD CAP on concurrent subagents: scale the batch to the task. Spawn one agent per independent unit (per-result, per-regime, per-problem, per-claim, per-file) in a single parallel batch ({run_in_background_param}=true), then collect EVERY output with {background_retrieval_tool} before proceeding or spawning more. Practical limits still apply (memory, API rate limits, cost) — never spawn agents whose outputs you will not collect.\n\
          - attacker-* default to foreground (final acceptance gate). For parallel adversarial review, pass {run_in_background_param}=true explicitly — spawn one attacker per independent check/result/regime in one batch, then collect ALL outputs before gating on them.\n\
+         - Prefer explore for read-only evidence; general-purpose when edits are required.\n\
          - No nested subagent trees (children cannot spawn further subagents).\n\
          - Subagents must return distilled findings with file:line (or equation/problem labels) — no raw dumps.\n\n\
          Resuming a previous agent (resume_from):\n\
@@ -1322,12 +1322,11 @@ mod tests {
         assert!(desc.contains("- **code-reviewer**: Reviews code."));
         assert!(desc.contains("## Usage notes"));
         assert!(desc.contains(
-            "run_in_background: None/omitted = agent default (background for most agents, foreground for attacker-* critics)"
+            "run_in_background: None/omitted = attacker-* critics finish inline (foreground gate)"
         ));
         assert!(desc.contains("## Orchestration bounds (hard platform limits)"));
-        assert!(desc.contains("MAX 24 live subagents"));
-        assert!(desc.contains("MAX 24 attacker-*"));
-        assert!(desc.contains("PARALLEL DECOMPOSITION"));
+        assert!(desc.contains("NO HARD CAP on concurrent subagents"));
+        assert!(desc.contains("one agent per independent unit"));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
     }
@@ -1534,7 +1533,7 @@ mod tests {
         assert!(desc.contains("When using the ${{ tools.by_kind.task }} tool"));
         assert!(desc.contains("${{ tools.by_kind.read }}"));
         assert!(desc.contains(
-            "${{ params.task.run_in_background }}: None/omitted = agent default (background for most agents, foreground for attacker-* critics)"
+            "${{ params.task.run_in_background }}: None/omitted = attacker-* critics finish inline (foreground gate)"
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
         assert!(desc.contains("## Orchestration bounds (hard platform limits)"));

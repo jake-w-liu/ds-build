@@ -40,6 +40,9 @@ enum Command {
         /// output directory for report + captures
         #[arg(long, default_value = "./cost-harness-out")]
         out: PathBuf,
+        /// parallel_attackers batch size (default 4; raise for 20+ tests)
+        #[arg(long, default_value_t = 4)]
+        attackers: usize,
         /// ds binary path (default: `ds` on PATH)
         #[arg(long)]
         ds_bin: Option<PathBuf>,
@@ -59,6 +62,7 @@ async fn main() -> Result<()> {
             scenario,
             headroom,
             out,
+            attackers,
             ds_bin,
         } => {
             let mode = match mode.as_str() {
@@ -86,8 +90,15 @@ async fn main() -> Result<()> {
                 scenarios.retain(|s| s.id == scenario);
                 anyhow::ensure!(
                     !scenarios.is_empty(),
-                    "unknown scenario {scenario:?} (all|multi_turn|compaction|round_trip|big_tool)"
+                    "unknown scenario {scenario:?} (all|multi_turn|compaction|round_trip|big_tool|parallel_attackers)"
                 );
+            }
+            if attackers != 4 {
+                // Rebuild parallel_attackers at the requested batch size.
+                anyhow::ensure!(attackers >= 1 && attackers <= 256, "--attackers must be 1..=256");
+                let pa = ds_cost_harness::scenarios::parallel_attackers("TARGETWORD_P", attackers);
+                scenarios.retain(|s| s.id != "parallel_attackers");
+                scenarios.push(pa);
             }
 
             let ab_order = match headroom.as_str() {

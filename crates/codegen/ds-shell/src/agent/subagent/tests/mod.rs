@@ -1035,12 +1035,11 @@ fn push_pending_completion_caps_buffer() {
 }
 
 #[test]
-fn at_live_capacity_tracks_pending_and_active() {
+fn live_count_tracks_pending_and_active_without_cap() {
     let mut coordinator = SubagentCoordinator::new();
-    assert!(!coordinator.at_live_capacity());
     assert_eq!(coordinator.live_count(), 0);
-    assert_eq!(SubagentCoordinator::MAX_LIVE_SUBAGENTS, 24);
-    for i in 0..SubagentCoordinator::MAX_LIVE_SUBAGENTS {
+    // No hard cap: many pending entries are tracked, never rejected.
+    for i in 0..64 {
         coordinator.insert_pending(PendingSubagent {
             subagent_id: format!("p-{i}"),
             subagent_type: "explore".into(),
@@ -1055,41 +1054,14 @@ fn at_live_capacity_tracks_pending_and_active() {
             cancel_token: tokio_util::sync::CancellationToken::new(),
         });
     }
-    assert_eq!(
-        coordinator.live_count(),
-        SubagentCoordinator::MAX_LIVE_SUBAGENTS
-    );
-    assert!(coordinator.at_live_capacity());
+    assert_eq!(coordinator.live_count(), 64);
 }
 
 #[test]
-fn attacker_live_count_scopes_by_parent_prompt() {
-    let mut coordinator = SubagentCoordinator::new();
-    assert_eq!(coordinator.attacker_live_count(Some("turn-a")), 0);
-    for (id, prompt, ty) in [
-        ("a1", "turn-a", "attacker-code"),
-        ("a2", "turn-a", "attacker-math"),
-        ("a3", "turn-b", "attacker-research"),
-        ("e1", "turn-a", "explore"),
-    ] {
-        coordinator.insert_pending(PendingSubagent {
-            subagent_id: id.into(),
-            subagent_type: ty.into(),
-            description: "crit".into(),
-            persona: None,
-            parent_prompt_id: Some(prompt.into()),
-            parent_session_id: "parent".into(),
-            started_at: std::time::Instant::now(),
-            run_in_background: false,
-            surface_completion: true,
-            color: None,
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-        });
-    }
-    assert_eq!(coordinator.attacker_live_count(Some("turn-a")), 2);
-    assert_eq!(coordinator.attacker_live_count(Some("turn-b")), 1);
-    assert_eq!(coordinator.attacker_live_count(None), 3);
+fn attacker_type_recognition_covers_builtin_and_custom() {
     assert!(is_attacker_subagent_type("attacker-code"));
+    assert!(is_attacker_subagent_type("attacker-math"));
+    assert!(is_attacker_subagent_type("attacker-research"));
     assert!(is_attacker_subagent_type("attacker-custom"));
     assert!(!is_attacker_subagent_type("explore"));
 }

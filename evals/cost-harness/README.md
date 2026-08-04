@@ -112,7 +112,7 @@ reported (cache_read trajectory), never asserted equal.
 - **Parallel adversarial review (orchestration upgrade, 0.1.75+):** attacker-*
   critics previously hard-forced foreground and capped at 3 per turn (the
   model spawned one, waited, spawned the next — the observed "only 1
-  subagent" behavior). Now: caps raised to 24 live / 24 attackers per turn,
+  subagent" behavior). Now: **no hard cap on subagent counts** (0.1.76+),
   an explicit `run_in_background: true` overrides the attacker foreground
   default, and the orchestration guidance teaches single-batch parallel
   decomposition (one attacker per result/regime/claim, collect ALL before

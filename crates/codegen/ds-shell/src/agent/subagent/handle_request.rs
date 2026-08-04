@@ -118,32 +118,10 @@ pub(crate) async fn handle_subagent_request(
             ctx.parent_blocking_wait_depth.clone(),
         ));
     let cancel_token = CancellationToken::new();
-    // Hard platform cap on concurrent live subagents (pending + active).
-    {
-        let live = coordinator.borrow().live_count();
-        if live >= SubagentCoordinator::MAX_LIVE_SUBAGENTS {
-            let msg = format!(
-                "Live subagent limit reached ({live}/{}). Wait for some to finish or cancel unused workers, then retry.",
-                SubagentCoordinator::MAX_LIVE_SUBAGENTS
-            );
-            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
-            return;
-        }
-    }
-    // Fable Stage 3: at most 3 attacker subagents live for one parent prompt.
-    if is_attacker_subagent_type(&request.subagent_type) {
-        let parent_prompt = request.parent_prompt_id.as_deref();
-        let attackers_live = coordinator.borrow().attacker_live_count(parent_prompt);
-        if attackers_live >= SubagentCoordinator::MAX_ATTACKERS_PER_PROMPT {
-            let msg = format!(
-                "Attacker subagent limit reached ({attackers_live}/{} for this turn). \
-                 Wait for attackers to finish or cancel unused ones, then retry.",
-                SubagentCoordinator::MAX_ATTACKERS_PER_PROMPT
-            );
-            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
-            return;
-        }
-    }
+    // No hard cap on concurrent subagents: the model scales batches to the
+    // task (one agent per independent unit), bounded in practice by API rate
+    // limits, memory, and cost. The coordinator still tracks live counts for
+    // the dashboard/tasks pane; a guard can be re-added as a config knob.
     coordinator
         .borrow_mut()
         .insert_pending(PendingSubagent {

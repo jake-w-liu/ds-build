@@ -297,17 +297,6 @@ impl SubagentCoordinator {
     /// Bounds memory if many short-lived workers complete in a long session.
     pub(crate) const MAX_COMPLETED_RETAINED: usize = 64;
 
-    /// Hard cap on concurrent pending+active subagents. Matches the Fable
-    /// orchestration bound ("MAX 24 live at once") so the platform enforces
-    /// what the system prompt asks the model to respect. Sized for parallel
-    /// decomposition (e.g. a 20-problem sheet spawning one worker per unit).
-    pub(crate) const MAX_LIVE_SUBAGENTS: usize = 24;
-
-    /// Max concurrent acceptance-critical attacker subagents for one parent
-    /// prompt (Fable Stage 3: "MAX 24 attacker subagents" — one per
-    /// independent check/result/regime in a parallel batch).
-    pub(crate) const MAX_ATTACKERS_PER_PROMPT: usize = 24;
-
     /// Cap on undrained between-turn completion summaries. Each holds an
     /// `Arc` of the full output; without a drain path (or if Completions
     /// polling stalls) this must still be bounded.
@@ -317,29 +306,9 @@ impl SubagentCoordinator {
     pub(crate) const COMPLETED_TTL: std::time::Duration =
         std::time::Duration::from_secs(30 * 60);
 
-    /// Count of initializing + running subagents.
+    /// Count of initializing + running subagents (dashboard/tasks pane).
     pub(crate) fn live_count(&self) -> usize {
         self.pending.len() + self.active.len()
-    }
-
-    /// Whether a new spawn would exceed [`Self::MAX_LIVE_SUBAGENTS`].
-    pub(crate) fn at_live_capacity(&self) -> bool {
-        self.live_count() >= Self::MAX_LIVE_SUBAGENTS
-    }
-
-    /// Live attacker subagents for an optional parent prompt id.
-    ///
-    /// When `parent_prompt_id` is `None`, counts all live attackers (global).
-    pub(crate) fn attacker_live_count(&self, parent_prompt_id: Option<&str>) -> usize {
-        let pending = self.pending.values().filter(|p| {
-            is_attacker_subagent_type(&p.subagent_type)
-                && parent_prompt_matches(parent_prompt_id, p.parent_prompt_id.as_deref())
-        });
-        let active = self.active.values().filter(|t| {
-            is_attacker_subagent_type(&t.subagent_type)
-                && parent_prompt_matches(parent_prompt_id, t.parent_prompt_id.as_deref())
-        });
-        pending.count() + active.count()
     }
 
     /// TTL cleanup: remove completed entries older than [`Self::COMPLETED_TTL`],
