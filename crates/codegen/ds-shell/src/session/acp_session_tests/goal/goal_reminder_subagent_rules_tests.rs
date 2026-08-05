@@ -802,10 +802,12 @@ Multi-step goal work fails when the model narrates an action without executing i
 3. **Track multi-step work with a todo_write list when it helps.** For longer tasks a todo list is a useful scratchpad — lay out the steps, keep roughly one `in_progress`, and update items as you finish them. It is an aid to your own memory, NOT a deliverable: don't over-decompose, and don't spend turns on bookkeeping at the expense of the actual work.
 
 4. **Don't stop with easy work left undone.** Before ending a turn, check whether obvious remaining work exists that nothing is blocking. If so, keep going rather than handing back early — the goal loop re-engages you until verification passes anyway, so stopping short only wastes a round. Legitimately stop when you are genuinely waiting on a live background task, you need a user decision on real ambiguity, or you hit a hard external blocker (missing credentials, network down, denied permission) — state the blocker explicitly.
+
+5. **Orchestrate as phases, not a flat spawn storm.** For multi-step goals, work in named phases (Plan → Execute → Verify, or the stages your plan defines). Inside a phase, spawn independent units as ONE parallel batch (`run_in_background: true`), collect ALL outputs, then advance. Prefix each subagent description with a short phase label (`plan:…`, `integrate:…`, `verify:…`) so the workflow panel groups them. Do not start the next phase while agents from the current phase are still uncollected.
 </task_completion_discipline>
 "#;
 /// Template byte size is pinned so token-cost regressions are visible in CI.
-const GOAL_TASK_DISCIPLINE_TEMPLATE_LEN: usize = 2142;
+const GOAL_TASK_DISCIPLINE_TEMPLATE_LEN: usize = 2654;
 #[test]
 fn goal_task_discipline_template_len_pinned() {
     assert_eq!(

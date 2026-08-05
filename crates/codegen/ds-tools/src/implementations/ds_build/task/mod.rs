@@ -810,9 +810,10 @@ mod tests {
         let input: TaskToolInput =
             serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
-        assert!(
+        assert_eq!(
             input.run_in_background,
-            "run_in_background should default to true"
+            None,
+            "run_in_background should default to None (agent definition decides)"
         );
     }
 
@@ -821,7 +822,7 @@ mod tests {
             description: "test".into(),
             prompt: "do it".into(),
             subagent_type: subagent_type.into(),
-            run_in_background: background,
+            run_in_background: Some(background),
             capability_mode: None,
             isolation: None,
             resume_from: None,
@@ -1195,7 +1196,7 @@ mod tests {
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
             subagent_type: "explore".into(),
-            run_in_background: true,
+            run_in_background: Some(true),
             capability_mode: Some(SubagentCapabilityMode::ReadOnly),
             isolation: Some(SubagentIsolationMode::Worktree),
             resume_from: None,
@@ -1465,7 +1466,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
-            run_in_background: false,
+            run_in_background: Some(false),
             capability_mode: None,
             isolation: None,
             resume_from: None,
@@ -1551,7 +1552,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
-            run_in_background: false,
+            run_in_background: Some(false),
             capability_mode: None,
             isolation: None,
             resume_from: None,
@@ -1711,7 +1712,7 @@ mod tests {
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
-            run_in_background: false,
+            run_in_background: Some(false),
             capability_mode: None,
             isolation: None,
             resume_from: None,

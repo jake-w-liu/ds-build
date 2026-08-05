@@ -739,15 +739,31 @@ impl StreamingLocalTerminalRunner {
         output_state: &Arc<Mutex<OutputState>>,
         exit_notify: &Arc<tokio::sync::Notify>,
     ) -> Result<TerminalRunResult, TerminalError> {
-        {
-            // best-effort killing, not waiting for the process to exit
+        // Kill the process group and REAP it so the result carries the real
+        // termination signal. A child that was mid-fork when the first
+        // SIGKILL snapshot was taken inherits the pgid but not the already
+        // delivered signal (e.g. `sleep 300 & sleep 300 & wait` under load),
+        // survives the kill, and holds the output pipes open — pushing the
+        // runner to this timeout. The re-kill here catches it, and the reap
+        // reports the actual signal instead of a misleading `signal: None`.
+        // Fall back to the plain "timeout" marker only if the group cannot
+        // be reaped (wedged in an uninterruptible syscall).
+        let (exit_status, result_signal) = {
             let mut c = child.lock().await;
             let _ = c.start_kill();
-        }
-
-        let exit_status = ExitStatus {
-            exit_code: None,
-            signal: Some("timeout".to_string()),
+            match tokio::time::timeout(KILL_REAP_TIMEOUT, c.wait()).await {
+                Ok(Ok(status)) => {
+                    let es = extract_exit_status(status);
+                    (es.clone(), es.signal.clone())
+                }
+                _ => (
+                    ExitStatus {
+                        exit_code: None,
+                        signal: Some("timeout".to_string()),
+                    },
+                    None,
+                ),
+            }
         };
         finalize_output_state(output_state, exit_notify, output, truncated, &exit_status).await;
 
@@ -768,7 +784,7 @@ impl StreamingLocalTerminalRunner {
             combined_output: String::from_utf8_lossy(output).into_owned(),
             exit_code: None,
             truncated,
-            signal: None,
+            signal: result_signal,
             timed_out: true,
         })
     }

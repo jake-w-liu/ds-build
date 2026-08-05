@@ -61,6 +61,20 @@ fn resolve_background_policy(
         (None, None) => true,
     }
 }
+
+/// Whether the spawning caller is awaiting this subagent's result.
+///
+/// The tool side (`TaskTool` in ds-tools) dispatches fire-and-forget only
+/// on an explicit `Some(true)`; every other value (omitted `None`, explicit
+/// `Some(false)`) takes the blocking path and awaits the result. The bounded
+/// wait (auto-background budget) must therefore apply in exactly those cases
+/// too — otherwise an omitted flag on an agent whose definition defaults to
+/// background would hold the parent turn open with NO budget, contradicting
+/// the model-facing contract ("auto-background only if they exceed the wait
+/// budget").
+fn caller_awaits_result(requested: Option<bool>) -> bool {
+    requested != Some(true)
+}
 /// This is a free async function, NOT a method on MvpAgent. It receives
 /// a `SubagentSpawnContext` with everything it needs, and a mutable
 /// reference to the coordinator for tracking.
@@ -1339,12 +1353,18 @@ pub(crate) async fn handle_subagent_request(
         let (dummy_tx, _) = oneshot::channel();
         Some(std::mem::replace(&mut request.result_tx, dummy_tx))
     };
+    // The spawning caller awaits the result unless it explicitly requested a
+    // fire-and-forget spawn (`Some(true)`). The bounded wait must apply to
+    // every other case — including an omitted flag on agents whose definition
+    // defaults to background — or a long-running child would hold the parent
+    // turn open with no auto-background budget.
+    let caller_awaits = caller_awaits_result(request.run_in_background);
     let wait_outcome = {
         let fut = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone());
         tokio::pin!(fut);
-        if !run_in_background {
-            /// How the bounded foreground wait ended.
-            enum ForegroundWait {
+        if caller_awaits {
+            /// How the bounded wait ended.
+            enum BoundedWait {
                 /// The child finished (or was cancelled) within the budget.
                 Done(SubagentWaitOutcome),
                 /// The spawning tool's `result_rx` was dropped — parent turn died mid-await.
@@ -1360,24 +1380,24 @@ pub(crate) async fn handle_subagent_request(
                     }
                 };
                 tokio::select! {
-                    biased; outcome = & mut fut => ForegroundWait::Done(outcome), _ =
-                    parent_await_dropped => ForegroundWait::ParentGone, _ =
+                    biased; outcome = & mut fut => BoundedWait::Done(outcome), _ =
+                    parent_await_dropped => BoundedWait::ParentGone, _ =
                     tokio::time::sleep(subagent_await_budget()) =>
-                    ForegroundWait::Budget,
+                    BoundedWait::Budget,
                 }
             };
             match first {
-                ForegroundWait::Done(outcome) => {
+                BoundedWait::Done(outcome) => {
                     if matches!(outcome, SubagentWaitOutcome::Cancelled) {
                         parent_wait_guard.take();
                     }
                     outcome
                 }
-                ForegroundWait::ParentGone => {
+                BoundedWait::ParentGone => {
                     parent_wait_guard.take();
                     tracing::info!(
                         subagent_id = % request.id,
-                        "foreground subagent await abandoned by its parent turn; detaching child to background (child keeps running)",
+                        "subagent await abandoned by its parent turn; detaching child to background (child keeps running)",
                     );
                     if !cancel_token.is_cancelled() {
                         request.run_in_background = Some(true);
@@ -1385,11 +1405,11 @@ pub(crate) async fn handle_subagent_request(
                     }
                     fut.await
                 }
-                ForegroundWait::Budget => {
+                BoundedWait::Budget => {
                     tracing::info!(
                         subagent_id = % request.id, budget_ms = subagent_await_budget()
                         .as_millis() as u64,
-                        "foreground subagent exceeded await budget; auto-backgrounding (child keeps running)",
+                        "subagent await exceeded budget; auto-backgrounding (child keeps running)",
                     );
                     if let Some(tx) = result_tx.take() {
                         let _ = tx
@@ -2045,7 +2065,7 @@ pub(crate) async fn handle_subagent_request(
 
 #[cfg(test)]
 mod background_policy_tests {
-    use super::resolve_background_policy;
+    use super::{caller_awaits_result, resolve_background_policy};
 
     #[test]
     fn attacker_default_is_foreground_when_omitted() {
@@ -2072,5 +2092,24 @@ mod background_policy_tests {
     #[test]
     fn non_attacker_definition_default_respected() {
         assert!(resolve_background_policy(Some(true), None));
+    }
+
+    #[test]
+    fn caller_awaits_except_explicit_fire_and_forget() {
+        // The ds-tools TaskTool dispatches fire-and-forget ONLY on explicit
+        // Some(true); every other value takes the blocking path and awaits.
+        assert!(!caller_awaits_result(Some(true)));
+        assert!(caller_awaits_result(Some(false)));
+        assert!(caller_awaits_result(None));
+    }
+
+    #[test]
+    fn omitted_flag_still_bounded_for_background_default_agents() {
+        // general-purpose (definition background: None) + omitted flag
+        // resolves to background, but the caller still awaits — the budget
+        // must apply so the turn cannot block indefinitely.
+        let resolved = resolve_background_policy(None, None);
+        assert!(resolved);
+        assert!(caller_awaits_result(None));
     }
 }
