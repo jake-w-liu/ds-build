@@ -50,6 +50,7 @@ schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
+sha2 = { workspace = true }
 ds-tool-runtime = { workspace = true }
 ds-tool-types = { workspace = true }
 ds-tool-protocol = { workspace = true }

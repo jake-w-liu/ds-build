@@ -673,6 +673,7 @@ impl ToolRegistryBuilder {
         b.register::<ds_build::TodoWriteTool>();
         b.register::<ds_build::HeadroomRetrieveTool>();
         b.register::<ds_build::UpdateGoalTool>();
+        b.register::<ds_build::MprValidateArtifactTool>();
         b.register::<ds_build::TaskOutputTool>();
         b.register::<ds_build::GetTerminalCommandOutputTool>();
         b.register::<ds_build::WaitTasksTool>();

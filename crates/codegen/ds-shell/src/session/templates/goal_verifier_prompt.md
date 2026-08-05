@@ -158,11 +158,14 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    `"contradiction"` (objective/plan internally precludes itself), or
    `"unverifiable"` (evidence infeasible in THIS environment). The latter two
    signal the goal needs a user decision, not a retry.
-9. For math/physics research, inspect the actual final artifact and independently
-   challenge every requested result plus the consequential reasoning whose
-   failure could change it. Scale the audit to risk and size. Apply checks suited
-   to the work: assumptions and domains, signs and branches, units, BC/IC,
-   residuals, special or limiting regimes, conservation, independent
+9. For math/physics research, the MATH RULE OVERRIDES the cheap-spot-check
+   guidance above: inspect the actual final artifact and independently
+   challenge EVERY requested result plus the consequential reasoning whose
+   failure could change it. Do not scale down to sampling because the task is
+   large — enumerate the results and check each one, using the checks below.
+   Scale the DEPTH to risk and size, never the COVERAGE of requested results.
+   Apply checks suited to the work: assumptions and domains, signs and branches,
+   units, BC/IC, residuals, special or limiting regimes, conservation, independent
    derivations, and numerical convergence/error or sensitivity. Refute confirmed
    mathematical errors, missing requested results, unsupported material claims,
    and source/artifact contradictions. Do not refute a valid alternative method,

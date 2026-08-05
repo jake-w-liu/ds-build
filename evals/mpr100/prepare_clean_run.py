@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Create a hash-pinned, answer-key-free MPR-100 development workspace."""
+"""Create a hash-pinned, answer-key-free MPR-100 development workspace and an
+isolated, fail-closed launcher.
+
+The generated `run.sh` launches `ds` with:
+  --sandbox strict  --no-memory  --disable-web-search  --agent-profile <profile>
+plus `DS_SANDBOX_FAIL_CLOSED=1` so the run REFUSES to start if the sandbox
+could not actually be applied (unsupported platform / apply error) instead of
+silently proceeding unsandboxed.
+
+The run manifest records RUNTIME-OBSERVED values (ds binary version + baked
+commit, profile path + hash, administered model, launch argv, sandbox/memory/
+web-search policy) and is updated with the final artifact SHA-256 when the run
+finishes, so a submission is reproducible end to end.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +21,7 @@ import hashlib
 import json
 import secrets
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +41,9 @@ EXPECTED_SHA256 = {
         "444bbe95698361a7fb708fc41525f93feed8b55b16dc426a37fcf72ca8ab2d54"
     ),
 }
+
+# Default artifact file whose SHA-256 is appended to the manifest post-run.
+ARTIFACT_NAME = "mpr100_answer_sheet_development.tex"
 
 
 def sha256(path: Path) -> str:
@@ -54,7 +71,58 @@ def parse_args() -> argparse.Namespace:
         "--run-id",
         help="explicit run ID; default is a UTC timestamp plus a random suffix",
     )
+    parser.add_argument(
+        "--agent-profile",
+        type=Path,
+        required=True,
+        help="path to the mpr-researcher.md agent profile (required: the /goal "
+        "/structure command does NOT select a profile by itself)",
+    )
+    parser.add_argument(
+        "--ds-bin",
+        type=Path,
+        default=Path("ds"),
+        help="path to the ds binary (default: ds on PATH)",
+    )
+    parser.add_argument(
+        "--model",
+        default="deepseek-v4-pro",
+        help="model administered for the run (recorded in the manifest)",
+    )
+    parser.add_argument(
+        "--extra-ds-args",
+        default="",
+        help="extra ds CLI arguments appended to the launcher (quoted, shell-split)",
+    )
     return parser.parse_args()
+
+
+def probe_ds(binary: Path) -> dict[str, str]:
+    """Record the ds binary's runtime-observed version + baked commit."""
+    info: dict[str, str] = {}
+    try:
+        version = subprocess.run(
+            [str(binary), "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        ).stdout.strip()
+        info["ds_version"] = version
+    except Exception as err:  # noqa: BLE001 - record, don't fail the prepare
+        info["ds_version"] = f"<unavailable: {err}>"
+    try:
+        j = subprocess.run(
+            [str(binary), "version", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        ).stdout.strip()
+        info["ds_version_json"] = j
+    except Exception as err:  # noqa: BLE001
+        info["ds_version_json"] = f"<unavailable: {err}>"
+    return info
 
 
 def main() -> int:
@@ -62,6 +130,11 @@ def main() -> int:
     source = args.source.expanduser().resolve()
     if not source.is_dir():
         print(f"error: source is not a directory: {source}", file=sys.stderr)
+        return 2
+
+    profile = args.agent_profile.expanduser().resolve()
+    if not profile.is_file():
+        print(f"error: --agent-profile is not a file: {profile}", file=sys.stderr)
         return 2
 
     observed: dict[str, str] = {}
@@ -109,28 +182,104 @@ def main() -> int:
         )
         return 2
 
+    ds_info = probe_ds(args.ds_bin)
     manifest = {
         "run_id": run_id,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source": str(source),
         "workspace": str(workspace),
         "sha256": observed,
-        "model": "deepseek-v4-pro",
+        "model": args.model,
+        "agent_profile": str(profile),
+        "agent_profile_sha256": sha256(profile),
+        "ds_bin": str(args.ds_bin.expanduser().resolve()),
+        "ds_version": ds_info.get("ds_version"),
+        "ds_version_json": ds_info.get("ds_version_json"),
+        "sandbox": "strict (fail-closed: DS_SANDBOX_FAIL_CLOSED=1)",
+        "memory": "disabled (--no-memory)",
+        "web_search": "disabled (--disable-web-search)",
         "administration": [
             "/headroom on",
             "/goal /structure start from AGENT_INSTRUCTIONS.txt and complete all.",
         ],
+        "launch_argv": [
+            str(args.ds_bin.expanduser().resolve()),
+            "--cwd",
+            str(workspace),
+            "--sandbox",
+            "strict",
+            "--no-memory",
+            "--disable-web-search",
+            "--agent-profile",
+            str(profile),
+            "--model",
+            args.model,
+            *[t for t in args.extra_ds_args.split() if t],
+        ],
+        "artifact_sha256": None,  # filled by run.sh on completion
     }
     run_root.mkdir(parents=True, exist_ok=True)
-    (run_root / "run_manifest.json").write_text(
+    manifest_path = run_root / "run_manifest.json"
+    manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
+    # Launcher: isolated, fail-closed, manifest-finalizing.
+    artifact = workspace / ARTIFACT_NAME
+    launcher = run_root / "run.sh"
+    launcher.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+# Isolated MPR-100 run launcher — generated by prepare_clean_run.py.
+# Refuses to start if the strict sandbox cannot be applied.
+WORKSPACE={json.dumps(str(workspace))}
+RUN_ROOT={json.dumps(str(run_root))}
+ARTIFACT={json.dumps(str(artifact))}
+export DS_SANDBOX_FAIL_CLOSED=1
+cd "$WORKSPACE"
+{json.dumps(str(args.ds_bin.expanduser().resolve()))} \\
+  --cwd "$WORKSPACE" \\
+  --sandbox strict \\
+  --no-memory \\
+  --disable-web-search \\
+  --agent-profile {json.dumps(str(profile))} \\
+  --model {json.dumps(args.model)} \\
+  {' '.join(args.extra_ds_args.split())} \\
+  "$@"
+status=$?
+if [ -f "$ARTIFACT" ]; then
+  python3 - "$RUN_ROOT/run_manifest.json" "$ARTIFACT" <<'PY'
+import hashlib, json, sys
+manifest_path, artifact_path = sys.argv[1], sys.argv[2]
+digest = hashlib.sha256(open(artifact_path, "rb").read()).hexdigest()
+with open(manifest_path, encoding="utf-8") as f:
+    manifest = json.load(f)
+manifest["artifact_sha256"] = digest
+manifest["finished_utc"] = __import__("datetime").datetime.now(
+    __import__("datetime").timezone.utc
+).isoformat()
+with open(manifest_path, "w", encoding="utf-8") as f:
+    json.dump(manifest, f, indent=2, sort_keys=True)
+    f.write("\\n")
+print(f"artifact_sha256: {{digest}}")
+PY
+fi
+exit $status
+""",
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+
     print(workspace)
+    print(f"launcher: {launcher}")
+    print(
+        "NOTE: run the launcher (not a bare `ds` invocation) so the isolation "
+        "flags, fail-closed sandbox, and manifest finalization are guaranteed.",
+        file=sys.stderr,
+    )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

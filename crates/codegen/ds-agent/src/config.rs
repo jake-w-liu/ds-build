@@ -284,6 +284,7 @@ fn default_ds_build_toolset() -> ToolServerConfig {
             (&use_tool::UseTool).into(),
             (&ds_build::UpdateGoalTool).into(),
             (&ds_build::HeadroomRetrieveTool).into(),
+            (&ds_build::MprValidateArtifactTool).into(),
         ],
         behavior_preset: None,
     }

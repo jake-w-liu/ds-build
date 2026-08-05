@@ -56,17 +56,42 @@ pdflatex -halt-on-error -interaction=nonstopmode \
 
 ## Clean evaluation loop
 
+`/goal /structure` does NOT select a specialized agent profile — agent
+selection is explicit (`--agent-profile`, `[agent]`, `DS_AGENT`, or the
+default `ds-build`). The MPR profile ships as
+`crates/codegen/ds-agent/examples/agents/mpr-researcher.md` and must be passed
+explicitly, or installed to `~/.ds/agents/mpr-researcher.md`.
+
 Prepare a run from the original corpus:
 
 ```sh
 workspace="$(
   python3 evals/mpr100/prepare_clean_run.py \
-    /Users/jake/Downloads/mpr100_agent_test
+    /Users/jake/Downloads/mpr100_agent_test \
+    --agent-profile /path/to/mpr-researcher.md
 )"
 ```
 
-Run `ds` with that printed path as its working directory. Administer the same
-two inputs on a new session:
+The prepared run directory contains:
+
+- `workspace/` — exactly the four hash-pinned benchmark inputs;
+- `run.sh` — the ONLY supported launch path: it runs `ds` with
+  `--sandbox strict --no-memory --disable-web-search --agent-profile <profile>`
+  and `DS_SANDBOX_FAIL_CLOSED=1` (the run REFUSES to start if the strict
+  sandbox cannot be applied — unsandboxed runs are never silent);
+- `run_manifest.json` — runtime-observed metadata: ds binary version + baked
+  commit, profile path + hash, administered model, launch argv, sandbox /
+  memory / web-search policy, corpus hashes, and the final artifact SHA-256
+  (written when the run finishes).
+
+Run the launcher (a bare `ds` invocation skips the isolation flags and the
+manifest finalization):
+
+```sh
+./"$workspace"/../run.sh
+```
+
+Administer the same two inputs on a new session:
 
 ```text
 /headroom on
@@ -84,3 +109,30 @@ python3 evals/mpr100/score_submission.py \
 For every miss, inspect the transcript and identify the first unsupported or
 incorrect step before changing the harness. A harness change is justified only
 by a reproduced behavior and must be followed by a fresh clean workspace.
+
+## Completion gate and validator
+
+The `mpr-researcher` profile declares a `completionRequirement` on
+`mpr_validate_artifact`, a deterministic validator registered in the ds-build
+toolset (NOT `score_submission.py` — it contains no benchmark answers and
+cannot be gamed toward lexical targets). It parses the artifact's
+`%<MPR:BEGIN id=…>` blocks and requires, per item: the six solution fields
+(assumptions / derivation / final `\boxed` / independent checks / tools &
+evidence / confidence), no placeholders or abstentions, balanced LaTeX
+environments, and — with `require_evidence_manifest=true` — a matching
+successful record in `evidence_manifest.json` for every tool-confirmation
+claim. The gate treats the validator's TOOL ERROR as failure and retries the
+turn; the goal cannot complete until the exact artifact passes.
+
+## Benchmark hygiene knobs (recommended for a private-form run)
+
+- `[goal] fail_closed_verification = true` (env `DS_GOAL_FAIL_CLOSED_VERIFICATION=1`):
+  verification INFRASTRUCTURE failures pause the goal instead of recording
+  `Achieved`.
+- `[goal] strict_skeptic_verdicts = true` (env `DS_GOAL_STRICT_SKEPTIC_VERDICTS=1`):
+  a skeptic whose verdict JSON is missing/malformed votes a synthetic REFUTE;
+  an unstructured terminal token can never approve.
+- `[goal] skeptic_models = [...]`: use at least one skeptic model
+  heterogeneous with the solver to avoid shared-model blind spots.
+- Freeze the harness and the profile hash (recorded in the manifest) before
+  touching an unopened private form.

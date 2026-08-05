@@ -806,26 +806,53 @@ impl SessionActor {
                 reason,
                 details_path,
             } => {
-                tracing::warn!(
-                    ?reason,
-                    "goal verification fail-open (infra-class) → Achieved",
-                );
-                self.prune_subagent_records_for_active_goal();
-                self.clear_pending_classifier_completions();
-                let mut tracker = self.goal_tracker.lock();
-                Self::record_verdict_on_orchestration(
-                    &mut tracker,
-                    GoalClassifierVerdict::Achieved,
-                    (!details_path.is_empty()).then_some(details_path.as_str()),
-                    GapsUpdate::Clear,
-                );
-                // Fail-open is treated as Achieved: break the streak and drop
-                // any stale strategist note, symmetric with the real Achieved.
-                tracker.reset_strategist_state();
-                tracker.complete();
-                notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
-                UpdateGoalAck::ClassifierFailOpenAchieved {
-                    reason: reason.as_const_str(),
+                // Fail-closed policy: an infra-class verification failure must
+                // never be recorded as an achieved check. Pause for a user
+                // decision instead of completing the goal.
+                if self.goal_fail_closed_verification {
+                    tracing::error!(
+                        ?reason,
+                        "goal verification fail-open suppressed (fail-closed policy) — pausing",
+                    );
+                    self.prune_subagent_records_for_active_goal();
+                    self.clear_pending_classifier_completions();
+                    let msg = format_goal_pause_message(
+                        "Goal verification infrastructure failed and the goal was NOT marked \
+                         complete (fail-closed policy). Fix the verification environment and \
+                         resume, or clear the goal.",
+                        reason.as_const_str(),
+                        &details_path,
+                    );
+                    self.auto_pause_goal_if_active_with_message(
+                        crate::session::goal_tracker::GoalPauseReason::Verification,
+                        msg,
+                    )
+                    .await;
+                    UpdateGoalAck::ClassifierFailOpenAchieved {
+                        reason: reason.as_const_str(),
+                    }
+                } else {
+                    tracing::warn!(
+                        ?reason,
+                        "goal verification fail-open (infra-class) → Achieved",
+                    );
+                    self.prune_subagent_records_for_active_goal();
+                    self.clear_pending_classifier_completions();
+                    let mut tracker = self.goal_tracker.lock();
+                    Self::record_verdict_on_orchestration(
+                        &mut tracker,
+                        GoalClassifierVerdict::Achieved,
+                        (!details_path.is_empty()).then_some(details_path.as_str()),
+                        GapsUpdate::Clear,
+                    );
+                    // Fail-open is treated as Achieved: break the streak and drop
+                    // any stale strategist note, symmetric with the real Achieved.
+                    tracker.reset_strategist_state();
+                    tracker.complete();
+                    notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
+                    UpdateGoalAck::ClassifierFailOpenAchieved {
+                        reason: reason.as_const_str(),
+                    }
                 }
             }
         }
@@ -1272,6 +1299,7 @@ impl SessionActor {
             prior_gaps: prior_gaps.as_deref(),
             tool_names: &skeptic_tool_names,
             inherit_tool_names: &inherit_tool_names,
+            strict_skeptic_verdicts: self.goal_strict_skeptic_verdicts,
         };
 
         let result = run_verification_stage(spawner, inputs, &|e| self.events.emit(e)).await;

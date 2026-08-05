@@ -381,6 +381,11 @@ impl ChannelSpawner {
 
 pub(crate) struct GoalPlannerInputs<'a> {
     pub objective: &'a str,
+    /// Workspace root (parent session cwd). Used by the source-aware math
+    /// contract check to follow named local sources (e.g. a wrapper
+    /// objective pointing at `AGENT_INSTRUCTIONS.txt`), matching the final
+    /// verifier's detection.
+    pub workspace_root: &'a Path,
     pub context: &'a str,
     pub plan_file: &'a Path,
     pub attempt: u32,
@@ -497,9 +502,11 @@ pub(crate) async fn run_goal_planner(
     // so a resume can replan rather than skipping on "plan already present".
     match tokio::fs::read_to_string(inputs.plan_file).await {
         Ok(body) => {
-            if let Err(reason) =
-                crate::session::goal_classifier::validate_math_plan_contract(inputs.objective, &body)
-            {
+            if let Err(reason) = crate::session::goal_classifier::validate_math_plan_contract_source_aware(
+                inputs.objective,
+                inputs.workspace_root,
+                &body,
+            ) {
                 tracing::warn!(
                     plan_file = %plan_file_str,
                     reason,
@@ -813,6 +820,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -842,6 +850,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -877,6 +886,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -919,6 +929,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -961,6 +972,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -1000,6 +1012,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -1026,6 +1039,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -1063,6 +1077,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -1271,6 +1286,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &tool_names,
                 inherit_tool_names: &tool_names,
             },
@@ -1301,6 +1317,7 @@ mod tests {
                 plan_file: &plan_file2,
                 attempt: 1,
                 model_id: "test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &tool_names,
                 inherit_tool_names: &tool_names,
             },
@@ -1694,6 +1711,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },
@@ -1758,6 +1776,7 @@ mod tests {
                 plan_file: &plan_file,
                 attempt: 1,
                 model_id: "ds-test",
+                workspace_root: std::path::Path::new("."),
                 tool_names: &RoleToolNames::inherit_defaults(),
                 inherit_tool_names: &RoleToolNames::inherit_defaults(),
             },

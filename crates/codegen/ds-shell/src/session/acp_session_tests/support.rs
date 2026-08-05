@@ -309,6 +309,8 @@ pub(crate) async fn create_test_actor_ex(
         goal_verifier_skeptic_count: 1,
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
+        goal_fail_closed_verification: false,
+        goal_strict_skeptic_verdicts: false,
         goal_classifier_max_runs: crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
         goal_strategist_every: 5,
         goal_reverify_after: crate::session::acp_session::GOAL_REVERIFY_AFTER_DEFAULT,

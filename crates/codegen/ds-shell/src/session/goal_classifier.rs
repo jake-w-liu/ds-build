@@ -1595,6 +1595,52 @@ pub(crate) fn validate_math_plan_contract(
     Ok(())
 }
 
+/// Source-aware sibling of [`validate_math_plan_contract`]: the wrapper
+/// objective may be a pointer (e.g. "start from AGENT_INSTRUCTIONS.txt and
+/// complete all") whose quantitative content lives in named local sources.
+/// The planner gate must use the SAME traversal the final verifier uses
+/// ([`objective_or_named_sources_suggests_math`]) so a misclassified wrapper
+/// cannot slip past the static contract check.
+pub(crate) fn validate_math_plan_contract_source_aware(
+    objective: &str,
+    workspace_root: &std::path::Path,
+    plan: &str,
+) -> Result<(), &'static str> {
+    if !plan_requires_math_adversarial_source_aware(objective, workspace_root, plan) {
+        return Ok(());
+    }
+    if !matches!(parse_goal_kind(plan), Some(GoalKind::Math)) {
+        return Err(
+            "math/quantitative objective (incl. named sources) requires ## Goal kind \
+             `math` so the math verifier lens applies",
+        );
+    }
+    if !plan_has_adversarial_math_gate(plan) {
+        return Err(
+            "math plan missing gating adversarial/independent recomputation step \
+             in ## Verification plan",
+        );
+    }
+    Ok(())
+}
+
+/// Source-aware variant of [`plan_requires_math_adversarial`] that also
+/// follows named local sources named by the wrapper objective.
+pub(crate) fn plan_requires_math_adversarial_source_aware(
+    objective: &str,
+    workspace_root: &std::path::Path,
+    plan: &str,
+) -> bool {
+    match parse_goal_kind(plan) {
+        Some(GoalKind::Math) => true,
+        Some(GoalKind::CodeChange) => false,
+        _ => {
+            objective_or_named_sources_suggests_math(objective, workspace_root)
+                || objective_suggests_math(plan)
+        }
+    }
+}
+
 /// True when one numbered/bulleted item in `## Verification plan` is both
 /// gating and an independent mathematical check.
 ///
@@ -1929,13 +1975,18 @@ fn skeptic_failure(skeptic_idx: u32, note: String, latency_ms: u64) -> SkepticRe
 
 /// Read skeptic `skeptic_idx`'s verdict after its terminal response.
 /// The JSON verdict file is authoritative; the terminal token is a
-/// secondary signal used only when the JSON is missing/malformed.
+/// secondary signal used only when the JSON is missing/malformed — and in
+/// strict mode even that cannot approve: a missing/malformed JSON record is
+/// a synthetic REFUTE (the terminal token may only tighten to refute), so
+/// no acceptance can ride on an unstructured signal with unknown confidence
+/// and zero evidence.
 async fn read_skeptic_verdict(
     skeptic_idx: u32,
     details_raw: &str,
     verdict_raw: &str,
     terminal: &str,
     started: std::time::Instant,
+    strict: bool,
 ) -> SkepticResult {
     let json_body = tokio::fs::read_to_string(verdict_raw).await.ok();
     if let Some(body) = json_body.as_deref()
@@ -1972,7 +2023,7 @@ async fn read_skeptic_verdict(
 
     // JSON missing / malformed — fall back to the terminal token.
     match parse_skeptic_terminal_response(terminal) {
-        Some(refuted) => SkepticResult {
+        Some(refuted) if !strict => SkepticResult {
             skeptic_idx,
             refuted,
             confidence: SkepticConfidence::Unknown,
@@ -1986,14 +2037,33 @@ async fn read_skeptic_verdict(
             ),
             latency_ms: started.elapsed().as_millis() as u64,
         },
-        None => skeptic_failure(
-            skeptic_idx,
-            format!(
-                "verdict JSON missing/malformed AND terminal token unrecognised: {}",
-                terminal.chars().take(120).collect::<String>()
-            ),
-            started.elapsed().as_millis() as u64,
-        ),
+        _ => {
+            // Strict mode: an unstructured signal must never approve. The
+            // terminal token may tighten to refute, but a missing/malformed
+            // JSON record always degrades to a synthetic refute (the
+            // adversarial bias-to-fail, enforced at the per-skeptic level).
+            let note = if strict {
+                "strict verdict policy: verdict JSON missing/malformed — synthetic REFUTE \
+                 (unstructured signals cannot approve; verifier-side contract failure, \
+                 not an implementer gap)"
+                    .to_string()
+            } else {
+                format!(
+                    "verdict JSON missing/malformed AND terminal token unrecognised: {}",
+                    terminal.chars().take(120).collect::<String>()
+                )
+            };
+            SkepticResult {
+                skeptic_idx,
+                refuted: true,
+                confidence: SkepticConfidence::Unknown,
+                blocking: SkepticBlocking::None,
+                evidence: String::new(),
+                findings: Vec::new(),
+                fallback_note: Some(note),
+                latency_ms: started.elapsed().as_millis() as u64,
+            }
+        }
     }
 }
 
@@ -2014,6 +2084,7 @@ async fn run_one_skeptic(
     resume_from: Option<&str>,
     tool_names: &RoleToolNames,
     inherit_tool_names: &RoleToolNames,
+    strict: bool,
 ) -> SkepticResult {
     let started = std::time::Instant::now();
     // An unsecurable (squatted) root makes every artifact path
@@ -2092,6 +2163,7 @@ async fn run_one_skeptic(
                     &verdict_raw,
                     &terminal,
                     started,
+                    strict,
                 )
                 .await;
             }
@@ -2133,7 +2205,15 @@ async fn run_one_skeptic(
         .await
     {
         Ok(terminal) => {
-            read_skeptic_verdict(skeptic_idx, &details_raw, &verdict_raw, &terminal, started).await
+            read_skeptic_verdict(
+                skeptic_idx,
+                &details_raw,
+                &verdict_raw,
+                &terminal,
+                started,
+                strict,
+            )
+            .await
         }
         Err(SpawnError::Transport(d)) => skeptic_failure(
             skeptic_idx,
@@ -2230,6 +2310,10 @@ pub(crate) struct VerificationStageInputs<'a> {
     /// fail-open RETRY prompt (the retry falls back to the default toolset, so
     /// it must name THAT toolset's tools). Shared across the panel.
     pub inherit_tool_names: &'a RoleToolNames,
+    /// Strict verdict policy: a skeptic whose verdict JSON is missing or
+    /// malformed votes a synthetic REFUTE (never an approval without the
+    /// structured evidence record).
+    pub strict_skeptic_verdicts: bool,
 }
 
 /// Outcome of [`run_verification_stage`] plus skeptic 0's child session
@@ -2507,6 +2591,7 @@ pub(crate) async fn run_verification_stage(
             resume_from,
             tool_names_for(0),
             inputs.inherit_tool_names,
+            inputs.strict_skeptic_verdicts,
         )
         .await;
         let high_refute = first.refuted && first.confidence == SkepticConfidence::High;
@@ -2525,6 +2610,7 @@ pub(crate) async fn run_verification_stage(
                     None,
                     tool_names_for(idx),
                     inputs.inherit_tool_names,
+                    inputs.strict_skeptic_verdicts,
                 )
             });
             let mut all = Vec::with_capacity(n as usize);
@@ -2543,6 +2629,7 @@ pub(crate) async fn run_verification_stage(
                 None,
                 tool_names_for(idx),
                 inputs.inherit_tool_names,
+                inputs.strict_skeptic_verdicts,
             )
         });
         (futures::future::join_all(spawns).await, false, None)
@@ -3894,6 +3981,7 @@ mod tests {
             verdict.to_str().unwrap(),
             "Refuted",
             std::time::Instant::now(),
+            false,
         )
         .await;
 
@@ -3924,6 +4012,7 @@ mod tests {
             verdict.to_str().unwrap(),
             "Refuted",
             std::time::Instant::now(),
+            false,
         )
         .await;
 
@@ -3953,6 +4042,7 @@ mod tests {
             verdict.to_str().unwrap(),
             "Not Refuted",
             std::time::Instant::now(),
+            false,
         )
         .await;
 
@@ -5266,6 +5356,7 @@ mod tests {
             // literal fallback tool names), matching the earlier rendered prompts.
             tool_names: &[],
             inherit_tool_names: default_inherit_tool_names(),
+            strict_skeptic_verdicts: false,
         }
     }
 
@@ -6952,6 +7043,7 @@ mod tests {
             None,
             &tool_names,
             &tool_names,
+            false,
         )
         .await;
 

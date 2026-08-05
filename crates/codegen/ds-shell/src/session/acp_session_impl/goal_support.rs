@@ -1035,6 +1035,7 @@ impl SessionActor {
             spawner,
             crate::session::goal_planner::GoalPlannerInputs {
                 objective,
+                workspace_root: self.tool_context.cwd.as_path(),
                 context: &context,
                 plan_file: &plan_file,
                 attempt,

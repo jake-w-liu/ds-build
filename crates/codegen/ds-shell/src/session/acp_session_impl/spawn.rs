@@ -1105,6 +1105,10 @@ pub(crate) async fn spawn_session_actor(
         .value;
     let goal_reverify_after = effective_config.resolve_goal_reverify_after().value;
     let goal_use_current_model_only = effective_config.resolve_goal_use_current_model_only().value;
+    let goal_fail_closed_verification = effective_config
+        .resolve_goal_fail_closed_verification()
+        .value;
+    let goal_strict_skeptic_verdicts = effective_config.resolve_goal_strict_skeptic_verdicts().value;
     let goal_role_models = {
         let planner = effective_config
             .resolve_goal_planner_model(goal_use_current_model_only)
@@ -1268,6 +1272,8 @@ pub(crate) async fn spawn_session_actor(
         goal_verifier_skeptic_count: effective_config.resolve_goal_verifier_count().value,
         goal_role_models,
         goal_use_current_model_only,
+        goal_fail_closed_verification,
+        goal_strict_skeptic_verdicts,
         goal_classifier_max_runs,
         goal_strategist_every,
         goal_reverify_after,

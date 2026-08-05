@@ -1329,6 +1329,27 @@ pub fn apply_sandbox(
         if let Err(e) = sandbox.apply(&workspace) {
             eprintln!("warning: sandbox could not be applied: {e}");
         }
+        // Fail-closed enforcement: when DS_SANDBOX_FAIL_CLOSED=1, a sandbox
+        // that could not be applied (unsupported platform, apply error) is a
+        // FATAL startup error instead of a warning-and-continue. Benchmark /
+        // eval mode must set this so a run can never silently proceed
+        // unsandboxed.
+        let fail_closed = std::env::var("DS_SANDBOX_FAIL_CLOSED")
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false);
+        if fail_closed && !sandbox.is_applied() {
+            eprintln!(
+                "error: sandbox profile '{profile}' could not be applied and \
+                 DS_SANDBOX_FAIL_CLOSED=1 is set; refusing to start unsandboxed.",
+                profile = sandbox.profile(),
+            );
+            std::process::exit(1);
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             #[cfg(target_os = "macos")]

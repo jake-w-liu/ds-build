@@ -2460,6 +2460,22 @@ impl Config {
             .default(false)
             .resolve()
     }
+    /// Fail-closed verification: infra-class goal verification failures
+    /// pause the goal instead of recording `Achieved`.
+    pub(crate) fn resolve_goal_fail_closed_verification(&self) -> Resolved<bool> {
+        BoolFlag::env("DS_GOAL_FAIL_CLOSED_VERIFICATION")
+            .config(self.goal.fail_closed_verification)
+            .default(false)
+            .resolve()
+    }
+    /// Strict skeptic verdicts: a missing/malformed verdict JSON is a
+    /// synthetic refute, never an approval without the structured record.
+    pub(crate) fn resolve_goal_strict_skeptic_verdicts(&self) -> Resolved<bool> {
+        BoolFlag::env("DS_GOAL_STRICT_SKEPTIC_VERDICTS")
+            .config(self.goal.strict_skeptic_verdicts)
+            .default(false)
+            .resolve()
+    }
     /// Shared single-pair resolution. Precedence: kill-switch ⇒
     /// `InheritCurrent`/`Config` > `config_pair` ⇒ `Explicit`/`Config` >
     /// `remote_pair` ⇒ `Explicit`/`Remote` > `InheritCurrent`/`Default`. The
@@ -4067,6 +4083,18 @@ pub struct GoalConfig {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub skeptic_models: Vec<crate::util::config::GoalRoleModel>,
+    /// When `true`, verification INFRASTRUCTURE failures (scratch-root or
+    /// verdict-file write failures, missing goal state, sampler errors,
+    /// classifier timeouts) fail CLOSED: the goal pauses with a clear reason
+    /// instead of being recorded `Achieved`. Benchmark/eval mode should set
+    /// this so an internal failure can never masquerade as a passed check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fail_closed_verification: Option<bool>,
+    /// When `true`, a skeptic verdict whose JSON record is missing or
+    /// malformed is a synthetic REFUTE — a terminal token may tighten to
+    /// refute but can never approve without the structured evidence record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict_skeptic_verdicts: Option<bool>,
 }
 /// `[auto_mode]` section: server-side configuration for Auto permission mode.
 /// ONE struct serves both the local `[auto_mode]` TOML table and the remote

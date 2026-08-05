@@ -833,6 +833,16 @@ pub(crate) struct SessionActor {
     /// previously-frozen `skeptic_model_assignment` is overridden too — an
     /// instant rollback even for an already-frozen goal.
     pub(crate) goal_use_current_model_only: bool,
+    /// Fail-closed verification (`DS_GOAL_FAIL_CLOSED_VERIFICATION` /
+    /// `[goal] fail_closed_verification`) resolved at actor build. When
+    /// `true`, an infra-class verification failure pauses the goal instead
+    /// of recording `Achieved`.
+    pub(crate) goal_fail_closed_verification: bool,
+    /// Strict skeptic verdicts (`DS_GOAL_STRICT_SKEPTIC_VERDICTS` /
+    /// `[goal] strict_skeptic_verdicts`) resolved at actor build. When
+    /// `true`, a skeptic whose verdict JSON is missing/malformed votes a
+    /// synthetic REFUTE (never an approval without the structured record).
+    pub(crate) goal_strict_skeptic_verdicts: bool,
     /// Resolved per-goal classifier run cap (number of
     /// `update_goal(completed: true)` rejections before the goal
     /// auto-pauses via `BackOff`). Cached at actor construction like
