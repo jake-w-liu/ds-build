@@ -377,6 +377,8 @@ Set, manage, or check an autonomous goal. DS works toward the objective across t
 
 Arguments: `<objective>`, `status`, `pause`, `resume`, or `clear`. **Availability:** appears only when the goal feature is enabled and the `update_goal` tool is in the session toolset.
 
+The orchestration panel (phases + agents) opens **automatically** whenever a goal becomes active, so multi-agent progress is visible without any action. Press `g` to toggle it, `Esc` to dismiss; the next goal re-opens it.
+
 ### `/theme`
 
 Switch the TUI color theme.

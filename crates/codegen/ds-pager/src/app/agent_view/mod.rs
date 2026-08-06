@@ -869,8 +869,8 @@ pub struct AgentView {
     /// can race a stale update.
     pub last_cleared_goal_id: Option<String>,
     /// Whether the expanded goal detail overlay is visible.
-    /// Toggled by `Action::ToggleGoalDetail`. Only shown when
-    /// `goal_state` is `Some`.
+    /// Auto-opened when a goal becomes active; toggled by `Action::ToggleGoalDetail`.
+    /// Only shown when `goal_state` is `Some`.
     pub show_goal_detail: bool,
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.

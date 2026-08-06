@@ -1254,21 +1254,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![]
         }
-        Action::ShowWorkflows => {
-            let mut opened_goal = false;
-            with_active_agent(app, |agent| {
-                if agent.goal_state.is_some() {
-                    agent.show_goal_detail = true;
-                    opened_goal = true;
-                }
-            });
-            if opened_goal {
-                vec![]
-            } else {
-                // No active goal — surface running subagents/tasks instead.
-                dispatch_show_tasks(app)
-            }
-        }
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),
         Action::RewindPickerSelect(prompt_index) => {

@@ -934,10 +934,6 @@ pub enum Action {
     },
     /// Toggle the expanded goal detail overlay.
     ToggleGoalDetail,
-    /// Open the orchestrated workflow progress view (`/workflows`).
-    /// Opens goal detail when a goal is active; otherwise falls back to
-    /// the tasks list so multi-agent work always has a clear menu entry.
-    ShowWorkflows,
     Rewind,
     RewindShowPicker,
     RewindPickerSelect(usize),

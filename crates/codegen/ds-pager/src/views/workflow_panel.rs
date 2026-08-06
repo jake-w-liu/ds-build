@@ -10,7 +10,7 @@
 //!    Verify  0/1   │
 //! ```
 //!
-//! Used by the goal-detail overlay (`/workflows` / `g` toggle) so multi-agent
+//! Used by the goal-detail overlay (`g` toggle / auto-open) so multi-agent
 //! goal work reads as an orchestrated workflow rather than a flat task list.
 
 use std::collections::HashMap;

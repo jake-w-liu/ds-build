@@ -3,8 +3,8 @@
 //! list, and event history.
 //!
 //! Rendered as a centered overlay when `AgentView::show_goal_detail` is true
-//! and `goal_state` is `Some`. Opened via `g`, `/workflows`, or the goal
-//! status chip. Dismissed by `Esc` or `g`.
+//! and `goal_state` is `Some`. Auto-opens when a goal becomes active;
+//! otherwise opened via `g` or the goal status chip. Dismissed by `Esc` or `g`.
 
 use std::collections::HashMap;
 
@@ -1067,7 +1067,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "Esc: close  /workflows  /goal resume | pause | status | clear",
+                "Esc: close  /goal resume | pause | status | clear",
                 hint_style,
             )),
             w,
