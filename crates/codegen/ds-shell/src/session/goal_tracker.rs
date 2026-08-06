@@ -3963,7 +3963,97 @@ mod tests {
         assert_eq!(t.status(), Some(GoalStatus::Active));
     }
 
-    /// Auto-resume records the counter + a GoalResumed history entry with
+    /// The decisions log is PERSISTED state: entries recorded via the
+    /// shipped `record_decision` survive a full snapshot serialize ->
+    /// deserialize round trip (the compaction / restart reload path), in
+    /// order, with kind, detail, round, and timestamp intact — and the
+    /// `from_snapshot` reload path rehydrates them into a live tracker.
+    #[test]
+    fn decisions_log_survives_snapshot_roundtrip() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        t.record_decision(
+            GoalDecisionKind::PlanAccepted,
+            "plan written: /s/g/plan.md".to_string(),
+            None,
+        );
+        t.record_decision(GoalDecisionKind::Verdict, "NotAchieved".to_string(), Some(2));
+        t.record_decision(
+            GoalDecisionKind::StrategistAdvice,
+            "strategy: restructure the verifier".to_string(),
+            Some(3),
+        );
+        t.record_decision(
+            GoalDecisionKind::AutoResumed,
+            "auto-resume #1".to_string(),
+            None,
+        );
+
+        let json = serde_json::to_string(t.snapshot().unwrap()).unwrap();
+        let restored: GoalOrchestration = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.decisions.len(), 4, "all decisions must survive");
+        assert_eq!(restored.decisions[0].kind, GoalDecisionKind::PlanAccepted);
+        assert_eq!(
+            restored.decisions[0].detail,
+            "plan written: /s/g/plan.md"
+        );
+        assert!(restored.decisions[0].round.is_none());
+        assert_eq!(restored.decisions[1].kind, GoalDecisionKind::Verdict);
+        assert_eq!(restored.decisions[1].detail, "NotAchieved");
+        assert_eq!(restored.decisions[1].round, Some(2));
+        assert_eq!(
+            restored.decisions[2].kind,
+            GoalDecisionKind::StrategistAdvice
+        );
+        assert_eq!(restored.decisions[3].kind, GoalDecisionKind::AutoResumed);
+        assert!(
+            !restored.decisions[0].timestamp.is_empty(),
+            "timestamps must survive the round trip"
+        );
+
+        // Full tracker reload path: from_snapshot rehydrates the log.
+        let reloaded = GoalTracker::from_snapshot(t.session_dir.clone(), restored);
+        let live = reloaded.snapshot().unwrap();
+        assert_eq!(live.decisions.len(), 4);
+        assert_eq!(live.decisions[1].kind, GoalDecisionKind::Verdict);
+        assert_eq!(live.decisions[1].round, Some(2));
+    }
+
+    /// The decisions log is capped: recording beyond the cap drops the
+    /// OLDEST entries, never the newest.
+    #[test]
+    fn decisions_log_caps_oldest_entries() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        let cap = GOAL_DECISIONS_MAX;
+        for i in 0..(cap + 5) {
+            t.record_decision(
+                GoalDecisionKind::Verdict,
+                format!("round-{i}"),
+                Some(i as u32),
+            );
+        }
+        let decisions = &t.snapshot().unwrap().decisions;
+        assert_eq!(decisions.len(), cap);
+        assert_eq!(decisions.first().unwrap().detail, "round-5");
+        assert_eq!(decisions.last().unwrap().detail, format!("round-{}", cap + 4));
+    }
+
+    /// Auto-resume records a structured decision with the counter detail
+    /// (feeds the panel's decisions history).
+    #[test]
+    fn auto_resume_records_decision_entry() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert!(t.pause(GoalPauseReason::Infra));
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::Resumed);
+        let o = t.snapshot().unwrap();
+        let last = o.decisions.last().unwrap();
+        assert_eq!(last.kind, GoalDecisionKind::AutoResumed);
+        assert_eq!(last.detail, "auto-resume #1");
+    }
+
+    /// Verify auto-resume records the counter + a GoalResumed history entry with
     /// an "auto:N" detail so the panel history shows why the goal flipped
     /// back to Active.
     #[test]
