@@ -1254,6 +1254,21 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             });
             vec![]
         }
+        Action::WorkflowDrillDown { child_session_id } => {
+            // Switch the active view to the child agent whose session id
+            // matches (live subagent scrollback peek). No-op when the
+            // child session is gone.
+            if let Some(id) = app.agents.iter().find_map(|(id, a)| {
+                a.session
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|s| s.0.as_ref() == child_session_id)
+                    .then_some(*id)
+            }) {
+                app.active_view = ActiveView::Agent(id);
+            }
+            vec![]
+        }
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),
         Action::RewindPickerSelect(prompt_index) => {

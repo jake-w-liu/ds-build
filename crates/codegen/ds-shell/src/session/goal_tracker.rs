@@ -34,6 +34,78 @@ pub(crate) const GOAL_STRATEGIST_STALL_THRESHOLD: u32 =
 /// capped (oldest dropped) to keep a long goal's snapshot bounded.
 const GOAL_HISTORY_MAX: usize = 64;
 
+/// Max retained goal DECISION entries (persisted). Only the most recent
+/// [`GOAL_DECISIONS_WIRE_MAX`] are surfaced on the wire.
+pub(crate) const GOAL_DECISIONS_MAX: usize = 32;
+
+/// Number of decision entries surfaced on each `GoalUpdated` wire payload.
+pub(crate) const GOAL_DECISIONS_WIRE_MAX: usize = 8;
+
+/// Structured decision-log kind. The decisions log is the durable,
+/// per-phase record of orchestration decisions (plan accepted, verifier
+/// verdicts, strategist advice, auto-resumes, infra fallbacks) that
+/// survives compaction and feeds the panel's history — distinct from the
+/// transient `last_classifier_*` fields, which only hold the latest round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalDecisionKind {
+    /// The goal planner's plan was accepted and recorded.
+    PlanAccepted,
+    /// A verification round produced a verdict (achieved / not achieved /
+    /// blocked).
+    Verdict,
+    /// The stall-triggered strategist wrote a structural-remediation note.
+    StrategistAdvice,
+    /// The goal auto-resumed from a non-user pause (blocker cleared).
+    AutoResumed,
+    /// A verification round ended in an infra-class fail-open.
+    InfraFallback,
+}
+
+impl GoalDecisionKind {
+    /// Stable wire label (mirrors the serde snake_case name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PlanAccepted => "plan_accepted",
+            Self::Verdict => "verdict",
+            Self::StrategistAdvice => "strategist_advice",
+            Self::AutoResumed => "auto_resumed",
+            Self::InfraFallback => "infra_fallback",
+        }
+    }
+}
+
+/// One entry in the goal decisions log.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalDecisionEntry {
+    pub timestamp: String,
+    pub kind: GoalDecisionKind,
+    /// Short human-readable detail (e.g. the verdict + gaps head, the plan
+    /// file path, the strategy note path).
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u32>,
+}
+
+/// Per-goal cap on automatic resumes from non-user pause classes
+/// (`BackOffPaused`, `NoProgressPaused`, `InfraPaused`, `BudgetLimited`).
+/// After the cap, the goal stays paused until the user explicitly resumes
+/// (`/goal resume`). `UserPaused` and `Blocked` never auto-resume at all.
+pub(crate) const GOAL_AUTO_RESUME_CAP: u32 = 3;
+
+/// Outcome of [`GoalTracker::auto_resume`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoResumeOutcome {
+    /// The goal was resumed automatically (cap not exceeded, class eligible).
+    Resumed,
+    /// The goal is not in an auto-resumable pause (Active, UserPaused,
+    /// Blocked, Complete, or no goal).
+    NotEligible,
+    /// The auto-resume cap for this goal is exhausted; explicit resume
+    /// required.
+    CapReached,
+}
+
 // Phase / Status enums
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -606,6 +678,29 @@ pub struct GoalOrchestration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_baseline_commit: Option<String>,
 
+    /// True when the most recent verification round ended in an
+    /// infra-class fail-open (harness could not extract a verdict).
+    /// Surfaced on the wire so the panel can badge "achieved via infra
+    /// fallback" instead of presenting an infra failure as a normal
+    /// pass. Cleared on any real `Achieved` / `NotAchieved` verdict.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_classifier_infra_fallback: bool,
+
+    /// Count of auto-resumes performed for this goal (non-user pause
+    /// classes only). Capped by [`GOAL_AUTO_RESUME_CAP`]; persisted so
+    /// a restart cannot silently reset the cap.
+    #[serde(default)]
+    pub auto_resumes: u32,
+
+    /// Structured per-phase decisions log (plan accepted, verifier
+    /// verdicts, strategist advice, auto-resumes, infra fallbacks).
+    /// Persisted (survives compaction) and capped at
+    /// [`GOAL_DECISIONS_MAX`]; the wire surfaces the most recent
+    /// [`GOAL_DECISIONS_WIRE_MAX`] entries so the panel can show WHY
+    /// the goal reached its current state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<GoalDecisionEntry>,
+
     /// Path to the goal's plan markdown (`<session_dir>/goal/plan.md`,
     /// via [`GoalTracker::plan_path`]). `None` until a planner writes
     /// one. `is_some()` is the single source of truth for "this goal
@@ -696,6 +791,20 @@ pub struct GoalTracker {
     orchestration: Option<GoalOrchestration>,
     session_dir: PathBuf,
     active_since: Option<Instant>,
+}
+
+/// Keep decision-log details bounded: a verdict gaps summary or strategy
+/// recommendation can be long; the log stores a capped head so the wire
+/// payload stays small.
+pub(crate) fn truncate_decision_detail(detail: &str) -> String {
+    const MAX: usize = 240;
+    if detail.len() <= MAX {
+        detail.to_string()
+    } else {
+        let mut s: String = detail.chars().take(MAX - 1).collect();
+        s.push('…');
+        s
+    }
 }
 
 impl GoalTracker {
@@ -978,6 +1087,9 @@ impl GoalTracker {
             last_strategy_path: None,
             last_strategy_recommendation: None,
             changes_baseline_commit: baseline_commit,
+            last_classifier_infra_fallback: false,
+            auto_resumes: 0,
+            decisions: Vec::new(),
             plan_file: None,
             plan_baseline_file: None,
             scratch_dir_ready,
@@ -1072,6 +1184,53 @@ impl GoalTracker {
             return true;
         }
         false
+    }
+
+    /// Auto-resume a goal that paused for an infrastructure / capacity
+    /// reason (back-off cap, no-progress stall, infra error, or budget
+    /// limit) once the blocker clears — a new user prompt is the
+    /// "blocker cleared" signal. Structurally excludes `UserPaused` and
+    /// `Blocked` (those need an explicit user decision) and enforces the
+    /// per-goal [`GOAL_AUTO_RESUME_CAP`] so the goal cannot self-drive
+    /// forever after repeated pauses.
+    pub fn auto_resume(&mut self) -> AutoResumeOutcome {
+        let resumed_at: u32;
+        if let Some(o) = &mut self.orchestration {
+            let auto_eligible = matches!(
+                o.status,
+                GoalStatus::BackOffPaused
+                    | GoalStatus::NoProgressPaused
+                    | GoalStatus::InfraPaused
+                    | GoalStatus::BudgetLimited
+            );
+            if !auto_eligible {
+                return AutoResumeOutcome::NotEligible;
+            }
+            if o.auto_resumes >= GOAL_AUTO_RESUME_CAP {
+                return AutoResumeOutcome::CapReached;
+            }
+            o.auto_resumes = o.auto_resumes.saturating_add(1);
+            o.status = GoalStatus::Active;
+            o.pause_message = None;
+            o.classifier_runs_attempted = 0;
+            o.rounds_since_verify = 0;
+            o.reset_strategist_fields();
+            o.reset_classifier_stall_fields();
+            resumed_at = o.auto_resumes;
+        } else {
+            return AutoResumeOutcome::NotEligible;
+        }
+        self.active_since = Some(Instant::now());
+        self.record_event(
+            GoalEvent::GoalResumed,
+            Some(format!("auto:{resumed_at}")),
+        );
+        self.record_decision(
+            GoalDecisionKind::AutoResumed,
+            format!("auto-resume #{resumed_at}"),
+            None,
+        );
+        AutoResumeOutcome::Resumed
     }
 
     /// Mark the goal as complete. Accepts `Active` or any paused variant.
@@ -1259,6 +1418,24 @@ impl GoalTracker {
         }
     }
 
+    /// Append a structured decision to the goal's decisions log (persisted,
+    /// capped at [`GOAL_DECISIONS_MAX`], oldest dropped). The panel's
+    /// decisions history reads these; they survive compaction.
+    pub fn record_decision(&mut self, kind: GoalDecisionKind, detail: String, round: Option<u32>) {
+        if let Some(o) = self.orchestration.as_mut() {
+            o.decisions.push(GoalDecisionEntry {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                kind,
+                detail,
+                round,
+            });
+            if o.decisions.len() > GOAL_DECISIONS_MAX {
+                let excess = o.decisions.len() - GOAL_DECISIONS_MAX;
+                o.decisions.drain(..excess);
+            }
+        }
+    }
+
     /// Atomically evaluate the strategist trigger and claim a fire under a
     /// single lock: if `should_fire(consecutive_not_achieved,
     /// last_strategist_fired_at)` holds, mark the fire at the current streak
@@ -1308,10 +1485,20 @@ impl GoalTracker {
     /// so the continuation directive can inline them. No-op without an
     /// orchestration.
     pub fn record_strategy_recommendation(&mut self, path: String, recommendation: String) {
-        if let Some(o) = self.orchestration.as_mut() {
+        let (detail, round) = {
+            let Some(o) = self.orchestration.as_mut() else {
+                return;
+            };
+            let detail = format!("{}: {}", path, recommendation);
             o.last_strategy_path = Some(path);
             o.last_strategy_recommendation = Some(recommendation);
-        }
+            (detail, o.total_verify_rounds)
+        };
+        self.record_decision(
+            GoalDecisionKind::StrategistAdvice,
+            truncate_decision_detail(&detail),
+            Some(round),
+        );
     }
 
     pub fn append_history(&mut self, entry: GoalHistoryEntry) {
@@ -1375,6 +1562,9 @@ pub(crate) fn make_base_orchestration() -> GoalOrchestration {
         last_strategy_path: None,
         last_strategy_recommendation: None,
         changes_baseline_commit: None,
+        last_classifier_infra_fallback: false,
+        auto_resumes: 0,
+        decisions: Vec::new(),
         plan_file: None,
         plan_baseline_file: None,
         scratch_dir_ready: false,
@@ -3699,5 +3889,93 @@ mod tests {
             None,
         );
         assert!(t2.snapshot().unwrap().changes_baseline_commit.is_none());
+    }
+
+    // ── Auto-resume ────────────────────────────────────────────────
+
+    /// Auto-resume fires for every non-user pause class (back-off,
+    /// no-progress, infra, budget) and never for UserPaused / Blocked /
+    /// Active / no goal.
+    #[test]
+    fn auto_resume_eligible_classes_only() {
+        for (reason, status) in [
+            (GoalPauseReason::BackOff, GoalStatus::BackOffPaused),
+            (GoalPauseReason::NoProgress, GoalStatus::NoProgressPaused),
+            (GoalPauseReason::Infra, GoalStatus::InfraPaused),
+        ] {
+            let mut t = make_tracker();
+            activate_tracker(&mut t);
+            assert!(t.pause(reason));
+            assert_eq!(t.status(), Some(status));
+            assert_eq!(
+                t.auto_resume(),
+                AutoResumeOutcome::Resumed,
+                "{reason:?} must auto-resume"
+            );
+            assert_eq!(t.status(), Some(GoalStatus::Active));
+        }
+        // BudgetLimited is auto-resumable too.
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert!(t.budget_limit());
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::Resumed);
+
+        // UserPaused never auto-resumes.
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert!(t.pause(GoalPauseReason::User));
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::NotEligible);
+        assert_eq!(t.status(), Some(GoalStatus::UserPaused));
+
+        // Blocked never auto-resumes.
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert!(t.pause(GoalPauseReason::Verification));
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::NotEligible);
+        assert_eq!(t.status(), Some(GoalStatus::Blocked));
+
+        // Active and no-goal are not eligible.
+        let mut t = make_tracker();
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::NotEligible);
+        activate_tracker(&mut t);
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::NotEligible);
+    }
+
+    /// The per-goal cap stops auto-resume after `GOAL_AUTO_RESUME_CAP`
+    /// resumes; an explicit user resume afterwards still works.
+    #[test]
+    fn auto_resume_respects_cap() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        for _ in 0..GOAL_AUTO_RESUME_CAP {
+            assert!(t.pause(GoalPauseReason::BackOff));
+            assert_eq!(t.auto_resume(), AutoResumeOutcome::Resumed);
+        }
+        assert!(t.pause(GoalPauseReason::BackOff));
+        assert_eq!(
+            t.auto_resume(),
+            AutoResumeOutcome::CapReached,
+            "cap must stop auto-resume"
+        );
+        assert_eq!(t.status(), Some(GoalStatus::BackOffPaused));
+        // Explicit resume bypasses the cap.
+        assert!(t.resume());
+        assert_eq!(t.status(), Some(GoalStatus::Active));
+    }
+
+    /// Auto-resume records the counter + a GoalResumed history entry with
+    /// an "auto:N" detail so the panel history shows why the goal flipped
+    /// back to Active.
+    #[test]
+    fn auto_resume_records_history_and_counter() {
+        let mut t = make_tracker();
+        activate_tracker(&mut t);
+        assert!(t.pause(GoalPauseReason::Infra));
+        assert_eq!(t.auto_resume(), AutoResumeOutcome::Resumed);
+        let o = t.snapshot().unwrap();
+        assert_eq!(o.auto_resumes, 1);
+        let last = o.history.last().unwrap();
+        assert!(matches!(last.event, GoalEvent::GoalResumed));
+        assert_eq!(last.detail.as_deref(), Some("auto:1"));
     }
 }

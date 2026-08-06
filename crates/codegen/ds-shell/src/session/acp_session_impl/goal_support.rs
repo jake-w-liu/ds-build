@@ -1024,6 +1024,8 @@ impl SessionActor {
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
                 events: Some(self.events.writer()),
+                goal_phase: Some("plan"),
+                goal_attempt: Some(attempt),
             });
 
         // Surface the "planning…" badge while the subagent runs. Cleared
@@ -1068,9 +1070,15 @@ impl SessionActor {
                     let need_baseline = tracker
                         .snapshot()
                         .is_some_and(|o| o.plan_baseline_file.is_none());
+                    let plan_display = plan_file.display().to_string();
                     if let Some(o) = tracker.snapshot_mut() {
                         o.plan_file = Some(plan_file);
                     }
+                    tracker.record_decision(
+                        crate::session::goal_tracker::GoalDecisionKind::PlanAccepted,
+                        format!("plan written: {plan_display}"),
+                        None,
+                    );
                     need_baseline.then_some((src, dst))
                 };
                 if let Some((src, dst)) = baseline_target {
@@ -1194,6 +1202,8 @@ impl SessionActor {
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 role_override,
                 events: Some(self.events.writer()),
+                goal_phase: Some("execute"),
+                goal_attempt: Some(attempt),
             });
 
         let outcome = crate::session::goal_strategist::run_goal_strategist(

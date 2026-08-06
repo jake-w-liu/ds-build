@@ -234,6 +234,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
                 goal_strict_skeptic_verdicts: false,
+                stop_precision: std::sync::Mutex::new(
+                    crate::session::goal_stop_detector::StopPatternPrecision::new(),
+                ),
                 goal_classifier_max_runs:
                     crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
                 goal_strategist_every: 5,
@@ -690,6 +693,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
                 goal_strict_skeptic_verdicts: false,
+                stop_precision: std::sync::Mutex::new(
+                    crate::session::goal_stop_detector::StopPatternPrecision::new(),
+                ),
                 goal_classifier_max_runs:
                     crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
                 goal_strategist_every: 5,
@@ -944,6 +950,9 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
                 goal_strict_skeptic_verdicts: false,
+                stop_precision: std::sync::Mutex::new(
+                    crate::session::goal_stop_detector::StopPatternPrecision::new(),
+                ),
                 goal_classifier_max_runs:
                     crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
                 goal_strategist_every: 5,
@@ -1951,6 +1960,9 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
                 goal_strict_skeptic_verdicts: false,
+                stop_precision: std::sync::Mutex::new(
+                    crate::session::goal_stop_detector::StopPatternPrecision::new(),
+                ),
                 goal_classifier_max_runs:
                     crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
                 goal_strategist_every: 5,

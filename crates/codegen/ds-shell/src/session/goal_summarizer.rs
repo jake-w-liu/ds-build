@@ -179,6 +179,9 @@ impl ChannelSpawner {
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
             fork_context: false,
+            // Summarizer is a maintenance role, not a workflow-phase agent.
+            goal_phase: None,
+            goal_attempt: None,
             result_tx,
         };
         if self

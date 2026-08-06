@@ -101,6 +101,7 @@ impl AgentView {
             pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
+            workflow_selected: None,
             turn_start_ms: None,
             wake_turn_start: None,
             turn_started_at: None,
@@ -1221,6 +1222,8 @@ mod resolve_turn_activity_tests {
                 prompt: None,
                 child_cwd: None,
                 worktree_path: None,
+                goal_phase: None,
+                goal_attempt: None,
                 child_updates_replayed: false,
             },
         );

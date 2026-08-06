@@ -1274,6 +1274,9 @@ pub(crate) async fn spawn_session_actor(
         goal_use_current_model_only,
         goal_fail_closed_verification,
         goal_strict_skeptic_verdicts,
+        stop_precision: std::sync::Mutex::new(
+            crate::session::goal_stop_detector::StopPatternPrecision::new(),
+        ),
         goal_classifier_max_runs,
         goal_strategist_every,
         goal_reverify_after,

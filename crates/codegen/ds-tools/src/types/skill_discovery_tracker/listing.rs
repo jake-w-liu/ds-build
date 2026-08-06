@@ -41,9 +41,7 @@ const TRIGGER_PREFIXES: &[&str] = &[
 /// `format_announcement` callers and test helpers.
 pub(super) const DEFAULT_SKILL_TOOL_NAME: &str = "Skill";
 
-fn listing_header(_tool_name: &str) -> String {
-    "The following skills are available for use:\n\n".to_string()
-}
+
 
 /// Whether a skill belongs in the model-facing listing. Native, bundled, and
 /// repo/user skills always qualify (they carry a body-derived description);
@@ -79,21 +77,7 @@ impl<'a> SkillEntry<'a> {
     /// Render the entry with description and when_to_use truncated to the
     /// budgets from `proportional_budgets`. `func_desc` must be the result of
     /// `self.func_desc()`.
-    fn format(&self, func_desc: &str, desc_budget: usize, wtu_budget: usize) -> String {
-        let desc = truncate_str_with_marker(func_desc, desc_budget);
-        if let Some(wtu) = self.when_to_use {
-            let wtu = truncate_str_with_marker(strip_leading_trigger_prefix(wtu), wtu_budget);
-            format!(
-                "- {}: {}\n  Use when: {}\n  Absolute path: {}",
-                self.name, desc, wtu, self.display_path
-            )
-        } else {
-            format!(
-                "- {}: {}\n  Absolute path: {}",
-                self.name, desc, self.display_path
-            )
-        }
-    }
+
 
     /// Split `total` between description and when_to_use proportionally to their
     /// lengths, with a `MIN_DESC_LENGTH` floor for either field when the budget
@@ -116,25 +100,10 @@ impl<'a> SkillEntry<'a> {
     }
 
     /// Render name only (no description or path).
-    fn name_only(&self) -> String {
-        format!("- {}", self.name)
-    }
+
 
     /// Byte length of the fixed overhead (name, path, Use when label) excluding content.
-    fn overhead(&self) -> usize {
-        // "- " + name + ": " + "\n  Absolute path: " + path + "\n"
-        let base = "- ".len()
-            + self.name.len()
-            + ": ".len()
-            + "\n  Absolute path: ".len()
-            + self.display_path.len()
-            + "\n".len();
-        if self.when_to_use.is_some() {
-            base + "  Use when: ".len() + "\n".len()
-        } else {
-            base
-        }
-    }
+
 
     // ── Budgeted XML rendering (ds build harness) ─────────────
 
@@ -221,53 +190,7 @@ impl<'a> SkillListing<'a> {
     /// 1. Full descriptions (each capped at `MAX_LISTING_COMBINED_BYTES`) -- if within budget.
     /// 2. Proportionally shortened descriptions -- if descriptions are the bottleneck.
     /// 3. Names-only with overflow indicator -- when even short descriptions don't fit.
-    fn render(self, budget: usize, skill_tool_name: &str) -> Option<String> {
-        if self.0.is_empty() {
-            return None;
-        }
-        let header = listing_header(skill_tool_name);
-        let header_len = header.len();
 
-        // Tier 1: full descriptions.
-        let full_listing = self
-            .0
-            .iter()
-            .map(|e| {
-                let fd = e.func_desc();
-                let (db, wb) = e.proportional_budgets(fd.len().max(1), MAX_LISTING_COMBINED_BYTES);
-                e.format(fd, db, wb)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if header_len + full_listing.len() <= budget {
-            return Some(format!("{header}{full_listing}"));
-        }
-
-        // Tier 2: shortened descriptions with proportional allocation.
-        let total_overhead: usize = self.0.iter().map(|e| e.overhead()).sum();
-        let available = budget.saturating_sub(header_len + total_overhead);
-        let budget_per_entry = available / self.0.len().max(1);
-
-        if budget_per_entry >= MIN_DESC_LENGTH {
-            let listing = self
-                .0
-                .iter()
-                .map(|e| {
-                    let fd = e.func_desc();
-                    let (db, wb) = e.proportional_budgets(fd.len().max(1), budget_per_entry);
-                    e.format(fd, db, wb)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Some(format!("{header}{listing}"));
-        }
-
-        // Tier 3: names-only, drop entries that exceed remaining budget.
-        Some(format!(
-            "{header}{}",
-            self.names_only(budget.saturating_sub(header_len))
-        ))
-    }
 
     // ── Budgeted XML rendering (ds build harness) ─────────────
 
@@ -373,31 +296,7 @@ impl<'a> SkillListing<'a> {
         Some(listing)
     }
 
-    fn names_only(&self, budget: usize) -> String {
-        let mut listing = String::new();
-        let mut included = 0usize;
-        for e in &self.0 {
-            let line = e.name_only();
-            let needed = line.len() + if listing.is_empty() { 0 } else { 1 };
-            if listing.len() + needed > budget {
-                break;
-            }
-            if !listing.is_empty() {
-                listing.push('\n');
-            }
-            listing.push_str(&line);
-            included += 1;
-        }
-        let remaining = self.0.len() - included;
-        if remaining > 0 {
-            let dirs = collect_source_dirs(&self.0[included..]);
-            listing.push_str(&format!(
-                "\n... and {remaining} more skills in {}",
-                dirs.join(", ")
-            ));
-        }
-        listing
-    }
+
 }
 
 /// Extract the skill source directory from a SKILL.md display path.
@@ -610,28 +509,32 @@ pub fn format_announcement_xml(
 ///
 /// Filters out skills with `disable_model_invocation` and those already
 /// in `announced` (dedup). Returns `None` if no new skills remain.
+///
+/// Unified renderer: this announcement path and the templated-user-message
+/// path (`format_announcement_xml` in `Budgeted` mode) share the SAME
+/// budgeted XML renderer, so both call sites produce byte-identical
+/// listings for the same skill set (the startup/system-reminder and the
+/// post-compaction listing keep matching each other, and the templated
+/// `<agent_skills>` rows match them too). `skill_tool_name` is retained
+/// for signature compatibility but is not used by the unified renderer.
 pub(super) fn format_announcement(
     skills: &[SkillInfo],
     announced: &mut HashSet<String>,
     real_prefix: Option<&str>,
     display_prefix: Option<&str>,
     listing_budget_chars: Option<usize>,
-    skill_tool_name: &str,
+    _skill_tool_name: &str,
 ) -> Option<String> {
-    let budget = listing_budget_chars.unwrap_or(DEFAULT_CHAR_BUDGET);
-    let listing = SkillListing(
-        skills
-            .iter()
-            .filter(|s| {
-                s.enabled
-                    && !s.disable_model_invocation
-                    && is_listable(s)
-                    && announced.insert(s.dedup_key())
-            })
-            .map(|s| build_skill_entry(s, real_prefix, display_prefix, true))
-            .collect(),
-    );
-    listing.render(budget, skill_tool_name)
+    format_announcement_xml(
+        skills,
+        announced,
+        real_prefix,
+        display_prefix,
+        XmlRenderMode::Budgeted {
+            budget_chars: listing_budget_chars,
+            overflow_indicator: true,
+        },
+    )
 }
 
 /// Render the standard skill listing for the post-compaction system-reminder.
@@ -676,6 +579,49 @@ mod tests {
             Some(budget),
             DEFAULT_SKILL_TOOL_NAME,
         )
+    }
+
+    /// The unified renderer: `format_announcement` (startup system-reminder
+    /// / post-compaction listing) and `format_announcement_xml` in Budgeted
+    /// mode (templated user message) must produce BYTE-IDENTICAL listings
+    /// for the same skill set — one budgeted renderer, two call sites.
+    #[test]
+    fn unified_renderer_byte_identical_across_call_sites() {
+        let skills: Vec<SkillInfo> = vec![
+            skill("commit", "Commit staged changes. Use when user says commit."),
+            skill("review", "Review pull requests."),
+            SkillInfo {
+                when_to_use: Some("user says graph".into()),
+                ..skill("graph", "Build a knowledge graph.")
+            },
+        ];
+        let mut announced_a = HashSet::new();
+        let mut announced_b = HashSet::new();
+        let text_a = format_announcement(
+            &skills,
+            &mut announced_a,
+            None,
+            None,
+            Some(8_000),
+            DEFAULT_SKILL_TOOL_NAME,
+        )
+        .unwrap();
+        let text_b = format_announcement_xml(
+            &skills,
+            &mut announced_b,
+            None,
+            None,
+            XmlRenderMode::Budgeted {
+                budget_chars: Some(8_000),
+                overflow_indicator: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            text_a, text_b,
+            "announcement and templated-user-message listings must be byte-identical"
+        );
+        assert!(text_a.starts_with("<agent_skill"));
     }
 
     // ── Edge cases: skill count ──────────────────────────────────
@@ -1195,8 +1141,8 @@ mod tests {
         let text = announce(&skills, 8_000).unwrap();
         assert!(text.contains("commit"));
         assert!(text.contains("Commit staged changes"));
-        assert!(text.contains("Absolute path: /skills/commit/SKILL.md"));
-        assert!(text.starts_with(&listing_header(DEFAULT_SKILL_TOOL_NAME)));
+        assert!(text.contains("fullPath=\"/skills/commit/SKILL.md\""));
+        assert!(text.starts_with("<agent_skill"));
     }
 
     #[test]
@@ -1279,7 +1225,7 @@ mod tests {
         assert!(text.contains("s19"));
         assert!(text.len() <= budget + 50);
         // Still has descriptions (not names-only).
-        assert!(text.contains(": X"));
+        assert!(text.contains("XXX"));
     }
 
     #[test]
@@ -1304,8 +1250,7 @@ mod tests {
             .collect();
         let text = announce(&skills, 400).unwrap();
         // No descriptions or paths -- names only.
-        assert!(!text.contains(": Y"));
-        assert!(!text.contains("Absolute path:"));
+        assert!(!text.contains("YYY"));
         assert!(text.len() <= 500); // 400 + slack for overflow line
     }
 
@@ -1316,7 +1261,7 @@ mod tests {
             .map(|i| skill(&format!("skill-{i:03}"), "desc"))
             .collect();
         let text = announce(&skills, 200).unwrap();
-        assert!(text.contains("... and"), "expected overflow indicator");
+        assert!(text.contains("more skills available"), "expected overflow indicator");
         assert!(
             text.contains("in /skills"),
             "overflow should reference skill source dir: {text}"
@@ -1324,14 +1269,13 @@ mod tests {
     }
 
     #[test]
-    fn tier3_no_overflow_indicator_when_all_names_fit() {
+    fn all_rows_fit_without_overflow_indicator() {
         let skills = [skill("a", "desc"), skill("b", "desc")];
-        // Budget: header + two name-only lines ("- a\n- b") -- use a tight budget
-        // that fits names but not full descriptions + paths.
-        let text = announce(&skills, 80).unwrap();
-        assert!(!text.contains("... and"));
-        assert!(text.contains("- a"));
-        assert!(text.contains("- b"));
+        // Budget 200 fits both full rows (each ~45 chars) — everything
+        // renders, no overflow indicator.
+        let text = announce(&skills, 200).unwrap();
+        assert!(!text.contains("more skills available"));
+        assert!(text.contains(">desc<"));
     }
 
     // ── Custom tool name ─────────────────────────────────────────
@@ -1349,8 +1293,9 @@ mod tests {
             "invoke_skill",
         )
         .unwrap();
-        assert!(text.starts_with(&listing_header("invoke_skill")));
-        // Header should NOT reference any tool name.
+        // Unified renderer: the announcement is the budgeted XML listing.
+        assert!(text.starts_with("<agent_skill"));
+        // The (retained-for-compat) tool name must not leak into output.
         assert!(!text.contains("invoke_skill tool"));
         assert!(!text.contains("Skill tool"));
     }
@@ -1470,7 +1415,7 @@ mod tests {
         .unwrap();
         // Functional description appears (trigger suffix stripped)
         assert!(
-            text.contains("memorize: Persist knowledge"),
+            text.contains("Persist knowledge"),
             "functional desc should appear: {text}"
         );
         // Triggers rendered as separate Use when: line, with the leading
@@ -1511,7 +1456,7 @@ mod tests {
         );
         // Functional description without trigger suffix
         assert!(
-            text.contains("s: Full desc"),
+            text.contains("Full desc"),
             "functional desc should appear: {text}"
         );
         // Embedded trigger text should be stripped from desc line
@@ -1624,15 +1569,15 @@ mod tests {
         }];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("memorize: Persist knowledge."),
+            text.contains("Persist knowledge."),
             "desc line: {text}"
         );
         assert!(
-            text.contains("  Use when: user says memorize"),
+            text.contains("Use when: user says memorize"),
             "Use when: line: {text}"
         );
         assert!(
-            text.contains("  Absolute path: "),
+            text.contains("fullPath="),
             "Absolute path line: {text}"
         );
     }
@@ -1642,14 +1587,14 @@ mod tests {
         let skills = [skill("commit", "Commit staged changes.")];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("commit: Commit staged changes."),
+            text.contains("Commit staged changes."),
             "desc: {text}"
         );
         assert!(!text.contains("Use when:"), "no Use when: line: {text}");
     }
 
     #[test]
-    fn overhead_larger_with_when_to_use() {
+    fn overhead_xml_larger_with_when_to_use() {
         let without = SkillEntry {
             name: "s",
             description: "desc",
@@ -1662,8 +1607,8 @@ mod tests {
             when_to_use: Some("trigger"),
             display_path: "/p/SKILL.md".to_owned(),
         };
-        let diff = with.overhead() - without.overhead();
-        assert_eq!(diff, "  Use when: ".len() + "\n".len());
+        let diff = with.overhead_xml() - without.overhead_xml();
+        assert_eq!(diff, " \u{2014} Use when: ".len());
     }
 
     #[test]
@@ -1689,7 +1634,7 @@ mod tests {
         )];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("memorize: Persist knowledge"),
+            text.contains("Persist knowledge"),
             "functional desc: {text}"
         );
         // Leading connective stripped so the "Use when:" label is not duplicated.

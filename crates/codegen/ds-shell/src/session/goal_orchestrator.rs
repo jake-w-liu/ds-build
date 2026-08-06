@@ -211,6 +211,22 @@ pub(crate) fn build_goal_updated(
         classifier_max_runs: o.classifier_max_runs,
         last_classifier_verdict: o.last_classifier_verdict,
         last_classifier_details_path: o.last_classifier_details_path.clone(),
+        // True only when the most recent verification round ended in an
+        // infra-class fail-open; the panel badges it instead of showing a
+        // normal pass.
+        last_classifier_infra_fallback: o.last_classifier_infra_fallback.then_some(true),
+        // Surface only the most recent decision entries (capped) so a long
+        // goal cannot bloat the wire.
+        recent_decisions: o
+            .decisions
+            .iter()
+            .rev()
+            .take(crate::session::goal_tracker::GOAL_DECISIONS_WIRE_MAX)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
         // Both badges are sourced from their `*_in_flight` latches (see the
         // field docs), NOT one-shot wire flags — so the token-accounting /
         // continuation `GoalUpdated`s that fire mid-run keep carrying the
@@ -254,6 +270,8 @@ pub(crate) fn build_goal_cleared() -> DsSessionUpdate {
         classifier_max_runs: None,
         last_classifier_verdict: None,
         last_classifier_details_path: None,
+        last_classifier_infra_fallback: None,
+        recent_decisions: Vec::new(),
         verifying_completion: None,
         planning: None,
     }

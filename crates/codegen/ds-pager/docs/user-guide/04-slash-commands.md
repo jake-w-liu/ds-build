@@ -377,7 +377,9 @@ Set, manage, or check an autonomous goal. DS works toward the objective across t
 
 Arguments: `<objective>`, `status`, `pause`, `resume`, or `clear`. **Availability:** appears only when the goal feature is enabled and the `update_goal` tool is in the session toolset.
 
-The orchestration panel (phases + agents) opens **automatically** whenever a goal becomes active, so multi-agent progress is visible without any action. Press `g` to toggle it, `Esc` to dismiss; the next goal re-opens it.
+The orchestration panel (phases + agents) opens **automatically** whenever a goal becomes active, so multi-agent progress is visible without any action. Press `g` to toggle it, `Esc` to dismiss; the next goal re-opens it. Inside the panel, `j`/`k` select an agent row and `Enter` drills into that subagent's live scrollback.
+
+Goal orchestration is **fail-closed by default**: if the verification infrastructure fails (sampler/transport error), the goal pauses instead of being marked complete — the panel shows an `[INFRA FALLBACK]` badge on the last verdict, and the decisions history records it. Back-off / no-progress / infra / budget pauses **auto-resume** when a new prompt arrives (capped at 3 per goal, visible as `auto_resumed` in the decisions history); a `UserPaused` or `Blocked` goal never auto-resumes.
 
 ### `/theme`
 

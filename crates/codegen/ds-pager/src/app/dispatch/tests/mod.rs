@@ -370,6 +370,8 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         prompt: None,
         child_cwd: None,
         worktree_path: None,
+        goal_phase: None,
+        goal_attempt: None,
         child_updates_replayed: false,
     }
 }

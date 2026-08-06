@@ -3197,6 +3197,8 @@ fn spawn_notif(subagent_id: &str, resumed_from: Option<&str>) -> DsSessionNotifi
             role: None,
             model: None,
             resumed_from: resumed_from.map(str::to_string),
+            goal_phase: None,
+            goal_attempt: None,
         },
         meta: None,
     }

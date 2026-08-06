@@ -382,22 +382,19 @@ impl SessionActor {
             .clone()
             .slash_skills()
             .await;
-        let skill_rewrite = if crate::session::is_cursor_user_template(
-            &self.agent.borrow().definition().user_message_template,
-        ) {
-            slash_commands::SkillSlashRewrite::Passthrough
-        } else {
-            slash_commands::SkillSlashRewrite::RewriteToRun
-        };
         let availability = self.command_availability().await;
         let mut pending_skill_information: Option<String> = None;
-        let prompt_blocks = match slash_commands::resolve(
-            prompt_blocks,
-            &slash_skills,
-            availability,
-            skill_rewrite,
-        ) {
-            Ok(blocks) => blocks,
+        let prompt_blocks = match slash_commands::resolve(prompt_blocks, &slash_skills, availability) {
+            Ok(blocks) => {
+                // A regular user prompt is the "blocker cleared" signal for
+                // a goal paused on infra/capacity reasons: auto-resume
+                // (capped, non-user pause classes only) so the orchestration
+                // continues without requiring an explicit /goal resume.
+                if !super::super::PromptOrigin::from_prompt_id(prompt_id).is_synthetic() {
+                    self.maybe_auto_resume_goal().await;
+                }
+                blocks
+            }
             Err(SlashCommandOutcome::Builtin(action)) => {
                 let text_block =
                     |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));

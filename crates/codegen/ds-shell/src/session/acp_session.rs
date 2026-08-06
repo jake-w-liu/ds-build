@@ -838,6 +838,13 @@ pub(crate) struct SessionActor {
     /// `true`, an infra-class verification failure pauses the goal instead
     /// of recording `Achieved`.
     pub(crate) goal_fail_closed_verification: bool,
+    /// Per-pattern stop-detector precision accounting (pure in-memory).
+    /// Fires are recorded on premature-stop detection; outcomes are
+    /// resolved productive by the next verification round or unproductive
+    /// by a pause/clear. Low-precision patterns auto-suppress.
+    pub(crate) stop_precision: std::sync::Mutex<
+        crate::session::goal_stop_detector::StopPatternPrecision,
+    >,
     /// Strict skeptic verdicts (`DS_GOAL_STRICT_SKEPTIC_VERDICTS` /
     /// `[goal] strict_skeptic_verdicts`) resolved at actor build. When
     /// `true`, a skeptic whose verdict JSON is missing/malformed votes a

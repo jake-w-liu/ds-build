@@ -61,6 +61,9 @@ pub struct WorkflowAgentRow {
     pub model: Option<String>,
     pub tokens: u64,
     pub duration: std::time::Duration,
+    /// Live activity ("Thinking", "Running: cargo build") from
+    /// `SubagentProgress` ticks; `None` when idle/finished.
+    pub activity: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +147,35 @@ fn retry_count(info: &SubagentInfo) -> u32 {
     n
 }
 
+/// Structured phase from the shell when present (goal subagents), falling
+/// back to the keyword sniffer only for non-goal sessions.
+///
+/// The structured value is authoritative: a verifier the model happened to
+/// name "quality-gate-1" still lands in Verify because the shell emitted
+/// `goal_phase = "verify"` on the wire, not because its description matched
+/// a keyword. Unknown structured values default to Execute (they are not
+/// plan/verify agents by the shell's own accounting).
+fn structured_or_sniffed_phase(info: &SubagentInfo) -> &'static str {
+    match info.goal_phase.as_deref() {
+        Some("plan") => "plan",
+        Some("verify") => "verify",
+        Some(_) => "execute",
+        None => classify_subagent_phase(info),
+    }
+}
+
+/// Structured attempt/round from the shell when present (goal subagents),
+/// falling back to the prose sniffer only for non-goal sessions.
+///
+/// `goal_attempt` is 1-based; the panel shows 0-based retries (`attempt - 1`)
+/// so a first-round agent renders "retry 0" equivalent (no retry badge),
+/// matching the prose-derived convention.
+fn structured_or_sniffed_retry(info: &SubagentInfo) -> u32 {
+    info.goal_attempt
+        .map(|a| a.saturating_sub(1))
+        .unwrap_or_else(|| retry_count(info))
+}
+
 /// Build a Claude-style workflow snapshot from the live goal + subagents.
 ///
 /// Phases are always Plan / Execute / Verify. Status is inferred from the
@@ -174,12 +206,13 @@ pub fn derive_workflow_snapshot(
             WorkflowAgentRow {
                 id: info.subagent_id.to_string(),
                 label,
-                phase_id: classify_subagent_phase(info),
+                phase_id: structured_or_sniffed_phase(info),
                 status: agent_status(info),
-                retry: retry_count(info),
+                retry: structured_or_sniffed_retry(info),
                 model: info.model.as_ref().map(|m| m.to_string()),
                 tokens: info.tokens_used.unwrap_or(0),
                 duration: info.display_elapsed(),
+                activity: info.activity_label.clone(),
             }
         })
         .collect();
@@ -434,6 +467,7 @@ pub fn render_workflow_panel(
     area: Rect,
     snap: &WorkflowSnapshot,
     theme: &Theme,
+    selected: Option<&str>,
 ) -> u16 {
     if area.width < 24 || area.height == 0 {
         return 0;
@@ -571,6 +605,14 @@ pub fn render_workflow_panel(
             if a.retry > 0 {
                 label = format!("{label} (retry {})", a.retry);
             }
+            // Live activity inline for running agents (Thinking / tool
+            // title from `SubagentProgress` ticks).
+            if let Some(act) = a.activity.as_deref()
+                && !act.is_empty()
+            {
+                label = format!("{label} · {act}");
+            }
+            let is_selected = selected.is_some_and(|sel| sel == a.id);
             // Budget label so model/tokens/duration still fit.
             let meta_parts: Vec<String> = [
                 a.model.clone(),
@@ -593,7 +635,16 @@ pub fn render_workflow_panel(
                 .saturating_sub(meta_w);
             let line = Line::from(vec![
                 Span::styled(format!(" {icon} "), icon_style),
-                Span::styled(label_disp, Style::default().fg(theme.text_primary)),
+                Span::styled(
+                    label_disp,
+                    if is_selected {
+                        Style::default()
+                            .fg(theme.text_primary)
+                            .add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(theme.text_primary)
+                    },
+                ),
                 Span::raw(" ".repeat(pad as usize)),
                 Span::styled(meta, Style::default().fg(theme.gray)),
             ]);
@@ -703,6 +754,8 @@ mod tests {
             prompt: None,
             child_cwd: None,
             worktree_path: None,
+            goal_phase: None,
+            goal_attempt: None,
             child_updates_replayed: false,
         }
     }
@@ -738,6 +791,70 @@ mod tests {
         assert_eq!(snap.active_phase_id, "verify");
     }
 
+    /// Structured wire metadata is authoritative: a verifier whose prose
+    /// carries NO keyword hints ("quality-gate-1") still lands in Verify,
+    /// and a retry whose description lacks "retry N" still shows the
+    /// structured attempt.
+    #[test]
+    fn structured_phase_wins_over_sniffed_keywords() {
+        let goal = stub_goal(GoalDisplayPhase::Executing, false, false);
+        let mut map = HashMap::new();
+        let mut verifier = stub_subagent("v1", "quality-gate-1", "general-purpose", true);
+        verifier.goal_phase = Some(Arc::from("verify"));
+        verifier.goal_attempt = Some(2);
+        let mut worker = stub_subagent("w1", "stage-2", "general-purpose", false);
+        worker.goal_phase = Some(Arc::from("execute"));
+        worker.goal_attempt = Some(1);
+        map.insert("v1".into(), verifier);
+        map.insert("w1".into(), worker);
+        let snap = derive_workflow_snapshot(&goal, &map);
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "v1").map(|a| a.phase_id),
+            Some("verify"),
+            "verifier with keyword-free name must land in Verify via structured phase"
+        );
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "w1").map(|a| a.phase_id),
+            Some("execute"),
+            "worker with keyword-free name must land in Execute via structured phase"
+        );
+        // attempt 2 (1-based) => one retry shown.
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "v1").map(|a| a.retry),
+            Some(1),
+            "structured attempt must drive the retry count without prose"
+        );
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "w1").map(|a| a.retry),
+            Some(0)
+        );
+        // Phase totals group by the structured phase.
+        let verify_phase = snap.phases.iter().find(|p| p.id == "verify").unwrap();
+        assert_eq!((verify_phase.agents_done, verify_phase.agents_total), (1, 1));
+    }
+
+    /// Without structured metadata the sniffer remains as a fallback for
+    /// non-goal sessions.
+    #[test]
+    fn sniffer_fallback_still_classifies_non_goal_subagents() {
+        let goal = stub_goal(GoalDisplayPhase::Executing, false, false);
+        let mut map = HashMap::new();
+        map.insert(
+            "a".into(),
+            stub_subagent("a", "skeptic-0", "attacker-code", false),
+        );
+        map.insert("b".into(), stub_subagent("b", "planner", "plan", true));
+        let snap = derive_workflow_snapshot(&goal, &map);
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "a").map(|a| a.phase_id),
+            Some("verify")
+        );
+        assert_eq!(
+            snap.agents.iter().find(|a| a.id == "b").map(|a| a.phase_id),
+            Some("plan")
+        );
+    }
+
     #[test]
     fn one_line_summary_includes_phase_and_counts() {
         let goal = stub_goal(GoalDisplayPhase::Executing, false, false);
@@ -759,7 +876,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();
-        let rows = render_workflow_panel(&mut buf, area, &snap, &theme);
+        let rows = render_workflow_panel(&mut buf, area, &snap, &theme, None);
         assert!(rows >= 4);
     }
 

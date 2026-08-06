@@ -108,6 +108,8 @@ pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
         prompt: None,
         child_cwd: None,
         worktree_path: None,
+        goal_phase: None,
+        goal_attempt: None,
         child_updates_replayed: false,
     }
 }
@@ -1197,6 +1199,8 @@ pub(super) fn test_subagent_spawned(
         persona: None,
         role: None,
         model: None,
+        goal_phase: None,
+        goal_attempt: None,
         resumed_from: None,
     }
 }

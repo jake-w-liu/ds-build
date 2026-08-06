@@ -22,6 +22,42 @@ use crossterm::event::{
 };
 use std::time::Instant;
 impl AgentView {
+    /// Move the workflow-panel agent-row selection by `delta` (+1 next,
+    /// -1 previous), cycling. Ordering mirrors the panel: running first,
+    /// then by elapsed duration (longest first). No-op without rows.
+    fn move_workflow_selection(&mut self, delta: isize) {
+        let ordered: Vec<std::sync::Arc<str>> = {
+            let mut rows: Vec<&crate::app::subagent::SubagentInfo> =
+                self.subagent_sessions.values().collect();
+            rows.sort_by(|a, b| {
+                let ar = a.is_running();
+                let br = b.is_running();
+                br.cmp(&ar)
+                    .then(b.display_elapsed().cmp(&a.display_elapsed()))
+                    .then(a.description.cmp(&b.description))
+            });
+            rows.into_iter()
+                .map(|r| r.child_session_id.clone())
+                .collect()
+        };
+        if ordered.is_empty() {
+            self.workflow_selected = None;
+            return;
+        }
+        let idx = self
+            .workflow_selected
+            .as_ref()
+            .and_then(|sel| ordered.iter().position(|c| c == sel))
+            .unwrap_or(0);
+        let next = if ordered.len() == 1 {
+            0
+        } else {
+            let n = idx as isize + delta;
+            n.rem_euclid(ordered.len() as isize) as usize
+        };
+        self.workflow_selected = Some(ordered[next].clone());
+    }
+
     /// True when the scrollback pane is focused with nothing layered on top —
     /// no viewer, modal, btw, or open search. This is the precise state in
     /// which a bare `q`/`Esc` should close the enclosing surface (the subagent
@@ -376,6 +412,25 @@ impl AgentView {
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
                         self.show_goal_detail = false;
+                        return InputOutcome::Changed;
+                    }
+                    // Drill-down navigation: j/k move the selection across
+                    // the agent rows (same ordering as the panel), Enter
+                    // peeks the selected child's live scrollback.
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        self.move_workflow_selection(1);
+                        return InputOutcome::Changed;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.move_workflow_selection(-1);
+                        return InputOutcome::Changed;
+                    }
+                    KeyCode::Enter => {
+                        if let Some(child) = self.workflow_selected.clone() {
+                            return InputOutcome::Action(Action::WorkflowDrillDown {
+                                child_session_id: child.to_string(),
+                            });
+                        }
                         return InputOutcome::Changed;
                     }
                     _ => {

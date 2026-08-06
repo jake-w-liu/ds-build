@@ -872,6 +872,10 @@ pub struct AgentView {
     /// Auto-opened when a goal becomes active; toggled by `Action::ToggleGoalDetail`.
     /// Only shown when `goal_state` is `Some`.
     pub show_goal_detail: bool,
+    /// Child session id of the currently selected workflow-panel agent row
+    /// (`j`/`k` in the goal-detail overlay). `Enter` drills into that
+    /// child's live scrollback (`Action::WorkflowDrillDown`).
+    pub workflow_selected: Option<std::sync::Arc<str>>,
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.
     pub turn_start_ms: Option<i64>,
@@ -2313,6 +2317,8 @@ pub(super) mod test_fixtures {
             prompt: None,
             child_cwd: None,
             worktree_path: None,
+            goal_phase: None,
+            goal_attempt: None,
             child_updates_replayed: false,
         }
     }

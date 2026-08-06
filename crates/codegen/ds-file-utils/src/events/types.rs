@@ -338,6 +338,14 @@ pub enum Event {
     GoalPrematureStopDetected {
         pattern: &'static str,
     },
+    /// The goal auto-resumed from a non-user pause (back-off / no-progress /
+    /// infra / budget) when the blocker cleared (a new user prompt arrived
+    /// and the auto-resume cap was not exhausted). `round` is the current
+    /// goal round at resume time. `UserPaused` and `Blocked` goals never
+    /// auto-resume — only explicit user action re-arms those.
+    GoalAutoResumed {
+        round: u32,
+    },
 
     // ── MCP Diagnostics ──────────────────────────────────────────
     McpConfigResolved {

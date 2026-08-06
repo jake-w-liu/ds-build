@@ -2442,6 +2442,14 @@ pub(crate) struct SubagentMeta {
     /// durable `resume_from` identity validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_model_id: Option<String>,
+    /// `/goal` harness-only: workflow phase ("plan" | "execute" | "verify").
+    /// `None` for non-goal spawns. Persisted so the pager's disk enrichment
+    /// matches the live `SubagentSpawned` payload after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_phase: Option<String>,
+    /// `/goal` harness-only: 1-based attempt/round number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_attempt: Option<u32>,
 }
 /// Canonical subagent metadata for GCS persistence (`subagent.json`).
 ///

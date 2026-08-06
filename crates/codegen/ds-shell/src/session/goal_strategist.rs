@@ -121,6 +121,10 @@ pub(crate) struct ChannelSpawner {
     /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
     /// in tests / when no event log is wired.
     pub(crate) events: Option<EventWriter>,
+    /// `/goal` orchestration metadata surfaced on the wire: phase + 1-based
+    /// round. Set by the caller that knows the current round.
+    pub(crate) goal_phase: Option<&'static str>,
+    pub(crate) goal_attempt: Option<u32>,
 }
 
 #[async_trait::async_trait]
@@ -203,6 +207,8 @@ impl ChannelSpawner {
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
             fork_context: false,
+            goal_phase: self.goal_phase.map(str::to_string),
+            goal_attempt: self.goal_attempt,
             result_tx,
         };
         if self
@@ -583,6 +589,8 @@ mod tests {
             trace_sink: None,
             role_override: RoleSpawnOverride::default(),
             events: None,
+            goal_phase: Some("execute"),
+            goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -627,6 +635,8 @@ mod tests {
                 agent_type: Some("cursor".into()),
             },
             events: None,
+            goal_phase: Some("execute"),
+            goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
             let _ = spawner

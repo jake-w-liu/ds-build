@@ -841,20 +841,6 @@ impl BuiltinAction {
     }
 }
 
-/// How to rewrite the user's prompt when a slash command resolves to a skill.
-///
-/// - `RewriteToRun` (default): replace `/foo args` with `"run /foo args"`,
-///   matching today's DS Build flow that calls our dedicated `skill` tool.
-/// - `Passthrough`: leave the prompt verbatim. Some templates use this —
-///   the model is trained to spot a leading `/<name>`, look it up in the
-///   `<agent_skills>` listing, and call the Read tool on `fullPath`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum SkillSlashRewrite {
-    #[default]
-    RewriteToRun,
-    Passthrough,
-}
-
 /// Scan user input left-to-right for `/{word}` tokens where `word` matches
 /// a **known registered skill name** (bare or qualified).
 ///
@@ -1077,7 +1063,6 @@ pub(super) fn resolve(
     prompt_blocks: Vec<acp::ContentBlock>,
     skills: &[SkillInfo],
     availability: CommandAvailability,
-    _skill_rewrite: SkillSlashRewrite,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
@@ -1369,7 +1354,7 @@ mod tests {
     fn yolo_alias_resolves_to_always_approve() {
         // /yolo should resolve via alias to the always-approve command
         let blocks = vec![text_block("/yolo on")];
-        let outcome = resolve(blocks, &[], all_gated(), SkillSlashRewrite::default()).unwrap_err();
+        let outcome = resolve(blocks, &[], all_gated()).unwrap_err();
         assert!(matches!(
             outcome,
             SlashCommandOutcome::Builtin(BuiltinAction::SetYolo { enabled: true })
@@ -1384,7 +1369,6 @@ mod tests {
             vec![text_block("/compact preserve auth")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1400,7 +1384,6 @@ mod tests {
             vec![text_block("/status")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1416,7 +1399,6 @@ mod tests {
             vec![text_block("/commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -1427,7 +1409,6 @@ mod tests {
             vec![text_block("/commit")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -1480,7 +1461,6 @@ mod tests {
             vec![text_block("/loop 1m echo hello")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let blocks = match outcome {
@@ -1520,7 +1500,6 @@ mod tests {
             vec![text_block("/loop")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let SlashCommandOutcome::InvokeSkill { blocks, .. } = outcome else {
@@ -1547,7 +1526,6 @@ mod tests {
             vec![text_block("/commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::Passthrough,
         )
         .unwrap_err();
         // Original text is preserved in blocks.
@@ -1557,7 +1535,6 @@ mod tests {
             vec![text_block("/commit")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::Passthrough,
         )
         .unwrap_err();
         assert_eq!(invoke_text(outcome), "/commit");
@@ -1571,7 +1548,6 @@ mod tests {
                 vec![text_block("fix the login bug")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default()
             )
             .is_ok()
         );
@@ -1580,7 +1556,6 @@ mod tests {
                 vec![text_block("/unknown")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default()
             )
             .is_ok()
         );
@@ -1594,7 +1569,6 @@ mod tests {
                 vec![text_block("/internal-only")],
                 &skills,
                 all_gated(),
-                SkillSlashRewrite::default()
             )
             .is_ok()
         );
@@ -1607,7 +1581,6 @@ mod tests {
             vec![text_block("/compact")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
@@ -1735,7 +1708,6 @@ mod tests {
                 vec![text_block("/goal status")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
             )
             .is_ok(),
             "expected pass-through (Ok), got an outcome",
@@ -1756,7 +1728,6 @@ mod tests {
                 vec![text_block("/loop 5m do thing")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
             )
             .is_ok(),
             "expected pass-through (Ok), got an outcome",
@@ -1919,7 +1890,6 @@ mod tests {
             vec![text_block("/flush")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1935,7 +1905,6 @@ mod tests {
             vec![text_block("/flush")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
@@ -1961,7 +1930,6 @@ mod tests {
             vec![text_block("/dream")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -1977,7 +1945,6 @@ mod tests {
             vec![text_block("/dream")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
@@ -2028,7 +1995,6 @@ mod tests {
             vec![text_block("/commit")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -2048,7 +2014,6 @@ mod tests {
             vec![text_block("/local:commit fix typo")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -2060,7 +2025,6 @@ mod tests {
             vec![text_block("/user:commit")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -2175,7 +2139,6 @@ mod tests {
             vec![text_block("/compact")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(outcome, SlashCommandOutcome::Builtin(_)));
@@ -2185,7 +2148,6 @@ mod tests {
             vec![text_block("/local:compact")],
             &skills,
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         let skill = first_skill(outcome);
@@ -2201,7 +2163,6 @@ mod tests {
                 vec![text_block("/feedback hello")],
                 &[],
                 CommandAvailability::default(),
-                SkillSlashRewrite::default()
             )
             .is_ok()
         );
@@ -2213,7 +2174,6 @@ mod tests {
             vec![text_block("/feedback hello")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -2334,7 +2294,6 @@ mod tests {
             vec![text_block("/mem")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -2349,7 +2308,6 @@ mod tests {
             vec![text_block("/mem off")],
             &[],
             all_gated(),
-            SkillSlashRewrite::default(),
         )
         .unwrap_err();
         assert!(matches!(
@@ -2370,7 +2328,6 @@ mod tests {
             vec![text_block("/memory")],
             &[],
             availability,
-            SkillSlashRewrite::default(),
         );
         assert!(
             outcome.is_err(),
@@ -2390,7 +2347,6 @@ mod tests {
                 vec![text_block("/memory")],
                 &[],
                 availability,
-                SkillSlashRewrite::default(),
             )
             .is_ok(),
             "expected pass-through (Ok) when memory_configured is false",
@@ -2492,7 +2448,7 @@ mod tests {
 
     fn resolve_goal(args: &str) -> BuiltinAction {
         let blocks = vec![text_block(&format!("/goal {args}"))];
-        match resolve(blocks, &[], all_gated(), SkillSlashRewrite::default()).unwrap_err() {
+        match resolve(blocks, &[], all_gated()).unwrap_err() {
             SlashCommandOutcome::Builtin(action) => action,
             _ => panic!("expected Builtin outcome"),
         }

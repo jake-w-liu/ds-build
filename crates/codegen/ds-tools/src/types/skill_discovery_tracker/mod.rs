@@ -1331,7 +1331,10 @@ mod tests {
             "listing should be near budget ({expected_budget}), got {} chars",
             text.len()
         );
-        assert!(text.contains("... and"), "should indicate truncated skills");
+        assert!(
+            text.contains("more skills available"),
+            "should indicate truncated skills"
+        );
     }
 
     #[test]
@@ -1406,9 +1409,8 @@ mod tests {
     }
 
     #[test]
-    fn default_format_produces_markdown() {
+    fn default_format_produces_unified_xml_listing() {
         let mut mgr = SkillManager::new();
-        // use_xml_format defaults to false.
         mgr.seed(
             None,
             None,
@@ -1419,13 +1421,11 @@ mod tests {
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
+        // Unified renderer: the default announcement path now produces the
+        // same budgeted XML rows as the templated-user-message path.
         assert!(
-            text.contains("Absolute path:"),
-            "default format should produce markdown: {text}"
-        );
-        assert!(
-            !text.contains("<agent_skill"),
-            "default format should not contain XML tags: {text}"
+            text.contains("<agent_skill fullPath="),
+            "unified renderer should produce XML rows: {text}"
         );
     }
 

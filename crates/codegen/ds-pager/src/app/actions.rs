@@ -934,6 +934,9 @@ pub enum Action {
     },
     /// Toggle the expanded goal detail overlay.
     ToggleGoalDetail,
+    /// Drill from the workflow panel into a subagent's live scrollback:
+    /// switch the active view to the agent whose session id matches.
+    WorkflowDrillDown { child_session_id: String },
     Rewind,
     RewindShowPicker,
     RewindPickerSelect(usize),

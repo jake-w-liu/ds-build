@@ -628,6 +628,8 @@ pub(crate) async fn handle_subagent_request(
         worktree_path: worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
         snapshot_ref: None,
         effective_model_id: Some(effective_model_id.0.to_string()),
+        goal_phase: request.goal_phase.clone(),
+        goal_attempt: request.goal_attempt,
     };
     write_subagent_meta(&subagent_meta_dir, &subagent_meta);
     if let (Some(bucket_url), Some(upload_method)) = (
@@ -692,6 +694,8 @@ pub(crate) async fn handle_subagent_request(
             role: effective_runtime.role_name.clone(),
             model: Some(effective_model_id.0.to_string()),
             resumed_from: request.resume_from.clone(),
+            goal_phase: request.goal_phase.clone(),
+            goal_attempt: request.goal_attempt,
         },
         ctx.parent_cmd_tx.as_ref(),
     );

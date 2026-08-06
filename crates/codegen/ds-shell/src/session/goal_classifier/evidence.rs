@@ -188,6 +188,7 @@ pub(crate) fn build_classifier_evidence_packet(
     plan_file: Option<&Path>,
     plan_changes: Option<&str>,
     final_response: &str,
+    implementer_scratch: Option<&Path>,
 ) -> String {
     let changes_value: &str = match changes {
         ChangesRef::File(p) => p,
@@ -197,6 +198,10 @@ pub(crate) fn build_classifier_evidence_packet(
         Some(p) => p.to_string_lossy(),
         None => Cow::Borrowed(PLAN_UNAVAILABLE),
     };
+    let test_evidence_loc = implementer_scratch.map_or(
+        Cow::Borrowed("(none captured — refer to FINAL_RESPONSE for evidence paths)"),
+        |p| Cow::Owned(p.to_string_lossy().into_owned()),
+    );
     let mut out = String::with_capacity(
         objective.len()
             + changes_value.len()
@@ -253,6 +258,9 @@ pub(crate) fn build_classifier_evidence_packet(
     }
     out.push_str("\nFINAL_RESPONSE:\n");
     out.push_str(final_response);
+    out.push('\n');
+    out.push_str("\nTEST_OUTPUT_LOCATION: ");
+    out.push_str(&test_evidence_loc);
     out.push('\n');
     out
 }
@@ -1191,6 +1199,7 @@ mod tests {
             Some(Path::new("/home/u/.ds/sessions/s1/goal/plan.md")),
             None,
             "I did it.",
+            Some(Path::new("/tmp/ds-goal-abc123/implementer")),
         );
         assert_eq!(
             packet,
@@ -1199,7 +1208,8 @@ mod tests {
              CHANGED_FILES:\n- js/main.js\n\n\
              PLAN_FILE: /home/u/.ds/sessions/s1/goal/plan.md\n\n\
              PLAN_CHANGES: (none)\n\n\
-             FINAL_RESPONSE:\nI did it.\n",
+             FINAL_RESPONSE:\nI did it.\n\n\
+             TEST_OUTPUT_LOCATION: /tmp/ds-goal-abc123/implementer\n",
         );
     }
 
@@ -1215,7 +1225,7 @@ mod tests {
             &files,
             None,
             None,
-            "resp",
+            "resp", None
         );
         assert!(!packet.contains("</system-reminder>"));
         assert!(packet.contains("<<!--esc-->/system-reminder>"));
@@ -1236,7 +1246,7 @@ mod tests {
             &files,
             None,
             None,
-            "resp",
+            "resp", None
         );
         assert!(
             !packet.contains("\nNOT A BULLET"),
@@ -1256,7 +1266,7 @@ mod tests {
             &[],
             None,
             None,
-            "resp",
+            "resp", None
         );
         assert!(packet.contains("CHANGES_FILE: (unavailable)\n"));
         assert!(packet.contains("CHANGED_FILES:\n(none captured)\n"));
@@ -1274,7 +1284,7 @@ mod tests {
             &[],
             None,
             None,
-            "resp",
+            "resp", None
         );
         assert!(packet.contains("PLAN_FILE: (unavailable)\n"));
     }
@@ -1290,7 +1300,7 @@ mod tests {
             &["a.rs".to_string()],
             Some(Path::new("/tmp/plan.md")),
             Some("@@ -1 +1 @@\n-old\n+new\n"),
-            "resp",
+            "resp", None
         );
         let obj = packet.find("OBJECTIVE:").unwrap();
         let changes = packet.find("CHANGES_FILE:").unwrap();
@@ -1318,7 +1328,7 @@ mod tests {
             &[],
             Some(Path::new("/tmp/plan.md")),
             Some(diff),
-            "resp",
+            "resp", None
         );
         assert!(
             packet.contains(&format!("PLAN_CHANGES:\n{diff}")),
@@ -1342,7 +1352,7 @@ mod tests {
             &files,
             None,
             None,
-            "r",
+            "r", None
         );
         assert!(packet.contains("- f0000.rs\n"));
         assert!(packet.contains("(… and 5 more)\n"));
@@ -1428,7 +1438,7 @@ mod tests {
             &[],
             Some(Path::new(plan)),
             None,
-            "resp",
+            "resp", None
         );
         assert!(packet.contains(&format!("PLAN_FILE: {plan}\n")));
     }
@@ -1436,7 +1446,7 @@ mod tests {
     #[test]
     fn evidence_packet_handles_empty_inputs() {
         let packet =
-            build_classifier_evidence_packet("", ChangesRef::Unavailable, &[], None, None, "");
+            build_classifier_evidence_packet("", ChangesRef::Unavailable, &[], None, None, "", None);
         assert!(packet.contains("OBJECTIVE:\n"));
         assert!(packet.contains("CHANGES_FILE: (unavailable)"));
         assert!(packet.contains("CHANGED_FILES:\n(none captured)"));

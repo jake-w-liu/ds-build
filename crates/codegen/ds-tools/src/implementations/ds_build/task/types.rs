@@ -66,6 +66,14 @@ pub struct SubagentRequest {
     /// Harness-only: seed child with normalized parent conversation, then append
     /// `prompt`. Not on TaskToolInput. Successful `resume_from` takes precedence.
     pub fork_context: bool,
+    /// `/goal` harness-only orchestration metadata: which workflow phase this
+    /// subagent belongs to ("plan" | "execute" | "verify"). `None` for every
+    /// non-goal spawn. Persisted into the child's `SubagentMeta` so the pager
+    /// can place the agent in the workflow panel without sniffing prose.
+    pub goal_phase: Option<String>,
+    /// `/goal` harness-only orchestration metadata: the 1-based attempt/round
+    /// number this spawn belongs to. `None` for every non-goal spawn.
+    pub goal_attempt: Option<u32>,
     /// Oneshot channel for the coordinator to send back the result.
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<SubagentResult>,

@@ -410,6 +410,8 @@ mod tests {
             last_classifier_verdict: None,
             last_classifier_details_path: None,
             last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
             verifying_completion: false,
             planning: false,
             received_at: std::time::Instant::now(),

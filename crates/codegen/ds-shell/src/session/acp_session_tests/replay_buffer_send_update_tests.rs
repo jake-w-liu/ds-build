@@ -197,6 +197,9 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         goal_use_current_model_only: false,
         goal_fail_closed_verification: false,
         goal_strict_skeptic_verdicts: false,
+        stop_precision: std::sync::Mutex::new(
+            crate::session::goal_stop_detector::StopPatternPrecision::new(),
+        ),
         goal_classifier_max_runs: crate::session::goal_classifier::GOAL_CLASSIFIER_MAX_RUNS_DEFAULT,
         goal_strategist_every: 5,
         goal_reverify_after: crate::session::acp_session::GOAL_REVERIFY_AFTER_DEFAULT,

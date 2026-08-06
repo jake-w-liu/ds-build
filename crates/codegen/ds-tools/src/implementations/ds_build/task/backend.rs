@@ -350,6 +350,8 @@ mod tests {
             run_in_background: Some(false),
             surface_completion: true,
             fork_context: false,
+            goal_phase: None,
+            goal_attempt: None,
             result_tx: dummy_tx,
         };
 
@@ -382,6 +384,8 @@ mod tests {
             run_in_background: Some(false),
             surface_completion: true,
             fork_context: false,
+            goal_phase: None,
+            goal_attempt: None,
             result_tx: dummy_tx,
         };
 
@@ -535,6 +539,8 @@ mod tests {
             run_in_background: Some(false),
             surface_completion: true,
             fork_context: false,
+            goal_phase: None,
+            goal_attempt: None,
             result_tx: dummy_tx,
         };
 

@@ -797,6 +797,14 @@ impl SessionActor {
                     tracker.rollback_classifier_attempt();
                     tracker.reset_classifier_stall();
                     tracker.reset_strategist_state();
+                    let round = tracker.snapshot().map(|o| o.total_verify_rounds);
+                    tracker.record_decision(
+                        crate::session::goal_tracker::GoalDecisionKind::Verdict,
+                        crate::session::goal_tracker::truncate_decision_detail(
+                            &format!("blocked: {pause_summary}"),
+                        ),
+                        round,
+                    );
                 }
                 self.auto_pause_for_classifier_blocked(&details_path, &pause_summary)
                     .await;
@@ -806,6 +814,23 @@ impl SessionActor {
                 reason,
                 details_path,
             } => {
+                // Surface the infra-class nature of this round regardless of
+                // policy: the panel badges "infra fallback" instead of
+                // presenting the outcome as a normal pass.
+                let mut tracker = self.goal_tracker.lock();
+                let round = tracker
+                    .snapshot()
+                    .map(|o| o.total_verify_rounds)
+                    .unwrap_or(0);
+                if let Some(o) = tracker.snapshot_mut() {
+                    o.last_classifier_infra_fallback = true;
+                }
+                tracker.record_decision(
+                    crate::session::goal_tracker::GoalDecisionKind::InfraFallback,
+                    reason.as_const_str().to_string(),
+                    Some(round),
+                );
+                drop(tracker);
                 // Fail-closed policy: an infra-class verification failure must
                 // never be recorded as an achieved check. Pause for a user
                 // decision instead of completing the goal.
@@ -869,8 +894,15 @@ impl SessionActor {
         details_path: Option<&str>,
         gaps: GapsUpdate<'_>,
     ) {
-        if let Some(o) = tracker.snapshot_mut() {
+        let (round, label) = {
+            let Some(o) = tracker.snapshot_mut() else {
+                return;
+            };
             o.last_classifier_verdict = Some(verdict);
+            // A real (parsed) verdict clears the infra-fallback marker so
+            // the badge only reflects the most recent round.
+            o.last_classifier_infra_fallback = false;
+            let round = o.total_verify_rounds;
             if let Some(p) = details_path {
                 o.last_classifier_details_path = Some(p.to_string());
             }
@@ -880,7 +912,13 @@ impl SessionActor {
                 GapsUpdate::Preserve => {}
             }
             o.last_classifier_at = Some(chrono::Utc::now().to_rfc3339());
-        }
+            (round, format!("{verdict:?}"))
+        };
+        tracker.record_decision(
+            crate::session::goal_tracker::GoalDecisionKind::Verdict,
+            crate::session::goal_tracker::truncate_decision_detail(&label),
+            Some(round),
+        );
     }
 
     /// Active classifier policy: kill-switch + base cap plus any strategist
@@ -1107,8 +1145,14 @@ impl SessionActor {
     ) -> crate::session::goal_classifier::GoalClassifierOutcome {
         use crate::session::events::GoalClassifierFailOpenReason;
         use crate::session::goal_classifier::{
-            ChannelSpawner, GoalClassifierOutcome, VerificationStageInputs, run_verification_stage,
+            ChannelSpawner, GoalClassifierOutcome, VerificationStageInputs,
+            run_verification_stage_with_backpressure,
         };
+
+        // A verification round is real work: resolve any pending
+        // stop-detector outcomes as productive (the continuation nudge
+        // led to a fresh verification attempt).
+        self.stop_precision.lock().unwrap().record_outcome(true);
 
         let (
             objective,
@@ -1274,6 +1318,8 @@ impl SessionActor {
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 skeptic_overrides,
                 events: Some(self.events.writer()),
+                goal_phase: Some("verify"),
+                goal_attempt: Some(attempt),
             });
 
         // Goal-wide implementer scratch dir, threaded into every skeptic prompt.
@@ -1302,7 +1348,33 @@ impl SessionActor {
             strict_skeptic_verdicts: self.goal_strict_skeptic_verdicts,
         };
 
-        let result = run_verification_stage(spawner, inputs, &|e| self.events.emit(e)).await;
+        // Soft spawn backpressure: while live subagent token burn exceeds
+        // the threshold fraction of the context window, new skeptic spawns
+        // are deferred (bounded wait — never blocked, no hard caps).
+        use crate::session::goal_classifier::{
+            GOAL_SPAWN_BACKPRESSURE_FRACTION, SpawnBackpressure,
+        };
+        let backpressure = SpawnBackpressure::new({
+            let tracker = self.goal_tracker.clone();
+            std::sync::Arc::new(move || {
+                let tracker = tracker.lock();
+                let Some(o) = tracker.snapshot() else {
+                    return false;
+                };
+                let window = o.live_context_window;
+                let live = o.live_subagent_tokens;
+                window > 0
+                    && live > 0
+                    && live as f64 >= window as f64 * GOAL_SPAWN_BACKPRESSURE_FRACTION
+            })
+        });
+        let result = run_verification_stage_with_backpressure(
+            spawner,
+            inputs,
+            &|e| self.events.emit(e),
+            Some(&backpressure),
+        )
+        .await;
         // Seal this panel's recorded skeptic `task` pairs into one harness trace
         // turn (one verifier turn per verification round). No-op on the
         // fail-open early-exit paths that spawn no skeptics.
@@ -2113,11 +2185,51 @@ impl SessionActor {
         })
     }
 
+    /// Auto-resume a goal paused for an infrastructure / capacity reason
+    /// once a new user prompt arrives (the "blocker cleared" signal).
+    /// Structurally excludes `UserPaused` / `Blocked` and enforces the
+    /// per-goal cap inside [`GoalTracker::auto_resume`]. On a resume it
+    /// emits the telemetry event and re-broadcasts `GoalUpdated` so the
+    /// panel flips back to Active immediately.
+    pub(super) async fn maybe_auto_resume_goal(&self) {
+        use crate::session::goal_tracker::AutoResumeOutcome;
+        let outcome = self.goal_tracker.lock().auto_resume();
+        match outcome {
+            AutoResumeOutcome::Resumed => {
+                let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+                let round = self
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .map(|o| o.total_verify_rounds)
+                    .unwrap_or(0);
+                self.emit_event(crate::session::events::Event::GoalAutoResumed { round });
+                let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+                let notify = self.goal_notify_sender();
+                notify.emit_goal_updated(
+                    &mut self.goal_tracker.lock(),
+                    tokens_used,
+                    finished_marginal,
+                );
+                tracing::info!(
+                    session_id = % self.session_info.id.0,
+                    round,
+                    "goal auto-resumed (non-user pause cleared)",
+                );
+            }
+            AutoResumeOutcome::NotEligible | AutoResumeOutcome::CapReached => {}
+        }
+    }
+
     /// Record the premature-stop in goal history (so it reaches the pager's
     /// Recent History via `last_event`) AND emit the telemetry event. Shared
     /// by the in-turn loop and the legacy queue path so both always fire
     /// together.
     fn record_and_emit_premature_stop(&self, pattern: &'static str) {
+        // Account the fire for per-pattern precision; the outcome is
+        // resolved by the next verification round (productive) or pause /
+        // clear (unproductive).
+        self.stop_precision.lock().unwrap().record_fire(pattern);
         self.goal_tracker.lock().append_history(
             crate::session::goal_tracker::GoalHistoryEntry::now(
                 crate::session::goal_tracker::GoalEvent::PrematureStopDetected,
@@ -2310,6 +2422,9 @@ impl SessionActor {
         message: Option<String>,
     ) -> bool {
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        // A pause without a preceding verification round is an
+        // unproductive stop-detector outcome.
+        self.stop_precision.lock().unwrap().record_outcome(false);
         {
             let mut tracker = self.goal_tracker.lock();
             if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
@@ -2346,7 +2461,11 @@ impl SessionActor {
     /// unreachable-actor paths.
     async fn assistant_text_signals_premature_stop(&self) -> Option<&'static str> {
         let text = self.chat_state_handle.get_last_assistant_text().await?;
-        crate::session::goal_stop_detector::matched_stop_pattern(&text)
+        let precision = self.stop_precision.lock().unwrap();
+        crate::session::goal_stop_detector::matched_stop_pattern_with_precision(
+            &text,
+            Some(&precision),
+        )
     }
 
     /// True iff the live todo tool surface has at least one Pending or

@@ -1085,6 +1085,8 @@ mod tests {
             resumed_from: None,
             capability_mode: None,
             context_normalized: false,
+            goal_phase: None,
+            goal_attempt: None,
             child_updates_replayed: false,
             parent_prompt_id: None,
             started_at: now,

@@ -2465,7 +2465,11 @@ impl Config {
     pub(crate) fn resolve_goal_fail_closed_verification(&self) -> Resolved<bool> {
         BoolFlag::env("DS_GOAL_FAIL_CLOSED_VERIFICATION")
             .config(self.goal.fail_closed_verification)
-            .default(false)
+            // Fail-closed by default for goal mode: an infra-class
+            // verification failure pauses the goal instead of recording a
+            // false `Achieved`. Opt out explicitly to restore the legacy
+            // fail-open (achieved-on-infra-error) behavior.
+            .default(true)
             .resolve()
     }
     /// Strict skeptic verdicts: a missing/malformed verdict JSON is a

@@ -153,6 +153,53 @@ pub(crate) const GOAL_VERIFIER_VERDICT_PATH_TEMPLATE: &str =
 pub(crate) const GOAL_VERIFIER_DETAILS_PATH_TEMPLATE: &str =
     "goal-classifier-{verifier_id}-{attempt}-skeptic-{skeptic_idx}.md";
 
+// ── Soft spawn backpressure ────────────────────────────────────────────
+
+/// Fraction of the live context window at which new skeptic spawns are
+/// deferred (soft backpressure). Above `live_subagent_tokens >= FRACTION *
+/// live_context_window` the panel waits (polling) before spawning the next
+/// skeptic; it never rejects a spawn (no hard caps) and never waits longer
+/// than [`GOAL_SPAWN_BACKPRESSURE_MAX_WAIT`].
+pub(crate) const GOAL_SPAWN_BACKPRESSURE_FRACTION: f64 = 0.8;
+
+/// Poll interval while waiting for subagent token pressure to drop.
+pub(crate) const GOAL_SPAWN_BACKPRESSURE_POLL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
+/// Upper bound on a single soft-backpressure wait. After this the spawn
+/// proceeds anyway — backpressure defers, it never blocks the goal.
+pub(crate) const GOAL_SPAWN_BACKPRESSURE_MAX_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// Soft spawn backpressure for the skeptic panel.
+///
+/// `is_over` reports whether live subagent token burn exceeds the
+/// threshold; [`Self::wait_soft`] polls it before a spawn and returns once
+/// pressure clears or the bounded wait expires (soft: the spawn always
+/// proceeds eventually — no hard caps).
+pub(crate) struct SpawnBackpressure {
+    pub(crate) is_over: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    /// Poll interval (overridable in tests; production uses
+    /// [`GOAL_SPAWN_BACKPRESSURE_POLL`]).
+    pub(crate) poll: std::time::Duration,
+}
+
+impl SpawnBackpressure {
+    pub(crate) fn new(is_over: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        Self {
+            is_over,
+            poll: GOAL_SPAWN_BACKPRESSURE_POLL,
+        }
+    }
+
+    pub(crate) async fn wait_soft(&self) {
+        let deadline = std::time::Instant::now() + GOAL_SPAWN_BACKPRESSURE_MAX_WAIT;
+        while (self.is_over)() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(self.poll).await;
+        }
+    }
+}
+
 // Outcome + spawner abstraction
 
 /// Result of one classifier attempt. `Achieved` / `NotAchieved` are
@@ -525,6 +572,10 @@ pub(crate) struct ChannelSpawner {
     /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
     /// in tests / when no event log is wired.
     pub(crate) events: Option<EventWriter>,
+    /// `/goal` orchestration metadata surfaced on the wire: phase + 1-based
+    /// attempt/round. Set by the caller that knows the current round.
+    pub(crate) goal_phase: Option<&'static str>,
+    pub(crate) goal_attempt: Option<u32>,
 }
 
 #[async_trait::async_trait]
@@ -616,6 +667,8 @@ impl ChannelSpawner {
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
             fork_context: false,
+            goal_phase: self.goal_phase.map(str::to_string),
+            goal_attempt: self.goal_attempt,
             result_tx,
         };
         if self
@@ -1851,6 +1904,11 @@ fn render_verifier_prompt(
         plan_file,
         plan_changes,
         final_response,
+        // The implementer's captured run output lives in the goal-wide
+        // scratch dir; point the verifier at it explicitly so the pack
+        // carries plan + changed paths + test-evidence location in one
+        // payload (fewer read round-trips).
+        (!implementer_scratch.is_empty()).then_some(Path::new(implementer_scratch)),
     );
     let prior_gaps_rendered = match prior_gaps {
         Some(g) if !g.trim().is_empty() => sanitize_prior_gaps(g),
@@ -2085,8 +2143,14 @@ async fn run_one_skeptic(
     tool_names: &RoleToolNames,
     inherit_tool_names: &RoleToolNames,
     strict: bool,
+    backpressure: Option<&SpawnBackpressure>,
 ) -> SkepticResult {
     let started = std::time::Instant::now();
+    // Soft backpressure: while live subagent token burn is over the
+    // threshold, defer the spawn (bounded — never blocks the goal).
+    if let Some(bp) = backpressure {
+        bp.wait_soft().await;
+    }
     // An unsecurable (squatted) root makes every artifact path
     // untrustworthy — fail closed, like the unsafe-path arm below.
     if let Err(err) = super::goal_tracker::ensure_goal_scratch_root(inputs.verifier_id) {
@@ -2371,6 +2435,18 @@ pub(crate) async fn run_verification_stage(
     inputs: VerificationStageInputs<'_>,
     emit_event: &dyn Fn(Event),
 ) -> VerificationStageResult {
+    run_verification_stage_with_backpressure(spawner, inputs, emit_event, None).await
+}
+
+/// Like [`run_verification_stage`] but applies soft spawn backpressure
+/// before each skeptic spawn. Production (goal mode) passes a gate built
+/// from the session's live subagent-token pressure; tests pass `None`.
+pub(crate) async fn run_verification_stage_with_backpressure(
+    spawner: Arc<dyn GoalClassifierSpawner>,
+    inputs: VerificationStageInputs<'_>,
+    emit_event: &dyn Fn(Event),
+    backpressure: Option<&SpawnBackpressure>,
+) -> VerificationStageResult {
     let started = std::time::Instant::now();
     emit_event(Event::GoalClassifierFired {
         attempt: inputs.attempt,
@@ -2591,7 +2667,7 @@ pub(crate) async fn run_verification_stage(
             resume_from,
             tool_names_for(0),
             inputs.inherit_tool_names,
-            inputs.strict_skeptic_verdicts,
+            inputs.strict_skeptic_verdicts, backpressure,
         )
         .await;
         let high_refute = first.refuted && first.confidence == SkepticConfidence::High;
@@ -2610,7 +2686,7 @@ pub(crate) async fn run_verification_stage(
                     None,
                     tool_names_for(idx),
                     inputs.inherit_tool_names,
-                    inputs.strict_skeptic_verdicts,
+                    inputs.strict_skeptic_verdicts, backpressure,
                 )
             });
             let mut all = Vec::with_capacity(n as usize);
@@ -2629,7 +2705,7 @@ pub(crate) async fn run_verification_stage(
                 None,
                 tool_names_for(idx),
                 inputs.inherit_tool_names,
-                inputs.strict_skeptic_verdicts,
+                inputs.strict_skeptic_verdicts, backpressure,
             )
         });
         (futures::future::join_all(spawns).await, false, None)
@@ -2896,6 +2972,8 @@ mod tests {
             trace_sink: None,
             skeptic_overrides: Vec::new(),
             events: None,
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -2952,6 +3030,8 @@ mod tests {
                 RoleSpawnOverride::default(),
             ],
             events: None,
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
             // Skeptic 0 with a resume id: even on the cold path it carries
@@ -3016,6 +3096,8 @@ mod tests {
             trace_sink: None,
             skeptic_overrides: vec![RoleSpawnOverride::default()],
             events: None,
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
             let _ = spawner
@@ -5368,6 +5450,90 @@ mod tests {
         TN.get_or_init(RoleToolNames::inherit_defaults)
     }
 
+    // ── Soft spawn backpressure ─────────────────────────────────────
+
+    /// `wait_soft` defers while pressure is over the threshold and returns
+    /// once it clears — the spawn is delayed, never dropped.
+    #[tokio::test]
+    async fn spawn_backpressure_defers_until_pressure_clears() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+        let over = StdArc::new(AtomicBool::new(true));
+        let over_clone = over.clone();
+        // Clear the pressure shortly after the first poll.
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            over_clone.store(false, Ordering::SeqCst);
+        });
+        let mut bp = SpawnBackpressure::new(StdArc::new(move || {
+            over.load(Ordering::SeqCst)
+        }));
+        bp.poll = std::time::Duration::from_millis(20);
+        let started = std::time::Instant::now();
+        bp.wait_soft().await;
+        release.await.unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= std::time::Duration::from_millis(40),
+            "wait_soft must defer while pressure is over; waited {waited:?}"
+        );
+        assert!(
+            waited < GOAL_SPAWN_BACKPRESSURE_MAX_WAIT,
+            "wait_soft must release once pressure clears"
+        );
+    }
+
+    /// Below the threshold `wait_soft` returns immediately (no deferral).
+    #[tokio::test]
+    async fn spawn_backpressure_releases_immediately_below_threshold() {
+        use std::sync::Arc as StdArc;
+        let bp = SpawnBackpressure::new(StdArc::new(|| false));
+        let started = std::time::Instant::now();
+        bp.wait_soft().await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    }
+
+    /// The stage-level gate defers the skeptic spawn (pressure over at
+    /// first) yet still produces the verdict once pressure clears — the
+    /// spawn is delayed, not dropped, and the outcome is unchanged.
+    #[tokio::test]
+    async fn verification_stage_with_backpressure_defers_spawn_not_drops() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc as StdArc;
+        let spawner = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
+        let over = StdArc::new(AtomicBool::new(true));
+        let over_clone = over.clone();
+        let clear = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            over_clone.store(false, Ordering::SeqCst);
+        });
+        let mut bp = SpawnBackpressure::new(StdArc::new(move || {
+            over.load(Ordering::SeqCst)
+        }));
+        bp.poll = std::time::Duration::from_millis(20);
+        let (log, emit) = collect_events();
+        let _wsp = tempfile::tempdir().unwrap();
+        let vid = unique_verifier_id();
+        let outcome = run_verification_stage_with_backpressure(
+            spawner.clone(),
+            stage_inputs("do X", "done", _wsp.path(), &vid, 1, 1),
+            &emit,
+            Some(&bp),
+        )
+        .await;
+        clear.await.unwrap();
+        assert!(matches!(
+            outcome.outcome,
+            GoalClassifierOutcome::Achieved { .. }
+        ));
+        assert_eq!(
+            spawner.spawn_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "backpressure must defer, never drop, the skeptic spawn"
+        );
+        let _ = log;
+    }
+
     /// Regression: `GoalClassifierFired` reports the effective cap, not the
     /// default constant. 4 ≠ default 10, so a hardcoded regression fails loudly.
     #[tokio::test]
@@ -6432,6 +6598,8 @@ mod tests {
                 RoleSpawnOverride::default(),
             ],
             events: None,
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
         });
 
         let (_log, emit) = collect_events();
@@ -6798,6 +6966,8 @@ mod tests {
             trace_sink: None,
             skeptic_overrides: Vec::new(),
             events: None,
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
         };
         let spawn_task = tokio::spawn(async move {
             spawner
@@ -7043,7 +7213,7 @@ mod tests {
             None,
             &tool_names,
             &tool_names,
-            false,
+            false, None
         )
         .await;
 

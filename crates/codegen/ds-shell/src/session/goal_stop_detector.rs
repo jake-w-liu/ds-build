@@ -157,6 +157,91 @@ const STOP_REGEX_SOURCES: &[(&str, &str)] = &[
     (PATTERN_PLEASE_DEFLECTION, PLEASE_DEFLECTION_SRC),
 ];
 
+/// Minimum number of fires before a pattern is eligible for suppression.
+/// Below this sample size the precision estimate is too noisy to trust.
+pub(crate) const STOP_PATTERN_MIN_FIRES: u32 = 4;
+
+/// Precision below which a pattern is suppressed (productive fires /
+/// total fires). A pattern at 50% precision or worse after the minimum
+/// sample is more noise than signal and stops firing.
+pub(crate) const STOP_PATTERN_PRECISION_THRESHOLD: f64 = 0.5;
+
+/// Per-pattern precision accounting for the stop-detector regex panel.
+///
+/// The harness records a *fire* when a pattern matches and a continuation
+/// nudge is queued, and later records the *outcome*: productive when the
+/// continuation led to real work (a verification round ran / progress was
+/// made), unproductive when the goal paused or cleared without progress.
+/// Patterns whose measured precision falls below
+/// [`STOP_PATTERN_PRECISION_THRESHOLD`] after at least
+/// [`STOP_PATTERN_MIN_FIRES`] fires are suppressed — they stop matching
+/// until the session's accounting resets.
+///
+/// Pure in-memory state (per session): no I/O, deterministic, unit-tested.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct StopPatternPrecision {
+    fired: std::collections::HashMap<&'static str, u32>,
+    productive: std::collections::HashMap<&'static str, u32>,
+    /// Patterns fired but not yet resolved (pending outcome). Resolved
+    /// FIFO on the next `record_outcome`.
+    pending: std::collections::VecDeque<&'static str>,
+}
+
+impl StopPatternPrecision {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `pattern` fired (a bail was detected and a
+    /// continuation nudge queued). Its outcome is pending until
+    /// [`Self::record_outcome`].
+    pub(crate) fn record_fire(&mut self, pattern: &'static str) {
+        *self.fired.entry(pattern).or_default() += 1;
+        self.pending.push_back(pattern);
+    }
+
+    /// Resolve all pending fires with the given productivity outcome.
+    /// `productive = true` when the continuation led to real progress
+    /// (a verification round ran / work happened); `false` when the goal
+    /// paused or cleared without progress.
+    pub(crate) fn record_outcome(&mut self, productive: bool) {
+        for pattern in self.pending.drain(..) {
+            if productive {
+                *self.productive.entry(pattern).or_default() += 1;
+            }
+        }
+    }
+
+    /// Number of times `pattern` has fired (for diagnostics/tests).
+    pub(crate) fn fired_count(&self, pattern: &'static str) -> u32 {
+        self.fired.get(pattern).copied().unwrap_or(0)
+    }
+
+    /// Measured precision for `pattern`: productive / fired. `None`
+    /// when the pattern never fired.
+    pub(crate) fn precision(&self, pattern: &'static str) -> Option<f64> {
+        let fired = self.fired.get(pattern).copied()?;
+        if fired == 0 {
+            return None;
+        }
+        let productive = self.productive.get(pattern).copied().unwrap_or(0);
+        Some(productive as f64 / fired as f64)
+    }
+
+    /// `true` when the pattern is suppressed: enough samples and
+    /// precision below the threshold.
+    pub(crate) fn is_suppressed(&self, pattern: &'static str) -> bool {
+        let Some(fired) = self.fired.get(pattern).copied() else {
+            return false;
+        };
+        if fired < STOP_PATTERN_MIN_FIRES {
+            return false;
+        }
+        let productive = self.productive.get(pattern).copied().unwrap_or(0);
+        (productive as f64 / fired as f64) < STOP_PATTERN_PRECISION_THRESHOLD
+    }
+}
+
 /// Per-line matcher: returns `true` iff `line` matches a given
 /// labelled pattern. Lets us share the same dispatch table between
 /// `matched_stop_pattern` and `looks_like_premature_stop` without
@@ -208,6 +293,18 @@ const PATTERN_LABELS: &[&str] = &[
 ///   so the marker must start a line: "I can't continue without your
 ///   input" inside a sentence does NOT match.
 pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
+    matched_stop_pattern_with_precision(text, None)
+}
+
+/// Like [`matched_stop_pattern`] but consults the session's per-pattern
+/// precision accounting: a pattern that has been suppressed (low measured
+/// precision after enough samples) does not fire, so imprecise patterns
+/// stop producing noisy bail nudges. `None` precision = no suppression
+/// (pure matching, used by tests and callers without accounting).
+pub(crate) fn matched_stop_pattern_with_precision(
+    text: &str,
+    precision: Option<&StopPatternPrecision>,
+) -> Option<&'static str> {
     let normalised = normalise_line_endings(text);
     let last_paragraph = last_non_empty_paragraph(&normalised)?;
     let label = last_paragraph
@@ -218,7 +315,7 @@ pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
             PATTERN_LABELS
                 .iter()
                 .copied()
-                .find(|label| line_matches(label, line))
+                .find(|label| !precision.is_some_and(|p| p.is_suppressed(label)) && line_matches(label, line))
         })?;
     Some(label)
 }
@@ -633,5 +730,90 @@ mod tests {
         let from_sources: Vec<&'static str> =
             STOP_REGEX_SOURCES.iter().map(|(label, _)| *label).collect();
         assert_eq!(PATTERN_LABELS, &from_sources[..]);
+    }
+
+    /// A pattern with a low measured precision is suppressed after the
+    /// minimum sample size; a precise pattern never is.
+    #[test]
+    fn precision_accounting_suppresses_imprecise_pattern() {
+        let mut precision = StopPatternPrecision::new();
+        let pattern = PATTERN_GIVING_UP;
+        assert!(!precision.is_suppressed(pattern), "no samples yet");
+
+        // Below the minimum sample: never suppressed even at 0 precision.
+        for _ in 0..STOP_PATTERN_MIN_FIRES - 1 {
+            precision.record_fire(pattern);
+            precision.record_outcome(false);
+        }
+        assert!(
+            !precision.is_suppressed(pattern),
+            "below minimum sample must not suppress"
+        );
+
+        // One more unproductive fire crosses the threshold.
+        precision.record_fire(pattern);
+        precision.record_outcome(false);
+        assert!(precision.is_suppressed(pattern));
+        assert_eq!(precision.precision(pattern), Some(0.0));
+    }
+
+    /// A precise pattern (all productive) never suppresses, even well
+    /// beyond the minimum sample.
+    #[test]
+    fn precision_accounting_keeps_precise_pattern() {
+        let mut precision = StopPatternPrecision::new();
+        let pattern = PATTERN_AGENTS_IN_FLIGHT;
+        for _ in 0..10 {
+            precision.record_fire(pattern);
+            precision.record_outcome(true);
+        }
+        assert!(!precision.is_suppressed(pattern));
+        assert_eq!(precision.precision(pattern), Some(1.0));
+    }
+
+    /// Mixed outcomes resolve to the measured ratio; each outcome
+    /// resolves the fires pending at that point (FIFO).
+    #[test]
+    fn precision_accounting_mixed_outcomes_ratio() {
+        let mut precision = StopPatternPrecision::new();
+        let pattern = PATTERN_STOPPING_HERE;
+        // 3 fires, 2 productive → precision 2/3 (> 0.5): not suppressed.
+        precision.record_fire(pattern);
+        precision.record_outcome(true);
+        precision.record_fire(pattern);
+        precision.record_outcome(true);
+        precision.record_fire(pattern);
+        precision.record_outcome(false);
+        assert_eq!(precision.precision(pattern), Some(2.0 / 3.0));
+        assert!(!precision.is_suppressed(pattern));
+    }
+
+    /// The precision-aware matcher skips suppressed patterns entirely —
+    /// a text that only matches a suppressed pattern yields `None`.
+    #[test]
+    fn matched_stop_pattern_with_precision_skips_suppressed() {
+        let mut precision = StopPatternPrecision::new();
+        let pattern = PATTERN_GIVING_UP;
+        for _ in 0..STOP_PATTERN_MIN_FIRES {
+            precision.record_fire(pattern);
+            precision.record_outcome(false);
+        }
+        assert!(precision.is_suppressed(pattern));
+        // Bare matching still fires (pure path unchanged).
+        assert_eq!(matched_stop_pattern("Giving up on this task"), Some(pattern));
+        // Precision-aware path suppresses it.
+        assert_eq!(
+            matched_stop_pattern_with_precision("Giving up on this task", Some(&precision)),
+            None,
+            "suppressed pattern must not match"
+        );
+        // An unsuppressed pattern still matches through the same path.
+        assert_eq!(
+            matched_stop_pattern_with_precision(
+                "VERDICT: PASS",
+                Some(&precision),
+            ),
+            Some(PATTERN_VERDICT_LINE)
+        );
     }
 }

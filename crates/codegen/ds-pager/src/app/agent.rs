@@ -452,6 +452,14 @@ pub struct GoalDisplayState {
     /// runs a blocking `stat(2)` on the UI hot path. `false` when the path
     /// is absent or missing.
     pub last_classifier_details_exists: bool,
+    /// True when the most recent verification round ended in an infra-class
+    /// fail-open (harness could not extract a verdict). The panel badges it
+    /// so an infra failure is never presented as a normal pass.
+    pub last_classifier_infra_fallback: bool,
+    /// Most recent structured goal decisions (plan accepted, verdicts,
+    /// strategist advice, auto-resumes, infra fallbacks) surfaced on the
+    /// wire; the goal-detail overlay renders them as its decisions history.
+    pub decisions: Vec<ds_shell::session::goal_tracker::GoalDecisionEntry>,
     /// True while a classifier run is in flight. Derived from the
     /// wire field `verifying_completion: Option<bool>` (mapped to
     /// `bool` at the boundary so render code never has to
@@ -509,6 +517,8 @@ impl GoalDisplayState {
             last_classifier_verdict: None,
             last_classifier_details_path: None,
             last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
             verifying_completion: false,
             planning: false,
             received_at: std::time::Instant::now(),

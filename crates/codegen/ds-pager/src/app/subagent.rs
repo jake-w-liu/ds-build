@@ -70,6 +70,14 @@ pub struct SubagentInfo {
     pub prompt: Option<Arc<str>>,
     pub child_cwd: Option<Arc<str>>,
     pub worktree_path: Option<Arc<str>>,
+    /// `/goal` harness-only: workflow phase this subagent belongs to
+    /// ("plan" | "execute" | "verify"). `None` for non-goal spawns.
+    /// Structured (shell-emitted); the workflow panel falls back to keyword
+    /// sniffing only when this is absent.
+    pub goal_phase: Option<Arc<str>>,
+    /// `/goal` harness-only: 1-based attempt/round number this spawn belongs
+    /// to. Structured (shell-emitted); `None` for non-goal spawns.
+    pub goal_attempt: Option<u32>,
     /// Set after the first `replay_inherited_updates` attempt (spawn or open).
     /// Prevents duplicate replay when scrollback is prompt-only after spawn.
     pub child_updates_replayed: bool,
@@ -105,6 +113,10 @@ struct SubagentMetaSlice {
     child_cwd: Option<String>,
     #[serde(default)]
     worktree_path: Option<String>,
+    #[serde(default)]
+    goal_phase: Option<String>,
+    #[serde(default)]
+    goal_attempt: Option<u32>,
 }
 thread_local! {
     static REPLAY_DS_HOME : std::cell::RefCell < Option < std::path::PathBuf >> = const
@@ -159,6 +171,8 @@ fn enrich_from_meta_with_home(
     info.prompt = meta.prompt.map(Arc::from);
     info.child_cwd = meta.child_cwd.map(Arc::from);
     info.worktree_path = meta.worktree_path.map(Arc::from);
+    info.goal_phase = meta.goal_phase.map(Arc::from);
+    info.goal_attempt = meta.goal_attempt;
 }
 /// Best-effort replay of inherited conversation for a child subagent.
 ///
@@ -537,6 +551,8 @@ mod tests {
             prompt: None,
             child_cwd: None,
             worktree_path: None,
+            goal_phase: None,
+            goal_attempt: None,
             child_updates_replayed: false,
         }
     }

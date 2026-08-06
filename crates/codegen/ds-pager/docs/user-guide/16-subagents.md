@@ -157,6 +157,18 @@ When you run a subagent in the background, retrieve its result later with `get_c
 
 ---
 
+## Orchestration Observability
+
+Goal orchestration subagents (planner, workers, verifier skeptics, strategist) carry **structured metadata** on the wire — workflow phase (`plan`/`execute`/`verify`), 1-based attempt/round, and role — so the workflow panel places them exactly, even when their descriptions contain no keyword hints. Non-goal subagents fall back to the old description-based classification.
+
+**Soft spawn backpressure:** while live subagent token burn exceeds 80% of the context window, new verifier spawns are deferred (bounded wait) instead of piling on — no hard caps, the goal is never blocked.
+
+**Decisions history:** the goal-detail panel shows a structured decisions log (plan accepted, verifier verdicts, strategist advice, auto-resumes, infra fallbacks) that survives compaction — the "why" behind the current phase, not just the latest event.
+
+**Drill-down:** in the workflow panel, `j`/`k` select an agent row and `Enter` switches to that subagent's live scrollback.
+
+---
+
 ## Capability Modes
 
 A capability mode is an optional, coarse filter on a subagent's tools:

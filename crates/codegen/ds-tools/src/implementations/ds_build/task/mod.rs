@@ -318,6 +318,9 @@ impl ds_tool_runtime::Tool for TaskTool {
             // Model-spawned subagents must still appear in the idle reminder.
             surface_completion: true,
             fork_context: false,
+            // Model-issued `task` spawns are never goal-role spawns.
+            goal_phase: None,
+            goal_attempt: None,
             result_tx,
         };
 

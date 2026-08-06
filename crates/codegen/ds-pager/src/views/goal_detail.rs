@@ -513,6 +513,7 @@ pub fn render_goal_detail(
     active_subagent_tokens: u64,
     subagents: &HashMap<String, SubagentInfo>,
     close_hovered: bool,
+    selected_subagent: Option<&str>,
 ) -> Option<Rect> {
     let theme = Theme::current();
     if area.width < 20 || area.height < 6 {
@@ -747,7 +748,7 @@ pub fn render_goal_detail(
                 width: w,
                 height: panel_h.min(remaining),
             };
-            render_workflow_panel(buf, panel_area, &snap, &theme);
+            render_workflow_panel(buf, panel_area, &snap, &theme, selected_subagent);
             y = y.saturating_add(panel_area.height);
         }
     }
@@ -958,15 +959,17 @@ pub fn render_goal_detail(
 
         if y < inner.y + inner.height {
             let verdict_label = classifier_verdict_label(goal.last_classifier_verdict);
-            buf.set_line_safe(
-                x,
-                y,
-                &Line::from(vec![
-                    Span::styled("  Last verdict: ", Style::default().fg(theme.gray)),
-                    Span::styled(verdict_label, Style::default().fg(theme.text_secondary)),
-                ]),
-                w,
-            );
+            let mut spans = vec![
+                Span::styled("  Last verdict: ", Style::default().fg(theme.gray)),
+                Span::styled(verdict_label, Style::default().fg(theme.text_secondary)),
+            ];
+            if goal.last_classifier_infra_fallback {
+                spans.push(Span::styled(
+                    "  [INFRA FALLBACK]",
+                    Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+                ));
+            }
+            buf.set_line_safe(x, y, &Line::from(spans), w);
             y += 1;
         }
 
@@ -1060,6 +1063,54 @@ pub fn render_goal_detail(
         }
     }
 
+    // ── Decisions history (structured orchestration decisions) ──
+    if !goal.decisions.is_empty() {
+        y += 1;
+        if y >= inner.y + inner.height {
+            return Some(close_rect);
+        }
+        buf.set_line_safe(
+            x,
+            y,
+            &Line::from(Span::styled(
+                "Decisions:",
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            w,
+        );
+        y += 1;
+        // Most recent first, capped at 6 visible rows so a long goal's
+        // log cannot crowd out the rest of the overlay.
+        for entry in goal.decisions.iter().rev().take(6) {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let label = format!(
+                "  {} — {}",
+                entry.kind.as_str(),
+                entry.detail
+            );
+            let prefix = humanize_event_timestamp(&entry.timestamp);
+            let prefix = if prefix.is_empty() {
+                "  ".to_owned()
+            } else {
+                format!("  {prefix}  ")
+            };
+            buf.set_line_safe(
+                x,
+                y,
+                &Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(theme.gray)),
+                    Span::styled(label, Style::default().fg(theme.text_secondary)),
+                ]),
+                w,
+            );
+            y += 1;
+        }
+    }
+
     // ── Commands hint ──
     if y < inner.y + inner.height {
         let hint_style = Style::default().fg(theme.gray_dim);
@@ -1067,7 +1118,7 @@ pub fn render_goal_detail(
             x,
             y,
             &Line::from(Span::styled(
-                "Esc: close  /goal resume | pause | status | clear",
+                "Esc: close  j/k select · Enter peek  /goal resume | pause | status | clear",
                 hint_style,
             )),
             w,
@@ -1120,6 +1171,8 @@ mod tests {
             last_classifier_verdict: None,
             last_classifier_details_path: None,
             last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
             verifying_completion: false,
             planning: false,
             received_at: std::time::Instant::now(),
@@ -1199,7 +1252,7 @@ mod tests {
         let screen = Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let area = goal_detail_area(screen, goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, goal, &[], 0, None, 0, &HashMap::new(), false, None);
         let mut s = String::new();
         for y in 0..screen.height {
             for x in 0..screen.width {
@@ -1370,7 +1423,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     #[test]
@@ -1379,7 +1432,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let goal = make_goal();
         // Should not panic, just bail early.
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     #[test]
@@ -1424,7 +1477,7 @@ mod tests {
         let mut goal = make_goal();
         goal.token_budget = None;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     #[test]
@@ -1438,7 +1491,7 @@ mod tests {
         goal.current_deliverable_title = None;
         goal.deliverables.clear();
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     #[test]
@@ -1452,7 +1505,7 @@ mod tests {
         goal.live_turn_count = None;
         goal.live_tool_call_count = None;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     #[test]
@@ -1465,7 +1518,7 @@ mod tests {
         goal.current_deliverable_id = None;
         goal.current_subagent_role = None;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
     }
 
     /// Count rendered rows whose text contains `needle`. Each line in
@@ -1724,7 +1777,7 @@ mod tests {
         let mut goal = make_goal();
         goal.status = GoalDisplayStatus::UserPaused;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(text.contains("type /goal resume to continue"));
@@ -1736,7 +1789,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(!text.contains("type /goal resume to continue"));
@@ -1748,7 +1801,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let goal = make_goal();
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -1765,7 +1818,7 @@ mod tests {
         goal.status = GoalDisplayStatus::InfraPaused;
         goal.pause_message = Some("Turn failed: upstream unavailable".into());
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -1790,7 +1843,7 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = Some("no windows sdk".into());
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -1818,7 +1871,7 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = None;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -1845,7 +1898,7 @@ mod tests {
             goal.status = status;
             goal.pause_message = Some("stale reason".into());
             let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-            render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+            render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
             let text = buffer_text(&buf);
             assert!(
@@ -1867,7 +1920,7 @@ mod tests {
         goal.status = GoalDisplayStatus::Blocked;
         goal.pause_message = Some("no windows sdk".into());
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         let hint_pos = text
@@ -2032,7 +2085,7 @@ mod tests {
             make_todo("Cancelled task", TodoStatus::Cancelled),
         ];
         let area = goal_detail_area(screen, &goal, &todos, &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(text.contains("Progress:"), "must render progress header");
@@ -2054,7 +2107,7 @@ mod tests {
             make_todo("skip", TodoStatus::Cancelled),
         ];
         let area = goal_detail_area(screen, &goal, &todos, &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         // Completed = ✓, InProgress = ▶, Pending = □, Cancelled = ✗
@@ -2074,7 +2127,7 @@ mod tests {
             .map(|i| make_todo(&format!("Task {i}"), TodoStatus::Pending))
             .collect();
         let area = goal_detail_area(screen, &goal, &todos, &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, &HashMap::new(), false, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -2162,7 +2215,7 @@ mod tests {
         let screen = Rect::new(0, 0, 100, 40);
         let mut buf = ratatui::buffer::Buffer::empty(screen);
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
         let text = buffer_text(&buf);
         assert!(
             !text.contains(&"宽".repeat(120)),
@@ -2200,7 +2253,7 @@ mod tests {
 
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
         let text = buffer_text(&buf);
         assert!(
             text.contains("Esc: close"),
@@ -2465,7 +2518,7 @@ mod tests {
         goal.live_turn_count = None;
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
         assert!(
             buffer_text(&buf).contains("Esc: close"),
             "commands hint must render for a just-spawned subagent"
@@ -2490,7 +2543,7 @@ mod tests {
         // And it renders fully alongside the commands hint (no clip).
         let area = goal_detail_area(screen, &goal, &[], &HashMap::new());
         let mut buf = ratatui::buffer::Buffer::empty(screen);
-        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false);
+        render_goal_detail(&mut buf, area, &goal, &[], 0, None, 0, &HashMap::new(), false, None);
         let t = buffer_text(&buf);
         assert!(t.contains("Completion review:") && t.contains("Esc: close"));
     }

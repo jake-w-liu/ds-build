@@ -592,6 +592,14 @@ pub enum SessionUpdate {
         /// ID of the source subagent this session was resumed from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resumed_from: Option<String>,
+        /// `/goal` harness-only: workflow phase this subagent belongs to
+        /// ("plan" | "execute" | "verify"). `None` for non-goal spawns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_phase: Option<String>,
+        /// `/goal` harness-only: 1-based attempt/round number. `None` for
+        /// non-goal spawns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_attempt: Option<u32>,
     },
     /// Periodic progress update for a running subagent.
     ///
@@ -858,6 +866,17 @@ pub enum SessionUpdate {
         /// Filesystem path to the most recent verification-stage details artifact.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_classifier_details_path: Option<String>,
+        /// `Some(true)` when the most recent verification round ended in an
+        /// infra-class fail-open (harness could not extract a verdict). The
+        /// panel badges it so an infra failure is never presented as a
+        /// normal pass.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_classifier_infra_fallback: Option<bool>,
+        /// Most recent structured decisions (plan accepted, verdicts,
+        /// strategist advice, auto-resumes, infra fallbacks). The panel's
+        /// decisions history renders these; they survive compaction.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        recent_decisions: Vec<crate::session::goal_tracker::GoalDecisionEntry>,
         /// `Some(true)` while a classifier run is in flight. Set only by
         /// the dedicated "verifying" notification path — `build_goal_updated`
         /// always emits `None` because this flag is not persisted state.
@@ -1420,6 +1439,8 @@ mod tests {
             role: None,
             model: None,
             resumed_from: None,
+            goal_phase: None,
+            goal_attempt: None,
         })
         .unwrap();
         let progress = serde_json::to_value(SessionUpdate::SubagentProgress {
@@ -1787,6 +1808,8 @@ mod tests {
             classifier_max_runs: Some(3),
             last_classifier_verdict: Some(GoalClassifierVerdict::NotAchieved),
             last_classifier_details_path: Some("/tmp/details.md".into()),
+            last_classifier_infra_fallback: None,
+            recent_decisions: Vec::new(),
             verifying_completion: Some(true),
             planning: Some(true),
         }
@@ -1825,6 +1848,8 @@ mod tests {
             classifier_max_runs: None,
             last_classifier_verdict: None,
             last_classifier_details_path: None,
+            last_classifier_infra_fallback: None,
+            recent_decisions: Vec::new(),
             verifying_completion: None,
             planning: None,
         }

@@ -578,6 +578,8 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
         run_in_background: Some(true),
         surface_completion: true,
         fork_context: false,
+        goal_phase: None,
+        goal_attempt: None,
         result_tx,
     }
 }
@@ -2054,6 +2056,8 @@ fn bootstrap_test_request(fork_context: bool) -> SubagentRequest {
         run_in_background: Some(false),
         surface_completion: false,
         fork_context,
+        goal_phase: None,
+        goal_attempt: None,
         result_tx,
     }
 }

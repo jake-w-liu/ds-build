@@ -3982,6 +3982,7 @@ impl AgentView {
                 active_subagent_tokens,
                 &self.subagent_sessions,
                 self.hit_goal_close.hovered,
+                self.workflow_selected.as_deref(),
             );
             self.hit_goal_close.rect = close_rect;
             self.frame_occluder_rects.push(overlay_rect);

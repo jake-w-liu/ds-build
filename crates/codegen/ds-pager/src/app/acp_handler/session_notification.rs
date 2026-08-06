@@ -257,6 +257,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             capability_mode,
             context_normalized,
             parent_prompt_id,
+            goal_phase,
+            goal_attempt,
             ..
         } => {
             tracing::info!(
@@ -310,6 +312,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     prompt: None,
                     child_cwd: None,
                     worktree_path: None,
+                    goal_phase: goal_phase.map(Arc::from),
+                    goal_attempt,
                     child_updates_replayed: false,
                 },
             );
@@ -911,6 +915,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             classifier_max_runs,
             last_classifier_verdict,
             last_classifier_details_path,
+            last_classifier_infra_fallback,
+            recent_decisions,
             verifying_completion,
             planning,
             ..
@@ -986,6 +992,8 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     last_classifier_verdict,
                     last_classifier_details_path,
                     last_classifier_details_exists,
+                    last_classifier_infra_fallback: last_classifier_infra_fallback.unwrap_or(false),
+                    decisions: recent_decisions,
                     verifying_completion: verifying_completion.unwrap_or(false),
                     planning: planning.unwrap_or(false),
                     received_at: std::time::Instant::now(),
