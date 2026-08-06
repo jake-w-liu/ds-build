@@ -12,14 +12,14 @@ Commits: `aab2a401` handoff · `1ceb85ff` bump · `90e90585` fix (backlog clear,
 
 ---
 
-## 0. Baseline checks — ✅ ALL PASS
+## 0. Baseline checks — ALL PASS
 
 - [x] `ds --version` → `ds 0.1.72 (1ceb85ff)` from `~/.local/bin/ds` and `~/.ds/bin/ds`
 - [x] `git log --oneline -3` → `aab2a401` / `1ceb85ff` / `90e90585` (handoff doc
       commit sits on top of the bump; `4a5fab60` is now 4th)
 - [x] `codesign --verify ~/.local/bin/ds` → valid on disk
 
-## 1. Prefix cache & headroom — ✅ PASS (wire-verified)
+## 1. Prefix cache & headroom — PASS (wire-verified)
 
 - [x] `/headroom status/stats` — not reachable headless, but headroom is ON by
       default and observable on the wire: `ds_headroom: headroom compressed
@@ -45,7 +45,7 @@ Commits: `aab2a401` handoff · `1ceb85ff` bump · `90e90585` fix (backlog clear,
       default (no `--experimental-memory`); not exercised live. Covered by
       request_builder tests.
 
-## 2. Reasoning effort — ✅ PASS (DeepSeek)
+## 2. Reasoning effort — PASS (DeepSeek)
 
 - [x] Effort menu for DeepSeek models advertises ONLY `[high, max]` (no
       none/minimal/medium/xhigh) — seen in the gateway `initialize` response
@@ -97,7 +97,7 @@ Commits: `aab2a401` handoff · `1ceb85ff` bump · `90e90585` fix (backlog clear,
       Live-confirmed NON-triggers (correct): plain assistant "Done." reply and
       `spawn_subagent` results both pass.
 
-## 4. Tool calling / web_search — ✅ PASS
+## 4. Tool calling / web_search — PASS
 
 - [x] Multi-turn tool round-trip clean (read_file / grep / bash / ls in one
       turn, ~5–6 parallel calls, no errors); every tool_calls turn carries
@@ -110,7 +110,7 @@ Commits: `aab2a401` handoff · `1ceb85ff` bump · `90e90585` fix (backlog clear,
       `input_tokens`, `output_tokens` per turn logged and consistent with the
       usage JSON returned to the caller
 
-## 5. Regression spot-pass (pager) — ✅ PASS (scripted TUI via tmux)
+## 5. Regression spot-pass (pager) — PASS (scripted TUI via tmux)
 
 - [x] `/headroom status` → "Headroom enabled: built-in local compression"
 - [x] `/status` → session id, cwd, model, turn count, `Context: 3961 / 1000000

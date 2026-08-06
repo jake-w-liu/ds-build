@@ -454,7 +454,7 @@ pub enum SessionUpdate {
     /// A hook annotation message for the TUI scrollback.
     /// Rendered inline with the preceding tool call block.
     HookAnnotation {
-        /// The hook message to display (e.g., "🪝 Running post_tool_use hooks for `Edit`...")
+        /// The hook message to display (e.g., "Running post_tool_use hooks for `Edit`...")
         message: String,
     },
     /// Structured hook execution data attached to tool call blocks.
@@ -873,14 +873,14 @@ pub enum SessionUpdate {
     /// A blocking reverse-request (permission / `ask_user_question` /
     /// plan-approval) is now **pending** on the agent, keyed by `tool_call_id`
     /// Fire-and-forget, **never persisted** — it is a request,
-    /// not a notification. Subscribers show ⏳ NeedsInput for this session.
+    /// not a notification. Subscribers show waiting (NeedsInput) for this session.
     PendingInteraction {
         tool_call_id: String,
         kind: crate::session::pending_interaction::PendingKind,
     },
     /// A previously-pending reverse-request **resolved** (answered, cancelled,
     /// or errored). Fire-and-forget, **never persisted**. Subscribers clear the
-    /// pending ⏳ for this `tool_call_id`.
+    /// pending (waiting) for this `tool_call_id`.
     InteractionResolved { tool_call_id: String },
     /// The durable, replayable signal that a turn reached its terminal
     /// outcome. Rides the persisted `_ds.cli/session/update` rail (unlike the

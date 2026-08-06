@@ -55,9 +55,9 @@ impl ConnectionState {
     /// Returns the status indicator for TUI display.
     pub fn status_indicator(&self) -> &'static str {
         match self {
-            ConnectionState::Disconnected => "📡 ✗",
-            ConnectionState::Connecting => "📡 ...",
-            ConnectionState::Connected => "📡",
+            ConnectionState::Disconnected => "relay ✗",
+            ConnectionState::Connecting => "relay ...",
+            ConnectionState::Connected => "relay",
         }
     }
 }
@@ -616,7 +616,7 @@ fn handle_relay_message(
 
                 // Display share URL after successful handshake
                 let share_url = build_share_url(session_id);
-                tprintln!("📡 Session syncing to relay. View at: {}", share_url);
+                tprintln!("Session syncing to relay. View at: {}", share_url);
             }
         }
         Some("_ds.cli/relay/initialized") => {
@@ -652,9 +652,9 @@ mod tests {
 
     #[test]
     fn test_connection_state_status_indicator() {
-        assert_eq!(ConnectionState::Disconnected.status_indicator(), "📡 ✗");
-        assert_eq!(ConnectionState::Connecting.status_indicator(), "📡 ...");
-        assert_eq!(ConnectionState::Connected.status_indicator(), "📡");
+        assert_eq!(ConnectionState::Disconnected.status_indicator(), "relay ✗");
+        assert_eq!(ConnectionState::Connecting.status_indicator(), "relay ...");
+        assert_eq!(ConnectionState::Connected.status_indicator(), "relay");
     }
 
     #[test]

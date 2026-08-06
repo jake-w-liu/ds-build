@@ -170,7 +170,7 @@ async fn test_under_limit_exits_normally() {
         "Should NOT be OOM-killed"
     );
 
-    eprintln!("✅ PASSED: under_limit_exits_normally");
+    eprintln!("PASSED: under_limit_exits_normally");
 }
 
 /// Test 2: A command that allocates way more than the limit is killed with 137/oom.
@@ -222,7 +222,7 @@ print('Allocation succeeded (should not reach here)', flush=True)
         "Output before OOM should be captured"
     );
 
-    eprintln!("✅ PASSED: over_limit_gets_oom_killed");
+    eprintln!("PASSED: over_limit_gets_oom_killed");
 }
 
 /// Test 3: After an OOM, the backend still works for subsequent commands.
@@ -268,7 +268,7 @@ async fn test_session_survives_oom() {
         "Post-OOM output should contain our echo"
     );
 
-    eprintln!("✅ PASSED: session_survives_oom");
+    eprintln!("PASSED: session_survives_oom");
 }
 
 /// Test 4: Background tasks are also subject to the memory limit.
@@ -328,7 +328,7 @@ time.sleep(60)
         panic!("Expected a snapshot for the background task");
     }
 
-    eprintln!("✅ PASSED: background_task_oom");
+    eprintln!("PASSED: background_task_oom");
 }
 
 /// Test 5: Gradual allocation that slowly ramps past the limit.
@@ -389,7 +389,7 @@ print('Finished all allocations (should not reach here)', flush=True)
         "Should have been killed before finishing"
     );
 
-    eprintln!("✅ PASSED: gradual_allocation_oom");
+    eprintln!("PASSED: gradual_allocation_oom");
 }
 
 /// Test 6: No memory config → no cgroup enforcement, large alloc succeeds.
@@ -421,5 +421,5 @@ print('Allocated 64 MiB without limits')
         "Allocation should succeed without limits"
     );
 
-    eprintln!("✅ PASSED: no_config_no_enforcement");
+    eprintln!("PASSED: no_config_no_enforcement");
 }

@@ -29,7 +29,7 @@ Common use cases:
        "SessionStart": [
          {
            "hooks": [
-            { "type": "command", "command": "echo \"🚀 DS session started in $(pwd)\"" }
+            { "type": "command", "command": "echo \"DS session started in $(pwd)\"" }
            ]
          }
        ]

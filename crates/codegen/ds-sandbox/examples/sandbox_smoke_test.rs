@@ -53,13 +53,13 @@ fn main() {
     match sandbox.apply(&workspace) {
         Ok(()) => {
             if sandbox.is_applied() {
-                println!("✅ Sandbox applied (kernel-enforced, irreversible)");
+                println!("[OK] Sandbox applied (kernel-enforced, irreversible)");
             } else {
                 println!("⚠️  Sandbox was not applied (unsupported platform or Off profile)");
             }
         }
         Err(e) => {
-            println!("❌ Sandbox apply failed: {e}");
+            println!("[FAIL] Sandbox apply failed: {e}");
         }
     }
 
@@ -121,33 +121,33 @@ fn main() {
         println!("  (no events recorded)");
     }
 
-    println!("\n✅ Smoke test complete");
+    println!("\n[OK] Smoke test complete");
 }
 
 fn test_read(label: &str, path: &Path) {
     if path.is_file() {
         match std::fs::read(path) {
-            Ok(_) => println!("  ✅ {label}: OK (read)"),
+            Ok(_) => println!("  [OK] {label}: OK (read)"),
             Err(e)
                 if e.raw_os_error() == Some(libc::EACCES)
                     || e.raw_os_error() == Some(libc::EPERM) =>
             {
-                println!("  🔒 {label}: BLOCKED ({e})");
+                println!("  [BLOCKED] {label}: BLOCKED ({e})");
             }
-            Err(e) => println!("  ❌ {label}: ERROR ({e})"),
+            Err(e) => println!("  [FAIL] {label}: ERROR ({e})"),
         }
         return;
     }
     match std::fs::read_dir(path) {
         Ok(mut entries) => {
             let count = entries.by_ref().take(5).count();
-            println!("  ✅ {label}: OK ({count} entries)");
+            println!("  [OK] {label}: OK ({count} entries)");
         }
         Err(e) => {
             if e.raw_os_error() == Some(libc::EACCES) || e.raw_os_error() == Some(libc::EPERM) {
-                println!("  🔒 {label}: BLOCKED ({e})");
+                println!("  [BLOCKED] {label}: BLOCKED ({e})");
             } else {
-                println!("  ❌ {label}: ERROR ({e})");
+                println!("  [FAIL] {label}: ERROR ({e})");
             }
         }
     }
@@ -156,13 +156,13 @@ fn test_read(label: &str, path: &Path) {
 fn test_write(label: &str, path: &Path) {
     match std::fs::write(path, b"sandbox-test") {
         Ok(()) => {
-            println!("  ✅ {label}: OK (written)");
+            println!("  [OK] {label}: OK (written)");
         }
         Err(e) => {
             if e.raw_os_error() == Some(libc::EACCES) || e.raw_os_error() == Some(libc::EPERM) {
-                println!("  🔒 {label}: BLOCKED ({e})");
+                println!("  [BLOCKED] {label}: BLOCKED ({e})");
             } else {
-                println!("  ❌ {label}: ERROR ({e})");
+                println!("  [FAIL] {label}: ERROR ({e})");
             }
         }
     }

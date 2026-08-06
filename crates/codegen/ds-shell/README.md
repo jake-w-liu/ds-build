@@ -356,7 +356,7 @@ Most models behind the proxy only support streaming. Always use `"stream": true`
 
 | Model                 | Non-streaming  | Streaming    |
 | --------------------- | -------------- | ------------ |
-| `ds-build`    | ✅ Supported   | ✅ Supported |
+| `ds-build`    | Yes            | Yes          |
 
 > **Note:** `auth.json` tokens expire after 7 days. Run `ds login` to refresh.
 

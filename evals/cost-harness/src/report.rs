@@ -145,13 +145,13 @@ impl HarnessReport {
                     out.push_str("- auto-compaction fired (`ds-compact-*` request on the wire)\n");
                 }
                 for note in &run.failure_notes {
-                    out.push_str(&format!("- ⚠ {note}\n"));
+                    out.push_str(&format!("- warn: {note}\n"));
                 }
                 for a in &run.wire_assertions {
-                    out.push_str(&format!("- ❌ wire: {a}\n"));
+                    out.push_str(&format!("- FAIL wire: {a}\n"));
                 }
                 for a in &run.gate_assertions {
-                    out.push_str(&format!("- ❌ gate: {a}\n"));
+                    out.push_str(&format!("- FAIL gate: {a}\n"));
                 }
                 out.push('\n');
             }

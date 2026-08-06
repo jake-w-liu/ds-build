@@ -1,10 +1,10 @@
-# 🚀 Architecture Overview — `ds-pager` Rendering Engine
+# Architecture Overview — `ds-pager` Rendering Engine
 
 The **ds-pager** rendering engine is built on a layered pipeline that transforms raw markdown into terminal-ready cells. This document covers every major subsystem — from markdown parsing through syntax highlighting, word wrapping, block layout, viewport clipping, and final buffer composition. Understanding these layers is critical for anyone profiling or optimising the renderer.
 
 ---
 
-## 📐 The Rendering Pipeline
+## The Rendering Pipeline
 
 Every frame follows the same sequence of stages. Content flows **downward** through transforms, each adding structure:
 
@@ -15,27 +15,27 @@ Every frame follows the same sequence of stages. Content flows **downward** thro
 5. **Viewport clipping** — `render_scrolled_entries_with_scratch()` walks the entry list, skips off-screen entries, and uses a `ScratchBuffer` to render partially-visible entries into a temp buffer before copying the visible slice.
 6. **Buffer diff** — ratatui's `Terminal::flush()` diffs the old and new `Buffer` and emits only changed cells as escape sequences. This is **O(changed cells)**, not O(total cells).
 
-> **💡 Key insight**: steps 1–3 are **cached** across frames. Only step 4–5 run every frame. Profiling should focus there.
+> **Key insight**: steps 1–3 are **cached** across frames. Only step 4–5 run every frame. Profiling should focus there.
 
 ### Performance characteristics
 
 | Stage | Complexity | Cached? | Hot path? |
 |---|---|---|---|
-| Markdown parse | `O(n)` in source length | ✅ Yes, per-generation | ❌ No |
-| Syntax highlight | `O(n)` with syntect DFA | ✅ Yes, per-generation | ❌ No |
-| Word wrap | `O(lines × width)` | ✅ Yes, `(width, gen)` key | ❌ No |
-| `BlockContent::output()` | `O(wrapped_lines)` | ✅ Via `WrapCache` | ⚠️ First call only |
-| `EntryRenderer::render()` | `O(height × width)` cell writes | ❌ No | ✅ **Yes** |
-| Scratch buffer copy | `O(visible_rows × width)` clones | ❌ No | ✅ **Yes** |
-| Buffer diff + flush | `O(changed_cells)` | N/A | ✅ **Yes** |
+| Markdown parse | `O(n)` in source length | Yes, per-generation | No |
+| Syntax highlight | `O(n)` with syntect DFA | Yes, per-generation | No |
+| Word wrap | `O(lines × width)` | Yes, `(width, gen)` key | No |
+| `BlockContent::output()` | `O(wrapped_lines)` | Via `WrapCache` | First call only |
+| `EntryRenderer::render()` | `O(height × width)` cell writes | No | **Yes** |
+| Scratch buffer copy | `O(visible_rows × width)` clones | No | **Yes** |
+| Buffer diff + flush | `O(changed_cells)` | N/A | **Yes** |
 
 ---
 
-## 🧱 Block Types and Their Render Cost
+## Block Types and Their Render Cost
 
 Each `RenderBlock` variant has different rendering characteristics. Here's a breakdown of the major block types with their typical content patterns and associated costs:
 
-### `AgentMessageBlock` — the heaviest hitter 🔥
+### `AgentMessageBlock` — the heaviest hitter
 
 Agent messages contain **arbitrary markdown**: paragraphs, code blocks, tables, lists, inline formatting. A single agent response can easily exceed 200 wrapped lines. The `MarkdownContent` subsystem does the heavy lifting:
 
@@ -100,20 +100,20 @@ Thinking blocks render identically to agent messages but default to `DisplayMode
 | `Search` | 1 line (pattern + count) | `O(matches)` | Grep results with context |
 | `Other` | 1 line (tool name) | `O(output)` | Generic tool output |
 
-### `UserPromptBlock` — lightweight ✨
+### `UserPromptBlock` — lightweight
 
 User prompts are short (1–5 lines typically), render with a `┃` accent in `accent_user` colour, and are **never foldable**. They're the cheapest block to render.
 
 ---
 
-## 🎨 The Accent Column and Colour Blending
+## The Accent Column and Colour Blending
 
 The leftmost column of every entry shows a vertical accent bar `┃`. This serves as a visual type indicator:
 
 - **User prompts**: `accent_user` (Tokyo Night blue, `#7aa2f7`)
 - **Tool calls**: `accent_tool` / `accent_success` / `accent_error`
 - **Thinking**: `accent_thinking` (purple, `#bb9af7`)
-- **Running blocks**: animated wave effect 🌊
+- **Running blocks**: animated wave effect
 
 The animation uses `blend_color(bg, fg, brightness)` per-row per-frame:
 
@@ -147,7 +147,7 @@ pub fn blend_color(base: Color, color: Color, opacity: f32) -> Option<Color> {
 
 ---
 
-## 📦 The `ScratchBuffer` and Partial Rendering
+## The `ScratchBuffer` and Partial Rendering
 
 When an entry is **partially visible** (clipped at top or bottom of the viewport), we can't render directly into the output buffer — we'd write cells outside the visible area. Instead:
 
@@ -171,11 +171,11 @@ for dy in 0..visible_rows {
 }
 ```
 
-> **🔬 Optimisation opportunity**: `Cell::clone_from` copies `symbol: String` (24 bytes on stack + possible heap), `fg`, `bg`, `underline_color`, `modifier`, `skip`. A `memcpy`-based bulk row copy could be significantly faster for wide terminals. At `width=200`, that's 200 `clone_from` calls per visible row per frame — potentially 6000 calls for a 30-row viewport with top+bottom clipping.
+> **Optimisation opportunity**: `Cell::clone_from` copies `symbol: String` (24 bytes on stack + possible heap), `fg`, `bg`, `underline_color`, `modifier`, `skip`. A `memcpy`-based bulk row copy could be significantly faster for wide terminals. At `width=200`, that's 200 `clone_from` calls per visible row per frame — potentially 6000 calls for a 30-row viewport with top+bottom clipping.
 
 ---
 
-## 🔤 Unicode Width Challenges
+## Unicode Width Challenges
 
 Terminal rendering must account for **variable-width characters**. The `unicode-width` crate provides `UnicodeWidthChar::width()` and `UnicodeWidthStr::width()`:
 
@@ -195,7 +195,7 @@ Here's a stress test: `漢字テスト🦀🚀🎨` contains 5 double-width CJK 
 
 ---
 
-## 📊 Inline Code and Syntax Highlighting Deep Dive
+## Inline Code and Syntax Highlighting Deep Dive
 
 Inline code uses backtick syntax: `HashMap<String, Vec<u8>>`, `Option<&'a mut T>`, `impl Fn(usize) -> bool`. Each inline code span gets a distinct background colour (`bg_code`) to visually separate it from prose. The renderer must:
 
@@ -216,7 +216,7 @@ The syntect state machine is **line-stateful** — each line's highlighting depe
 
 ---
 
-## 🧪 Testing Patterns
+## Testing Patterns
 
 The scrollback rendering has comprehensive snapshot tests using `insta`. Here's the typical pattern:
 
@@ -230,7 +230,7 @@ from typing import Optional, Dict, List, Tuple
 
 @dataclass
 class TrainingConfig:
-    """Configuration for a distributed training run. 🔧"""
+    """Configuration for a distributed training run."""
     model_name: str
     batch_size: int = 32
     learning_rate: float = 3e-4
@@ -263,7 +263,7 @@ async def train_epoch(
     config: TrainingConfig,
     epoch: int,
 ) -> Dict[str, float]:
-    """Run a single training epoch. Returns metrics dict. 📈"""
+    """Run a single training epoch. Returns metrics dict."""
     model.train()
     total_loss = 0.0
     num_batches = 0
@@ -288,7 +288,7 @@ async def train_epoch(
 
 ---
 
-## ⚡ Benchmarking Strategy
+## Benchmarking Strategy
 
 To measure render performance, we need to isolate the **per-frame** cost from one-time setup:
 
@@ -315,7 +315,7 @@ If the benchmark shows >500 µs/frame, there's likely an unexpected cache miss o
 
 ---
 
-## 🌐 Miscellaneous Wide Characters and Edge Cases
+## Miscellaneous Wide Characters and Edge Cases
 
 Here are some strings that exercise interesting rendering edge cases:
 
