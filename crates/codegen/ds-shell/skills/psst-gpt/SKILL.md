@@ -139,6 +139,8 @@ If ChatGPT returns a **Work-mode nudge / “Continue with Work?” / cannot open
 
 | Code | Action |
 |------|--------|
+| `MACOS_ACCESSIBILITY_DISABLED` | Enable Accessibility for the host that launches DS/psst-gpt (Lyceum, Terminal, iTerm, Cursor, DS app, and/or `/usr/bin/swift`). ChatGPT itself does not need the toggle. Re-run `--doctor`. |
+| `PSST_GPT_WINDOW_MISSING` | Open a ChatGPT Chat window (not Work) and leave it open. |
 | `PSST_GPT_SCREEN_LOCKED_PARKED` / `waiting-screen-unlock` | Not a failure — unlock Mac; helper resumes. |
 | `PSST_GPT_SCREEN_LOCKED` | Stayed locked until deadline; unlock and re-run with `--timeout 0`. |
 | `WORK_MODE` | Switch to Chat. |

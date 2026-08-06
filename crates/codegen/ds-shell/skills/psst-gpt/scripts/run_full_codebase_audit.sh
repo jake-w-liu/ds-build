@@ -26,8 +26,10 @@ if ! grep -q '^// PSST_TRANSPORT_REV=5$' "$HELPER" \
   || ! grep -q 'PSST_GPT_SCREEN_LOCKED_PARKED' "$HELPER" \
   || ! grep -q 'resolveHelperTimeoutSec' "$HELPER" \
   || ! grep -q 'refreshAxRoot' "$HELPER" \
-  || ! grep -q 'waitWhileScreenLocked' "$HELPER"; then
-  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine/long-run-park markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
+  || ! grep -q 'waitWhileScreenLocked' "$HELPER" \
+  || ! grep -q 'assertAccessibilityTrusted' "$HELPER" \
+  || ! grep -q 'MACOS_ACCESSIBILITY_DISABLED' "$HELPER"; then
+  echo '{"ok":false,"code":"STALE_HELPER","message":"psst_zip_upload.swift missing send-verify/generation-state-machine/long-run-park/AX-trust markers; re-sync skill from crates/codegen/ds-shell/skills/psst-gpt"}' >&2
   exit 2
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then

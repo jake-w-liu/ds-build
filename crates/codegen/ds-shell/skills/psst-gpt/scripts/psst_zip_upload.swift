@@ -293,6 +293,28 @@ func findChatGPTApp() -> NSRunningApplication? {
   })
 }
 
+/// Fail fast when Accessibility is disabled. Untrusted processes see zero AX
+/// windows and would otherwise misdiagnose as NO_CHAT_COMPOSER / WORK_MODE.
+func assertAccessibilityTrusted(promptUser: Bool = true) {
+  let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+  let trustOptions = [trustPromptKey: promptUser] as CFDictionary
+  guard AXIsProcessTrustedWithOptions(trustOptions) else {
+    emit([
+      "ok": false,
+      "code": "MACOS_ACCESSIBILITY_DISABLED",
+      "message": "macOS Accessibility is not enabled for the host process running this helper (and may also need /usr/bin/swift). Open System Settings → Privacy & Security → Accessibility, enable the app that launches DS/psst-gpt (for example Terminal, iTerm, Lyceum, Cursor, or the DS app), then re-run. ChatGPT itself does not need Accessibility.",
+      "accessibilityTrusted": false,
+    ], exitCode: 40)
+  }
+}
+
+func chatGPTWindowCount(_ root: AXUIElement) -> Int {
+  guard let v = copyAttr(root, kAXWindowsAttribute as String) else { return -1 }
+  if let arr = v as? [AXUIElement] { return arr.count }
+  let cf = v as! CFArray
+  return CFArrayGetCount(cf)
+}
+
 @discardableResult
 func stageResultForDs(_ obj: [String: Any], responseText: String?) -> [String: String] {
   let cwd = FileManager.default.currentDirectoryPath
@@ -421,21 +443,20 @@ func bfsFirst(_ root: AXUIElement, pred: (AXUIElement, String) -> Bool) -> AXUIE
   bfsAll(root, pred: pred).first
 }
 
-/// True when AX text is still a loading/ingest shell, not a real ChatGPT answer.
+/// True when text is still a short UI loading/ingest shell, not a real answer.
 /// Pure function — also exercised by `--selfcheck-finish-rules`.
+///
+/// Important: only short bodies are treated as chrome. Substrings such as
+/// "learn more" or "before responding" appear in real audits and must never
+/// block completion of a multi-paragraph reply.
 func isIncompleteZipReply(_ t: String) -> Bool {
   let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
   let l = trimmed.lowercased()
   if trimmed.isEmpty { return true }
   if l.contains("no sources yet") { return true }
   if l.contains("audit request for codebase") && trimmed.count < 400 { return true }
-  // Mid-stream / loading chrome (must never finalize as complete)
-  let loadingChrome = [
-    "chatgpt is responding", "systems are thinking", "thinking a bit more",
-    "untitled conversation", "for a quicker response", "learn more",
-    "before responding", "may be less capable",
-  ]
-  if loadingChrome.contains(where: { l.contains($0) }) { return true }
+  // Mid-stream / loading chrome shells only (short). Real audits are longer.
+  if isLoadingChromeShell(trimmed) { return true }
   // Explicit Chat refusal / Work-mode redirect is a complete deliverable for zip audits.
   let completeNudge = [
     "work mode is the appropriate", "continue with work", "switch to work",
@@ -717,6 +738,18 @@ func runSelfcheckFinishRules() -> Never {
     Case(name: "loading_chrome", text:
       "Untitled conversation\nChatGPT is responding\nOur systems are thinking a bit more about this request before responding.",
       expectIncomplete: true),
+    // Real audits may mention "learn more" or "before responding" without being chrome.
+    Case(
+      name: "learn_more_in_real_audit",
+      text: """
+      ## Executive assessment
+      The monorepo shows modular crates and solid tests. See the docs to learn more about sandbox policy.
+      1. Severity high: AlwaysApprove defaults expand privilege before responding to shell tools.
+      2. Recommendation: fail closed when sandbox cannot apply.
+      Architecture notes: permission resolver, network hooks, plugin install.
+      """,
+      expectIncomplete: false
+    ),
     Case(name: "real_audit", text: longAudit, expectIncomplete: false),
     Case(
       name: "work_nudge",
@@ -982,6 +1015,13 @@ do {
   }
 }
 
+// AX is required for attach/send/wait. Fail before packaging so a disabled host
+// does not spend time building a source archive only to misdiagnose the UI.
+assertAccessibilityTrusted(promptUser: true)
+guard findChatGPTApp() != nil else {
+  emit(["ok": false, "code": "NO_APP", "message": "ChatGPT not running"], exitCode: 4)
+}
+
 do {
   if zipPath == nil, let rootPath {
     zipPath = try zipRoot(rootPath)
@@ -1015,6 +1055,7 @@ Thread.sleep(forTimeInterval: 0.5)
 // Mutable: long runs re-acquire AX root after lock/sleep/UI rebuilds.
 var root = AXUIElementCreateApplication(app0.processIdentifier)
 var appPid = app0.processIdentifier
+// Empty AXWindows alone is not fatal (Codex can still expose the composer via BFS).
 
 @discardableResult
 func refreshAxRoot(reason: String) -> Bool {
@@ -1073,7 +1114,23 @@ if newChat {
 guard let composer = bfsFirst(root, pred: { el, r in
   r == "AXTextArea" && s(el, kAXDescriptionAttribute as String).localizedCaseInsensitiveContains("Message ChatGPT")
 }) else {
-  emit(["ok": false, "code": "NO_CHAT_COMPOSER", "message": "Need Message ChatGPT composer (Chat mode)"], exitCode: 5)
+  let windowCount = chatGPTWindowCount(root)
+  if windowCount == 0 {
+    emit([
+      "ok": false,
+      "code": "PSST_GPT_WINDOW_MISSING",
+      "message": "ChatGPT is running but exposes no Message ChatGPT composer and zero AX windows. Open a Chat window (not Work) and leave it open.",
+      "accessibilityTrusted": true,
+      "windowCount": windowCount,
+    ], exitCode: 5)
+  }
+  emit([
+    "ok": false,
+    "code": "NO_CHAT_COMPOSER",
+    "message": "Need Message ChatGPT composer (Chat mode). Accessibility is enabled, so switch the app to Chat (not Work) and open a chat window.",
+    "accessibilityTrusted": true,
+    "windowCount": windowCount,
+  ], exitCode: 5)
 }
 
 // Clipboard file paste
@@ -1102,6 +1159,16 @@ func labelContainsExactFilename(_ label: String, fileName: String) -> Bool {
   }
   return false
 }
+func isAttachmentErrorBlob(_ text: String) -> Bool {
+  let lower = text.lowercased()
+  return lower.contains("upload failed") ||
+    lower.contains("failed to upload") ||
+    lower.contains("file too large") ||
+    lower.contains("unsupported file") ||
+    lower.contains("couldn't upload") ||
+    lower.contains("could not upload")
+}
+
 func attachmentEvidence() -> [String] {
   bfsAll(root, pred: { _, r in
     r == "AXButton" || r == "AXGroup" || r == "AXStaticText" || r == "AXTextField"
@@ -1113,8 +1180,27 @@ func attachmentEvidence() -> [String] {
     ].joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     let lower = blob.lowercased()
     guard labelContainsExactFilename(lower, fileName: zipName), lower.count < 500 else { return nil }
+    // Error banners that mention the filename are not attachment chips.
+    if isAttachmentErrorBlob(blob) { return nil }
     return String(blob.prefix(180))
   }
+}
+
+func attachmentUploadErrorText() -> String? {
+  // Direct BFS (not allCaptureTexts): error banners must be visible even when
+  // capture filters treat them as chrome, and this runs before allCaptureTexts
+  // is defined later in the script.
+  bfsAll(root, pred: { _, r in
+    r == "AXStaticText" || r == "AXTextArea" || r == "AXGroup" || r == "AXButton" || r == "AXTextField"
+  }).compactMap { el -> String? in
+    let blob = [
+      s(el, kAXTitleAttribute as String),
+      s(el, kAXDescriptionAttribute as String),
+      s(el, kAXValueAttribute as String),
+    ].joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard isAttachmentErrorBlob(blob), blob.count < 800 else { return nil }
+    return String(blob.prefix(500))
+  }.first
 }
 let attachmentEvidenceBeforePaste = attachmentEvidence()
 log("attachment baseline exact-labels=\(attachmentEvidenceBeforePaste.count)")
@@ -1155,20 +1241,16 @@ while true {
   }
   attachmentPoll += 1
   if attachmentPoll % 24 == 0 { _ = refreshAxRoot(reason: "attachment-wait") }
-  labels = attachmentEvidence()
-  if labels.count > attachmentEvidenceBeforePaste.count { break }
-  let errorText = allCaptureTexts().first { text in
-    let lower = text.lowercased()
-    return lower.contains("upload failed") || lower.contains("failed to upload") ||
-      lower.contains("file too large") || lower.contains("unsupported file")
-  }
-  if let errorText {
+  // Failures first: a filename-bearing error banner must never count as attach success.
+  if let errorText = attachmentUploadErrorText() {
     emit([
       "ok": false,
       "code": "ATTACHMENT_UPLOAD_FAILED",
       "message": String(errorText.prefix(500)),
     ], exitCode: 7)
   }
+  labels = attachmentEvidence()
+  if labels.count > attachmentEvidenceBeforePaste.count { break }
   _ = WakeHold.shared.ensureAlive()
   Thread.sleep(forTimeInterval: 0.5)
 }
@@ -1184,16 +1266,16 @@ if !attached {
 
 // Baseline static texts before send (for diff-based capture of long audits).
 func isChromeText(_ t: String) -> Bool {
-  let l = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
+  let l = trimmed.lowercased()
   if l.isEmpty { return true }
+  // Exact short UI labels only (full-string match).
   let chrome = [
     "new chat", "projects", "plugins", "sites", "scheduled", "message chatgpt",
     "recents", "search", "send", "add files and more", "select chatgpt model",
     "chatgpt", "work", "chat",
-    // Zip-ingest / loading chrome — not a finished audit body
     "no sources yet", "sources", "thinking", "searching", "analyzing",
     "audit request for codebase", "rust codebase audit",
-    // Auto chat titles / chips (not body)
     "audit rust monorepo", "untitled conversation",
     "chatgpt is responding", "learn more",
   ]
@@ -1201,9 +1283,10 @@ func isChromeText(_ t: String) -> Bool {
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("remove ") { return true }
   if l == zipName || (l.hasSuffix(".zip") && l.count < 80) { return true }
   if l.contains("source-archive") && l.count < 80 { return true }
-  if l.contains("no sources yet") { return true }
-  if l.contains("chatgpt is responding") || l.contains("systems are thinking") { return true }
-  if l.contains("thinking a bit more") || l.contains("for a quicker response") { return true }
+  if l.contains("no sources yet") && trimmed.count < 120 { return true }
+  // Loading status shells only — never reject long Copy bodies that happen to
+  // contain phrases like "thinking a bit more" in ordinary prose.
+  if isLoadingChromeShell(trimmed) { return true }
   // Sidebar recents / icon noise
   if l.count < 3 { return true }
   return false
@@ -1818,13 +1901,35 @@ let exactToken = requestedExactReply(prompt)
 // for settleConfirmSnapshots consecutive deep harvests. Never use "N seconds quiet"
 // while Stop is active without Send.
 
-func hasLoadingChrome(_ text: String) -> Bool {
-  let l = text.lowercased()
-  let markers = [
-    "chatgpt is responding", "systems are thinking", "thinking a bit more",
-    "for a quicker response", "before responding", "may be less capable",
+/// Detect ChatGPT *status* chrome shells. Must not fire on ordinary audit prose.
+/// Length-gated so phrases like "before responding" inside a finished report
+/// cannot freeze the wait loop as forever-active under `--timeout 0`.
+func isLoadingChromeShell(_ text: String) -> Bool {
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  // Real audits / long answers are never pure chrome shells.
+  if trimmed.count > 280 { return false }
+  let l = trimmed.lowercased()
+  let hardUi = [
+    "chatgpt is responding",
+    "systems are thinking",
+    "thinking a bit more",
+    "for a quicker response",
+    "may be less capable",
   ]
-  return markers.contains(where: { l.contains($0) })
+  if hardUi.contains(where: { l.contains($0) }) { return true }
+  // Short-only chips that are not real answers.
+  if l == "learn more" || l == "untitled conversation" { return true }
+  if l.hasPrefix("untitled conversation") && trimmed.count < 80 { return true }
+  // "before responding" only as part of the short systems-thinking shell.
+  if l.contains("before responding") &&
+      (l.contains("systems are thinking") || l.contains("thinking a bit more") || l.contains("chatgpt is responding")) {
+    return true
+  }
+  return false
+}
+
+func hasLoadingChrome(_ text: String) -> Bool {
+  isLoadingChromeShell(text)
 }
 
 /// Snapshot of Chat composer control surface (primary generation signals).
@@ -2508,6 +2613,8 @@ func runSelfcheckLongrunPolicy() -> Never {
     "auto-upgraded-short-timeout-to-unlimited",
     "--timeout-strict",
     "Always stage for DS handoff",
+    "func assertAccessibilityTrusted",
+    "MACOS_ACCESSIBILITY_DISABLED",
   ]
   // Always read the file we are executing if possible
   let helperPathCandidates = CommandLine.arguments.filter { $0.contains("psst_zip_upload") }

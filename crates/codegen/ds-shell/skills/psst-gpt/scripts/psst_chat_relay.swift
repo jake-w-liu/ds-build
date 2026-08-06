@@ -428,6 +428,27 @@ func findChatGPTApp() -> NSRunningApplication? {
   return nil
 }
 
+/// Fail fast when Accessibility is disabled. Without this, BFS sees zero windows and
+/// misdiagnoses as missing composer / wrong ChatGPT mode.
+func assertAccessibilityTrusted(promptUser: Bool = true) {
+  let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+  let trustOptions = [trustPromptKey: promptUser] as CFDictionary
+  guard AXIsProcessTrustedWithOptions(trustOptions) else {
+    fail(
+      "MACOS_ACCESSIBILITY_DISABLED",
+      "macOS Accessibility is not enabled for the host process running this helper (and may also need /usr/bin/swift). Open System Settings → Privacy & Security → Accessibility, enable the app that launches DS/psst-gpt (for example Terminal, iTerm, Lyceum, Cursor, or the DS app), then re-run --doctor. ChatGPT itself does not need Accessibility.",
+      exitCode: 40
+    )
+  }
+}
+
+func chatGPTWindowCount(_ root: AXUIElement) -> Int {
+  guard let v = copyAttr(root, kAXWindowsAttribute as String) else { return -1 }
+  if let arr = v as? [AXUIElement] { return arr.count }
+  let cf = v as! CFArray
+  return CFArrayGetCount(cf)
+}
+
 // MARK: - Chat / Work
 
 func chatWork(_ root: AXUIElement) -> (chat: AXUIElement?, work: AXUIElement?, chatOn: Bool, workOn: Bool) {
@@ -583,8 +604,32 @@ func findStopButton(_ root: AXUIElement) -> AXUIElement? {
   }).first
 }
 
+/// Short UI loading shells only. Long reply bodies must never be rejected as
+/// chrome because they mention "before responding" or similar phrases.
+func isRelayLoadingChromeShell(_ text: String) -> Bool {
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  if trimmed.count > 280 { return false }
+  let l = trimmed.lowercased()
+  let hardUi = [
+    "chatgpt is responding",
+    "systems are thinking",
+    "thinking a bit more",
+    "for a quicker response",
+    "may be less capable",
+  ]
+  if hardUi.contains(where: { l.contains($0) }) { return true }
+  if l == "learn more" || l == "untitled conversation" { return true }
+  if l.hasPrefix("untitled conversation") && trimmed.count < 80 { return true }
+  if l.contains("before responding") &&
+      (l.contains("systems are thinking") || l.contains("thinking a bit more") || l.contains("chatgpt is responding")) {
+    return true
+  }
+  return false
+}
+
 func isRelayChrome(_ text: String) -> Bool {
-  let l = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  let l = trimmed.lowercased()
   if l.isEmpty { return true }
   let exact: Set<String> = [
     "new chat", "projects", "sites", "scheduled", "plugins", "recents",
@@ -593,11 +638,7 @@ func isRelayChrome(_ text: String) -> Bool {
   ]
   if exact.contains(l) { return true }
   if l.hasPrefix("pin chat") || l.hasPrefix("archive chat") || l.hasPrefix("jump to ") { return true }
-  let loading = [
-    "chatgpt is responding", "systems are thinking", "thinking a bit more",
-    "for a quicker response", "before responding", "may be less capable",
-  ]
-  if loading.contains(where: { l.contains($0) }) { return true }
+  if isRelayLoadingChromeShell(trimmed) { return true }
   return false
 }
 
@@ -977,6 +1018,9 @@ func doctor() {
     ])
     exit(30)
   }
+  // Before any AX BFS: untrusted processes see zero windows and would mis-report
+  // as "no composer". Prompt so first doctor run can request permission.
+  assertAccessibilityTrusted(promptUser: true)
   let appInstalled =
     FileManager.default.fileExists(atPath: "/Applications/ChatGPT.app") ||
     FileManager.default.fileExists(atPath: NSHomeDirectory() + "/Applications/ChatGPT.app")
@@ -986,9 +1030,22 @@ func doctor() {
   guard let app = findChatGPTApp() else {
     fail("PSST_GPT_NOT_RUNNING", "ChatGPT is not running. Open the app and open a Chat window (not Work).")
   }
+  _ = app.activate(options: [.activateAllWindows])
+  Thread.sleep(forTimeInterval: 0.4)
   let root = AXUIElementCreateApplication(app.processIdentifier)
+  // Do not hard-fail on empty AXWindows alone — Codex ChatGPT sometimes reports
+  // zero windows while the app-root still exposes a Message ChatGPT composer (see
+  // psst_ax_upload chatWindow fallback). Diagnose after composer BFS fails.
+  let windowCount = chatGPTWindowCount(root)
   ensureChatOnly(root)
   guard findChatComposer(root) != nil else {
+    if windowCount == 0 {
+      fail(
+        "PSST_GPT_WINDOW_MISSING",
+        "ChatGPT is running but exposes no Message ChatGPT composer and zero AX windows. Open a Chat window (not Work), leave it open, then re-run --doctor.",
+        exitCode: 5
+      )
+    }
     fail("PSST_GPT_NO_CHAT_COMPOSER", "No Message ChatGPT composer. Switch to Chat (not Work) and open a chat window.")
   }
   let st = chatWork(root)
@@ -1001,6 +1058,8 @@ func doctor() {
     "chatOn": st.chatOn,
     "workOn": st.workOn,
     "composer": "Message ChatGPT",
+    "windowCount": windowCount,
+    "accessibilityTrusted": true,
     "screenLocked": false,
     "wakeHoldPid": wakePid as Any,
     "message": "Chat-only relay ready (Work refused). Screen must stay unlocked for the run.",
@@ -1024,11 +1083,22 @@ func relay(prompt: String, timeoutSec: Double, newChatFlag: Bool, preferFlash: B
     fail("PSST_GPT_EMPTY_PROMPT", "Prompt is empty")
   }
   log("relay wakeHoldPid=\(wakePid.map(String.init) ?? "none") timeoutSec=\(timeoutSec)")
+  assertAccessibilityTrusted(promptUser: true)
   guard let app = findChatGPTApp() else {
     fail("PSST_GPT_NOT_RUNNING", "ChatGPT is not running. Open ChatGPT and use Chat (not Work).")
   }
+  _ = app.activate(options: [.activateAllWindows])
+  Thread.sleep(forTimeInterval: 0.35)
   var root = AXUIElementCreateApplication(app.processIdentifier)
+  // Empty AXWindows is not fatal by itself (Codex can still expose the composer).
   ensureChatOnly(root)
+  if findChatComposer(root) == nil && chatGPTWindowCount(root) == 0 {
+    fail(
+      "PSST_GPT_WINDOW_MISSING",
+      "ChatGPT is running but exposes no Message ChatGPT composer and zero AX windows. Open a Chat window (not Work) and leave it open.",
+      exitCode: 5
+    )
+  }
   if newChatFlag {
     _ = newChat(root)
     root = AXUIElementCreateApplication(app.processIdentifier)
