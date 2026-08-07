@@ -24,11 +24,22 @@ use std::time::Instant;
 impl AgentView {
     /// Move the workflow-panel agent-row selection by `delta` (+1 next,
     /// -1 previous), cycling. Ordering mirrors the panel: running first,
-    /// then by elapsed duration (longest first). No-op without rows.
+    /// then by elapsed duration (longest first). Scoped to the phase the
+    /// panel is currently VIEWING (`workflow_view_phase`), so the
+    /// selection can never point at a row hidden from the panel. No-op
+    /// without rows.
     fn move_workflow_selection(&mut self, delta: isize) {
         let ordered: Vec<std::sync::Arc<str>> = {
-            let mut rows: Vec<&crate::app::subagent::SubagentInfo> =
-                self.subagent_sessions.values().collect();
+            let view_phase = self.workflow_view_phase;
+            let mut rows: Vec<&crate::app::subagent::SubagentInfo> = self
+                .subagent_sessions
+                .values()
+                .filter(|info| {
+                    view_phase.is_none_or(|vp| {
+                        info.goal_phase.as_deref() == Some(vp)
+                    })
+                })
+                .collect();
             rows.sort_by(|a, b| {
                 let ar = a.is_running();
                 let br = b.is_running();
@@ -56,6 +67,33 @@ impl AgentView {
             n.rem_euclid(ordered.len() as isize) as usize
         };
         self.workflow_selected = Some(ordered[next].clone());
+    }
+
+    /// Cycle the panel's viewed phase (`plan`/`execute`/`verify`) by
+    /// `delta`, wrapping. View-only — the pipeline's active phase is
+    /// untouched. The selection is re-scoped to the newly viewed phase.
+    fn cycle_workflow_view_phase(&mut self, delta: isize) {
+        const PHASES: [&str; 3] = ["plan", "execute", "verify"];
+        let idx = self
+            .workflow_view_phase
+            .and_then(|vp| PHASES.iter().position(|p| *p == vp))
+            .unwrap_or_else(|| {
+                // No override yet: start from the pipeline's active
+                // phase, mirroring the panel's inference precedence
+                // (verifying flag → planning flag → GoalDisplayPhase).
+                let active = match self.goal_state.as_ref() {
+                    Some(g) if g.verifying_completion => "verify",
+                    Some(g) if g.planning || g.phase == crate::app::agent::GoalDisplayPhase::Planning => "plan",
+                    Some(g) if g.phase == crate::app::agent::GoalDisplayPhase::Executing => "execute",
+                    _ => "plan",
+                };
+                PHASES.iter().position(|p| *p == active).unwrap_or(0)
+            });
+        let next = (idx as isize + delta).rem_euclid(PHASES.len() as isize) as usize;
+        self.workflow_view_phase = Some(PHASES[next]);
+        // Re-scope the selection to the newly viewed phase.
+        self.workflow_selected = None;
+        self.move_workflow_selection(0);
     }
 
     /// True when the scrollback pane is focused with nothing layered on top —
@@ -409,32 +447,68 @@ impl AgentView {
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
             {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
-                        self.show_goal_detail = false;
-                        return InputOutcome::Changed;
-                    }
-                    // Drill-down navigation: j/k move the selection across
-                    // the agent rows (same ordering as the panel), Enter
-                    // peeks the selected child's live scrollback.
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        self.move_workflow_selection(1);
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        self.move_workflow_selection(-1);
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Enter => {
-                        if let Some(child) = self.workflow_selected.clone() {
-                            return InputOutcome::Action(Action::WorkflowDrillDown {
-                                child_session_id: child.to_string(),
-                            });
+                // Typing wins over the panel: text keys ALWAYS fall
+                // through to the prompt widget (so a mid-goal panel can
+                // never eat the user's input — regression: the panel
+                // swallowed ALL keys, so typed text vanished and letters
+                // like g/q/j/k in it randomly closed the panel or moved
+                // the selection). Only the panel's own keys are owned,
+                // and only while the draft is empty — once the user has
+                // typed anything, Enter sends, Esc clears, and the
+                // letters type like normal.
+                let prompt_empty = self.prompt.text().is_empty();
+                let panel_key = matches!(
+                    key.code,
+                    KeyCode::Esc
+                        | KeyCode::Char('g' | 'q' | 'j' | 'k')
+                        | KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Enter
+                );
+                if prompt_empty && panel_key {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
+                            self.show_goal_detail = false;
+                            self.workflow_view_phase = None;
+                            return InputOutcome::Changed;
                         }
-                        return InputOutcome::Changed;
-                    }
-                    _ => {
-                        return InputOutcome::Changed;
+                        // Browse the pipeline phases in the panel
+                        // (view-only: the pipeline's active phase is
+                        // untouched — the ▶ marker stays on it). j/k
+                        // still select agent rows within the viewed
+                        // phase; Enter peeks the selected child's live
+                        // scrollback.
+                        KeyCode::Left => {
+                            self.cycle_workflow_view_phase(-1);
+                            return InputOutcome::Changed;
+                        }
+                        KeyCode::Right => {
+                            self.cycle_workflow_view_phase(1);
+                            return InputOutcome::Changed;
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            self.move_workflow_selection(1);
+                            return InputOutcome::Changed;
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            self.move_workflow_selection(-1);
+                            return InputOutcome::Changed;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(child) = self.workflow_selected.clone() {
+                                return InputOutcome::Action(Action::WorkflowDrillDown {
+                                    child_session_id: child.to_string(),
+                                });
+                            }
+                            return InputOutcome::Changed;
+                        }
+                        // Unreachable in practice (gated by `panel_key`),
+                        // but the match must stay exhaustive.
+                        _ => {
+                            return InputOutcome::Changed;
+                        }
                     }
                 }
             }
@@ -443,6 +517,7 @@ impl AgentView {
                 && self.hit_goal_close.contains(mouse.column, mouse.row)
             {
                 self.show_goal_detail = false;
+                self.workflow_view_phase = None;
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
@@ -1000,6 +1075,11 @@ impl AgentView {
             && key.modifiers.is_empty()
             && self.goal_state.is_some()
         {
+            // Opening the panel with `g` always starts from the
+            // pipeline's active phase (the view override is per-open).
+            if !self.show_goal_detail {
+                self.workflow_view_phase = None;
+            }
             return InputOutcome::Action(Action::ToggleGoalDetail);
         }
         if let Event::Key(key) = ev
@@ -1560,6 +1640,200 @@ mod voice_stop_click_during_plan_review_tests {
         assert!(
             matches!(outcome, InputOutcome::Action(Action::VoiceToggle)),
             "[stop] click during plan feedback must dispatch VoiceToggle, got {outcome:?}"
+        );
+    }
+}
+
+/// Goal-panel input behavior: typing must win over the panel, and
+/// Left/Right browses the pipeline phases (view-only).
+#[cfg(test)]
+mod goal_panel_input_tests {
+    use super::test_fixtures::make_agent;
+    use super::AgentPane;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn char_key(c: char) -> Event {
+        key(KeyCode::Char(c))
+    }
+
+    fn make_goal() -> GoalDisplayState {
+        GoalDisplayState {
+            goal_id: "g-1".into(),
+            objective: "Implement dark mode".into(),
+            status: GoalDisplayStatus::Active,
+            phase: GoalDisplayPhase::Planning,
+            token_budget: None,
+            tokens_used: 0,
+            elapsed_ms: 0,
+            total_deliverables: 0,
+            completed_deliverables: 0,
+            current_deliverable_id: None,
+            current_deliverable_title: None,
+            current_subagent_role: None,
+            total_worker_rounds: 0,
+            total_verify_rounds: 0,
+            live_subagent_tokens: None,
+            live_tokens_by_model: Vec::new(),
+            live_context_pct: None,
+            live_turn_count: None,
+            live_tool_call_count: None,
+            last_event: None,
+            last_event_detail: None,
+            last_event_timestamp: None,
+            token_baseline: 0,
+            finished_subagent_tokens: 0,
+            deliverables: vec![],
+            pause_message: None,
+            classifier_runs_attempted: None,
+            classifier_max_runs: None,
+            last_classifier_verdict: None,
+            last_classifier_details_path: None,
+            last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
+            verifying_completion: false,
+            planning: true,
+            received_at: std::time::Instant::now(),
+            elapsed_floor_ms: 0,
+        }
+    }
+
+    fn panel_agent() -> super::AgentView {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal());
+        agent.show_goal_detail = true;
+        agent
+    }
+
+    /// Regression: with the goal panel open, typed text must reach the
+    /// prompt. The panel used to swallow every key, so the user could not
+    /// prompt, and letters like g/q/j/k inside their text randomly closed
+    /// the panel or moved the selection (live-observed: typing
+    /// "hello i am trying to type" left only "to type" — the `g` in
+    /// "trying" closed the panel mid-sentence).
+    #[test]
+    fn panel_open_typing_falls_through_to_prompt() {
+        let mut agent = panel_agent();
+        let outcome = agent.handle_input(&char_key('h'), &ActionRegistry::defaults());
+        assert!(
+            !matches!(outcome, InputOutcome::Action(_)),
+            "text must not dispatch actions, got {outcome:?}"
+        );
+        assert!(
+            agent.prompt.text().contains('h'),
+            "typed char must land in the prompt"
+        );
+        assert!(agent.show_goal_detail, "panel must stay open while typing");
+        // A word containing the panel keys j/g/k types completely.
+        for c in "project".chars() {
+            let _ = agent.handle_input(&char_key(c), &ActionRegistry::defaults());
+        }
+        assert_eq!(agent.prompt.text(), "hproject");
+        assert!(agent.show_goal_detail);
+    }
+
+    /// Regression: Enter with a draft sends (normal prompt behavior), it
+    /// must NOT drill down into the selected subagent.
+    #[test]
+    fn panel_open_enter_with_draft_sends_not_drills() {
+        let mut agent = panel_agent();
+        for c in "fix it".chars() {
+            let _ = agent.handle_input(&char_key(c), &ActionRegistry::defaults());
+        }
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::WorkflowDrillDown { .. })
+            ),
+            "Enter with a draft must not drill down, got {outcome:?}"
+        );
+        assert!(agent.show_goal_detail, "panel stays open on send");
+    }
+
+    /// Esc with a draft must not close the panel — it falls through to
+    /// the normal Esc policy (which arms a draft clear), so the user can
+    /// clear their text first and only then Esc again to close.
+    #[test]
+    fn panel_open_esc_with_draft_does_not_close() {
+        let mut agent = panel_agent();
+        for c in "hi".chars() {
+            let _ = agent.handle_input(&char_key(c), &ActionRegistry::defaults());
+        }
+        let outcome = agent.handle_input(&key(KeyCode::Esc), &ActionRegistry::defaults());
+        assert!(
+            agent.show_goal_detail,
+            "Esc with a draft must not close the panel, got {outcome:?}"
+        );
+        assert!(
+            matches!(outcome, InputOutcome::ArmPending { .. }),
+            "Esc with a draft arms the draft-clear, got {outcome:?}"
+        );
+    }
+
+    /// Left/Right browses the pipeline phases in the panel (view-only),
+    /// wrapping; Esc closes and resets the view override.
+    #[test]
+    fn panel_open_left_right_cycles_view_phase_and_esc_resets() {
+        let mut agent = panel_agent();
+        assert_eq!(agent.workflow_view_phase, None, "starts following active");
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("execute"));
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("verify"));
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("plan"), "wraps");
+        let _ = agent.handle_input(&key(KeyCode::Left), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("verify"));
+        let _ = agent.handle_input(&key(KeyCode::Esc), &ActionRegistry::defaults());
+        assert!(!agent.show_goal_detail, "Esc closes the panel");
+        assert_eq!(
+            agent.workflow_view_phase,
+            None,
+            "closing resets the view override"
+        );
+    }
+
+    /// The wire sends phase=executing with planning=true during the plan
+    /// stage; the browse start must mirror the panel's inference (the
+    /// planning flag wins), so the first Right lands on execute, not
+    /// verify.
+    #[test]
+    fn panel_browse_starts_from_inferred_active_phase() {
+        let mut agent = panel_agent();
+        agent.goal_state.as_mut().unwrap().phase = GoalDisplayPhase::Executing;
+        agent.goal_state.as_mut().unwrap().planning = true;
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(
+            agent.workflow_view_phase,
+            Some("execute"),
+            "planning flag wins over the executing phase for the browse start"
+        );
+    }
+
+    /// With an empty draft, j/k/Enter keep their panel roles.
+    #[test]
+    fn panel_open_empty_draft_enter_still_drills_when_selected() {
+        let mut agent = panel_agent();
+        // j sets a selection on the first row; with none present the
+        // selection stays None and Enter is a no-op (not a prompt send).
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::WorkflowDrillDown { .. })
+            ),
+            "empty-draft Enter with no selection must not drill down, got {outcome:?}"
         );
     }
 }

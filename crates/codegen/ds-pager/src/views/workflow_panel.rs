@@ -84,6 +84,11 @@ pub struct WorkflowSnapshot {
     pub agents: Vec<WorkflowAgentRow>,
     /// Id of the phase currently focused in the agents column.
     pub active_phase_id: &'static str,
+    /// Phase the user is VIEWING (browsed to with Left/Right), when it
+    /// differs from the pipeline's active phase. View-only: the ▶ marker
+    /// and the phase statuses stay on `active_phase_id`. `None` = follow
+    /// the active phase.
+    pub view_phase_id: Option<&'static str>,
     pub total_agents: u32,
     pub completed_agents: u32,
 }
@@ -392,6 +397,7 @@ pub fn derive_workflow_snapshot(
         phases,
         agents,
         active_phase_id,
+        view_phase_id: None,
         total_agents,
         completed_agents,
     }
@@ -481,18 +487,19 @@ pub fn render_workflow_panel(
 
     let mut rows_used = 0u16;
 
-    // Header row: "Phases" | "<ActivePhase> · N agents"
+    // Header row: "Phases" | "<ViewedPhase> · N agents"
     if rows_used < area.height {
+        let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
         let active_name = snap
             .phases
             .iter()
-            .find(|p| p.id == snap.active_phase_id)
+            .find(|p| p.id == focus_phase_id)
             .map(|p| p.name)
             .unwrap_or("Workflow");
         let n_in_phase = snap
             .agents
             .iter()
-            .filter(|a| a.phase_id == snap.active_phase_id)
+            .filter(|a| a.phase_id == focus_phase_id)
             .count();
         let left = Line::from(Span::styled(
             " Phases",
@@ -500,12 +507,16 @@ pub fn render_workflow_panel(
                 .fg(theme.gray_bright)
                 .add_modifier(Modifier::BOLD),
         ));
+        let viewing = snap
+            .view_phase_id
+            .is_some_and(|vp| vp != snap.active_phase_id);
+        let viewing_suffix = if viewing { " (viewing)" } else { "" };
         let right_label = if n_in_phase == 0 {
-            format!(" {active_name}")
+            format!(" {active_name}{viewing_suffix}")
         } else {
             format!(
-                " {active_name} · {n_in_phase} agent{}",
-                if n_in_phase == 1 { "" } else { "s" }
+                " {active_name} · {n_in_phase} agent{}{viewing_suffix}",
+                if n_in_phase == 1 { "" } else { "s" },
             )
         };
         let right = Line::from(Span::styled(
@@ -531,14 +542,25 @@ pub fn render_workflow_panel(
     }
 
     let phase_rows = snap.phases.len() as u16;
+    // The agents column shows the VIEWED phase when the user browsed away
+    // from the pipeline's active phase (Left/Right).
+    let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
     let agent_rows_for_active: Vec<&WorkflowAgentRow> = snap
         .agents
         .iter()
-        .filter(|a| a.phase_id == snap.active_phase_id)
+        .filter(|a| a.phase_id == focus_phase_id)
         .collect();
-    // Fall back to all agents if the active phase has none yet.
+    // Fall back to all agents only when FOLLOWING the pipeline and the
+    // active phase has none yet (e.g. a completed goal whose phase
+    // bookkeeping drained). Browsing to an explicitly chosen phase always
+    // shows exactly that phase's agents — an empty phase renders empty
+    // rather than silently mixing other phases' rows under its header.
     let agent_rows: Vec<&WorkflowAgentRow> = if agent_rows_for_active.is_empty() {
-        snap.agents.iter().collect()
+        if snap.view_phase_id.is_none() {
+            snap.agents.iter().collect()
+        } else {
+            Vec::new()
+        }
     } else {
         agent_rows_for_active
     };
@@ -657,15 +679,20 @@ pub fn render_workflow_panel(
 
 /// Preferred height for the workflow panel given a snapshot.
 pub fn workflow_panel_height(snap: &WorkflowSnapshot, max: u16) -> u16 {
+    // The agents column shows the VIEWED phase when the user browsed away
+    // (Left/Right); the height must budget for the same rows the render
+    // will draw, so it follows the view phase too — and, like the render,
+    // only falls back to all agents when following the pipeline.
+    let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
     let agents_in_active = snap
         .agents
         .iter()
-        .filter(|a| a.phase_id == snap.active_phase_id)
+        .filter(|a| a.phase_id == focus_phase_id)
         .count()
-        .max(if snap.agents.is_empty() {
+        .max(if snap.agents.is_empty() || snap.view_phase_id.is_some() {
             0
         } else {
-            // When active phase is empty, we fall back to all agents.
+            // When the active phase is empty, we fall back to all agents.
             snap.agents.len()
         });
     let body = (snap.phases.len()).max(agents_in_active) as u16;
@@ -885,5 +912,85 @@ mod tests {
         let goal = stub_goal(GoalDisplayPhase::Idle, false, false);
         let snap = derive_workflow_snapshot(&goal, &HashMap::new());
         assert!(workflow_panel_height(&snap, 20) >= 4);
+    }
+
+    /// The agents column and header follow the VIEWED phase when the user
+    /// browsed away with Left/Right, while the ▶ active marker stays on
+    /// the pipeline's real active phase.
+    #[test]
+    fn render_focuses_viewed_phase_and_keeps_active_marker() {
+        let goal = stub_goal(GoalDisplayPhase::Planning, true, false);
+        let mut map = HashMap::new();
+        let mut planner = stub_subagent("p1", "planner", "plan", true);
+        planner.goal_phase = Some(Arc::from("plan"));
+        let mut skeptic1 = stub_subagent("s1", "quality-gate-1", "general-purpose", true);
+        skeptic1.goal_phase = Some(Arc::from("verify"));
+        let mut skeptic2 = stub_subagent("s2", "quality-gate-2", "general-purpose", true);
+        skeptic2.goal_phase = Some(Arc::from("verify"));
+        map.insert("p1".into(), planner);
+        map.insert("s1".into(), skeptic1);
+        map.insert("s2".into(), skeptic2);
+        let mut snap = derive_workflow_snapshot(&goal, &map);
+        // Browsing to verify: the column + header show the two skeptics,
+        // but the ▶ stays on plan (the pipeline's active phase).
+        snap.view_phase_id = Some("verify");
+        let screen = Rect::new(0, 0, 100, 20);
+        let mut buf = ratatui::buffer::Buffer::empty(screen);
+        let area = Rect::new(0, 0, 100, 12);
+        render_workflow_panel(
+            &mut buf,
+            area,
+            &snap,
+            &Theme::current(),
+            None,
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell(ratatui::layout::Position::new(x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains("Verify · 2 agents (viewing)"),
+            "header must name the viewed phase, got:\n{text}"
+        );
+        assert!(
+            text.contains("quality-gate-1") && text.contains("quality-gate-2"),
+            "viewed phase agents must render in the column, got:\n{text}"
+        );
+        // The ▶ marker must stay on the pipeline's active phase (plan),
+        // not follow the view.
+        let plan_line = text.lines().find(|l| l.contains("Plan")).unwrap_or("");
+        assert!(
+            plan_line.contains("▶"),
+            "▶ must stay on the active phase (plan), got:\n{text}"
+        );
+        // A phase the user browsed to that has no agents renders EMPTY —
+        // it must not silently fall back to showing other phases' agents.
+        snap.view_phase_id = Some("execute");
+        let mut buf2 = ratatui::buffer::Buffer::empty(screen);
+        render_workflow_panel(
+            &mut buf2,
+            area,
+            &snap,
+            &Theme::current(),
+            None,
+        );
+        let mut text2 = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf2.cell(ratatui::layout::Position::new(x, y)) {
+                    text2.push_str(cell.symbol());
+                }
+            }
+            text2.push('\n');
+        }
+        assert!(
+            !text2.contains("quality-gate-1"),
+            "browsing to an empty phase must not fall back to other phases, got:\n{text2}"
+        );
     }
 }

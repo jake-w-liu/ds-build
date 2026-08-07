@@ -932,6 +932,7 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     agent.last_cleared_goal_id = Some(g.goal_id);
                 }
                 agent.show_goal_detail = false;
+                agent.workflow_view_phase = None;
                 true
             } else if agent.last_cleared_goal_id.as_deref() == Some(goal_id.as_str()) {
                 false
@@ -1001,6 +1002,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 });
                 if goal_started {
                     agent.show_goal_detail = true;
+                    // Fresh goal: the panel starts on the pipeline's
+                    // active phase (drop any stale browse override).
+                    agent.workflow_view_phase = None;
                 }
                 true
             }

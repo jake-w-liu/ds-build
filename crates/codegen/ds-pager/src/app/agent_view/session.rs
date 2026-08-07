@@ -102,6 +102,7 @@ impl AgentView {
             last_cleared_goal_id: None,
             show_goal_detail: false,
             workflow_selected: None,
+            workflow_view_phase: None,
             turn_start_ms: None,
             wake_turn_start: None,
             turn_started_at: None,

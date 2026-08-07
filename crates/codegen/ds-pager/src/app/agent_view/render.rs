@@ -3964,6 +3964,7 @@ impl AgentView {
                 goal,
                 todos,
                 &self.subagent_sessions,
+                self.workflow_view_phase,
             );
             let tick = self.tasks.tick_count() as usize;
             let active_subagent_tokens: u64 = self
@@ -3983,6 +3984,7 @@ impl AgentView {
                 &self.subagent_sessions,
                 self.hit_goal_close.hovered,
                 self.workflow_selected.as_deref(),
+                self.workflow_view_phase,
             );
             self.hit_goal_close.rect = close_rect;
             self.frame_occluder_rects.push(overlay_rect);

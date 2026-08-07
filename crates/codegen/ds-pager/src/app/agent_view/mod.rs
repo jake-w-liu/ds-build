@@ -876,6 +876,12 @@ pub struct AgentView {
     /// (`j`/`k` in the goal-detail overlay). `Enter` drills into that
     /// child's live scrollback (`Action::WorkflowDrillDown`).
     pub workflow_selected: Option<std::sync::Arc<str>>,
+    /// Phase the goal-detail panel is currently VIEWING (`plan`/`execute`/
+    /// `verify`), when the user browsed away from the pipeline's active
+    /// phase with Left/Right. View-only: the pipeline's active phase and
+    /// the ▶ marker are untouched. `None` = follow the active phase.
+    /// Reset when the panel closes.
+    pub workflow_view_phase: Option<&'static str>,
     /// UTC ms when the current turn started (`turnStartMs` from notification meta).
     /// Used for turn elapsed display.
     pub turn_start_ms: Option<i64>,

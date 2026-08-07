@@ -165,7 +165,11 @@ Goal orchestration subagents (planner, workers, verifier skeptics, strategist) c
 
 **Decisions history:** the goal-detail panel shows a structured decisions log (plan accepted, verifier verdicts, strategist advice, auto-resumes, infra fallbacks) that survives compaction — the "why" behind the current phase, not just the latest event.
 
-**Drill-down:** in the workflow panel, `j`/`k` select an agent row and `Enter` switches to that subagent's live scrollback.
+**Drill-down:** in the workflow panel, `j`/`k` select an agent row and `Enter` switches to that subagent's live scrollback; `Esc` (or `q`) closes the panel and returns to the parent view.
+
+**Browsing phases:** the panel always shows the pipeline's *active* phase, but `←`/`→` browse the other phases (marked `(viewing)` in the header) — view-only, the pipeline is untouched and the `▶` marker stays on the real active phase. The panel resets to the active phase when it reopens.
+
+**Typing is never blocked:** the panel only owns keys while the prompt is empty. Once you start typing, every key goes to the prompt as usual — `Enter` sends (or queues during a goal turn), `Esc` clears the draft first, and the panel's `j`/`k`/`←`/`→` roles resume once the draft is empty.
 
 ---
 
