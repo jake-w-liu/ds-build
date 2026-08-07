@@ -22,56 +22,70 @@ use crossterm::event::{
 };
 use std::time::Instant;
 impl AgentView {
-    /// Move the workflow-panel agent-row selection by `delta` (+1 next,
-    /// -1 previous), cycling. Ordering mirrors the panel: running first,
-    /// then by elapsed duration (longest first). Scoped to the phase the
-    /// panel is currently VIEWING (`workflow_view_phase`), so the
-    /// selection can never point at a row hidden from the panel. No-op
-    /// without rows.
-    fn move_workflow_selection(&mut self, delta: isize) {
-        let ordered: Vec<std::sync::Arc<str>> = {
-            let view_phase = self.workflow_view_phase;
-            let mut rows: Vec<&crate::app::subagent::SubagentInfo> = self
-                .subagent_sessions
-                .values()
-                .filter(|info| {
-                    // Match the panel's OWN phase assignment (structured
-                    // wire phase when present, keyword sniffer otherwise)
-                    // so the selection can never skip a row the panel
-                    // shows — a non-goal subagent sniffed into Execute
-                    // must stay selectable while browsing Execute.
-                    view_phase.is_none_or(|vp| {
-                        crate::views::workflow_panel::structured_or_sniffed_phase(info) == vp
-                    })
-                })
-                .collect();
-            rows.sort_by(|a, b| {
-                let ar = a.is_running();
-                let br = b.is_running();
-                br.cmp(&ar)
-                    .then(b.display_elapsed().cmp(&a.display_elapsed()))
-                    .then(a.description.cmp(&b.description))
-            });
-            rows.into_iter()
-                .map(|r| r.child_session_id.clone())
-                .collect()
+    /// Ids of agent rows the panel is currently drawing (same order as
+    /// `focused_agent_rows` / render). Empty when there is no goal or the
+    /// focused phase has no visible agents.
+    fn workflow_focused_ids(&self) -> Vec<std::sync::Arc<str>> {
+        let Some(goal) = self.goal_state.as_ref() else {
+            return Vec::new();
         };
+        let mut snap =
+            crate::views::workflow_panel::derive_workflow_snapshot(goal, &self.subagent_sessions);
+        snap.view_phase_id = self.workflow_view_phase;
+        crate::views::workflow_panel::focused_agent_rows(&snap)
+            .into_iter()
+            .map(|a| std::sync::Arc::<str>::from(a.id.as_str()))
+            .collect()
+    }
+
+    /// Move the workflow-panel agent-row selection by `delta` (+1 next,
+    /// -1 previous), cycling. Ordering and phase scope mirror
+    /// `focused_agent_rows` / `render_workflow_panel` exactly — selection
+    /// can never point at a row the panel is not drawing. Ids are
+    /// `child_session_id` so highlight and `WorkflowDrillDown` agree.
+    ///
+    /// With no current (or a stale) selection: `delta >= 0` lands on the
+    /// first row, `delta < 0` on the last — so the first `j` never skips
+    /// the top visible agent. No-op without rows.
+    fn move_workflow_selection(&mut self, delta: isize) {
+        let ordered = self.workflow_focused_ids();
         if ordered.is_empty() {
             self.workflow_selected = None;
             return;
         }
-        let idx = self
+        let next = match self
             .workflow_selected
             .as_ref()
             .and_then(|sel| ordered.iter().position(|c| c == sel))
-            .unwrap_or(0);
-        let next = if ordered.len() == 1 {
-            0
-        } else {
-            let n = idx as isize + delta;
-            n.rem_euclid(ordered.len() as isize) as usize
+        {
+            // No / stale selection: j or re-scope (delta>=0) → first; k → last.
+            None => {
+                if delta < 0 {
+                    ordered.len() - 1
+                } else {
+                    0
+                }
+            }
+            Some(_) if ordered.len() == 1 => 0,
+            Some(i) => {
+                let n = i as isize + delta;
+                n.rem_euclid(ordered.len() as isize) as usize
+            }
         };
         self.workflow_selected = Some(ordered[next].clone());
+    }
+
+    /// Drop the selection when it no longer names a visible panel row
+    /// (phase advanced, agent finished, browse left the phase). Keeps
+    /// Enter from drilling a row the user cannot see highlighted.
+    fn prune_stale_workflow_selection(&mut self) {
+        let Some(sel) = self.workflow_selected.as_ref() else {
+            return;
+        };
+        let visible = self.workflow_focused_ids();
+        if !visible.iter().any(|id| id == sel) {
+            self.workflow_selected = None;
+        }
     }
 
     /// Cycle the panel's viewed phase (`plan`/`execute`/`verify`) by
@@ -84,14 +98,18 @@ impl AgentView {
             .and_then(|vp| PHASES.iter().position(|p| *p == vp))
             .unwrap_or_else(|| {
                 // No override yet: start from the pipeline's active
-                // phase, mirroring the panel's inference precedence
-                // (verifying flag → planning flag → GoalDisplayPhase).
-                let active = match self.goal_state.as_ref() {
-                    Some(g) if g.verifying_completion => "verify",
-                    Some(g) if g.planning || g.phase == crate::app::agent::GoalDisplayPhase::Planning => "plan",
-                    Some(g) if g.phase == crate::app::agent::GoalDisplayPhase::Executing => "execute",
-                    _ => "plan",
-                };
+                // phase, using the same inference as the panel snapshot.
+                let active = self
+                    .goal_state
+                    .as_ref()
+                    .map(|g| {
+                        crate::views::workflow_panel::derive_workflow_snapshot(
+                            g,
+                            &self.subagent_sessions,
+                        )
+                        .active_phase_id
+                    })
+                    .unwrap_or("plan");
                 PHASES.iter().position(|p| *p == active).unwrap_or(0)
             });
         let next = (idx as isize + delta).rem_euclid(PHASES.len() as isize) as usize;
@@ -479,6 +497,7 @@ impl AgentView {
                         KeyCode::Esc | KeyCode::Char('g') | KeyCode::Char('q') => {
                             self.show_goal_detail = false;
                             self.workflow_view_phase = None;
+                            self.workflow_selected = None;
                             return InputOutcome::Changed;
                         }
                         // Browse the pipeline phases in the panel
@@ -504,6 +523,10 @@ impl AgentView {
                             return InputOutcome::Changed;
                         }
                         KeyCode::Enter => {
+                            // Only drill a row the panel is currently
+                            // drawing — drop a stale id left over from
+                            // a prior phase or a finished agent.
+                            self.prune_stale_workflow_selection();
                             if let Some(child) = self.workflow_selected.clone() {
                                 return InputOutcome::Action(Action::WorkflowDrillDown {
                                     child_session_id: child.to_string(),
@@ -525,6 +548,7 @@ impl AgentView {
             {
                 self.show_goal_detail = false;
                 self.workflow_view_phase = None;
+                self.workflow_selected = None;
                 return InputOutcome::Changed;
             }
             if let Event::Mouse(mouse) = ev
@@ -2040,5 +2064,415 @@ mod goal_panel_selection_sniff_tests {
             Some("bg-1"),
             "sniffed non-goal agents must stay selectable in the viewed phase"
         );
+    }
+}
+
+/// Selection, highlight, and drill-down must agree on child_session_id and
+/// stay scoped to the rows the panel actually draws.
+#[cfg(test)]
+mod goal_panel_selection_scope_tests {
+    use super::test_fixtures::make_agent;
+    use super::AgentPane;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
+    use crate::app::app_view::InputOutcome;
+    use crate::app::subagent::SubagentInfo;
+    use crate::theme::Theme;
+    use crate::views::workflow_panel::{
+        derive_workflow_snapshot, focused_agent_rows, render_workflow_panel,
+    };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn char_key(c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn make_goal_executing() -> GoalDisplayState {
+        GoalDisplayState {
+            goal_id: "g-1".into(),
+            objective: "o".into(),
+            status: GoalDisplayStatus::Active,
+            phase: GoalDisplayPhase::Executing,
+            token_budget: None,
+            tokens_used: 0,
+            elapsed_ms: 0,
+            total_deliverables: 0,
+            completed_deliverables: 0,
+            current_deliverable_id: None,
+            current_deliverable_title: None,
+            current_subagent_role: None,
+            total_worker_rounds: 0,
+            total_verify_rounds: 0,
+            live_subagent_tokens: None,
+            live_tokens_by_model: Vec::new(),
+            live_context_pct: None,
+            live_turn_count: None,
+            live_tool_call_count: None,
+            last_event: None,
+            last_event_detail: None,
+            last_event_timestamp: None,
+            token_baseline: 0,
+            finished_subagent_tokens: 0,
+            deliverables: vec![],
+            pause_message: None,
+            classifier_runs_attempted: None,
+            classifier_max_runs: None,
+            last_classifier_verdict: None,
+            last_classifier_details_path: None,
+            last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
+            verifying_completion: false,
+            planning: false,
+            received_at: Instant::now(),
+            elapsed_floor_ms: 0,
+        }
+    }
+
+    fn stub_agent(
+        subagent_id: &str,
+        child_session_id: &str,
+        phase: &str,
+        desc: &str,
+        finished: bool,
+    ) -> SubagentInfo {
+        SubagentInfo {
+            subagent_id: Arc::from(subagent_id),
+            child_session_id: Arc::from(child_session_id),
+            description: Arc::from(desc),
+            subagent_type: Arc::from("general-purpose"),
+            persona: None,
+            role: None,
+            model: Some(Arc::from("deepseek-v4-pro")),
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            started_at: Instant::now(),
+            last_progress_at: Instant::now(),
+            finished,
+            status: finished.then_some(Arc::from("completed")),
+            error: None,
+            duration_ms: finished.then_some(5_000),
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: Some(1_000),
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: true,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            goal_phase: Some(Arc::from(phase)),
+            goal_attempt: Some(1),
+            child_updates_replayed: false,
+        }
+    }
+
+    /// Fixture: distinct subagent_id vs child_session_id, multi-phase.
+    /// j/k selection stores the same id the panel uses for is_selected,
+    /// and a buffer render reverse-styles only that row's label.
+    #[test]
+    fn distinct_id_selection_matches_render_highlight() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        agent.subagent_sessions.insert(
+            "child-exec-1".into(),
+            stub_agent("sa-exec-1", "child-exec-1", "execute", "worker-alpha", false),
+        );
+        agent.subagent_sessions.insert(
+            "child-plan-1".into(),
+            stub_agent("sa-plan-1", "child-plan-1", "plan", "planner-beta", true),
+        );
+
+        // Following pipeline (execute active): j selects the execute worker.
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some("child-exec-1"),
+            "selection must be child_session_id"
+        );
+
+        let goal = agent.goal_state.as_ref().unwrap();
+        let mut snap = derive_workflow_snapshot(goal, &agent.subagent_sessions);
+        snap.view_phase_id = agent.workflow_view_phase;
+        let focused = focused_agent_rows(&snap);
+        assert!(
+            focused.iter().any(|a| a.id == "child-exec-1"),
+            "selected id must be among focused rows"
+        );
+        // The id stored for selection equals the id the panel uses for highlight.
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            focused.iter().find(|a| a.id == "child-exec-1").map(|a| a.id.as_str()),
+        );
+
+        let area = Rect::new(0, 0, 100, 12);
+        let mut buf = Buffer::empty(area);
+        render_workflow_panel(
+            &mut buf,
+            area,
+            &snap,
+            &Theme::current(),
+            agent.workflow_selected.as_deref(),
+        );
+        let mut found_reversed = false;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell(ratatui::layout::Position::new(x, y))
+                    && cell.style().add_modifier.contains(Modifier::REVERSED)
+                {
+                    found_reversed = true;
+                }
+            }
+        }
+        assert!(
+            found_reversed,
+            "render must reverse-style the selected row when ids align"
+        );
+    }
+
+    /// While following the pipeline, j/k never land on agents in other
+    /// phases. Right into an empty phase clears selection; Enter does not drill.
+    #[test]
+    fn following_pipeline_scopes_selection_empty_phase_clears() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        // Active execute has one worker; plan + verify also have agents.
+        agent.subagent_sessions.insert(
+            "child-exec-1".into(),
+            stub_agent("sa-exec-1", "child-exec-1", "execute", "worker-only", false),
+        );
+        agent.subagent_sessions.insert(
+            "child-plan-1".into(),
+            stub_agent("sa-plan-1", "child-plan-1", "plan", "planner-hidden", true),
+        );
+        agent.subagent_sessions.insert(
+            "child-verify-1".into(),
+            stub_agent("sa-verify-1", "child-verify-1", "verify", "skeptic-hidden", true),
+        );
+
+        assert_eq!(agent.workflow_view_phase, None);
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_selected.as_deref(), Some("child-exec-1"));
+        // Cycling j again must stay on the only visible (execute) row.
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some("child-exec-1"),
+            "must not cycle into plan/verify agents while following execute"
+        );
+        let _ = agent.handle_input(&char_key('k'), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_selected.as_deref(), Some("child-exec-1"));
+
+        // Browse: execute → verify (has agent) → plan (has agent) → execute.
+        // From execute following, first Right starts at active (execute) then
+        // advances to verify.
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("verify"));
+        assert_eq!(agent.workflow_selected.as_deref(), Some("child-verify-1"));
+
+        // Go to plan, then right into execute (has agent), then we need an
+        // empty phase — remove the only execute agent and re-enter execute.
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("plan"));
+        agent.subagent_sessions.remove("child-exec-1");
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert_eq!(agent.workflow_view_phase, Some("execute"));
+        assert_eq!(
+            agent.workflow_selected, None,
+            "empty viewed phase must clear selection"
+        );
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::WorkflowDrillDown { .. })
+            ),
+            "Enter with empty selection must not drill, got {outcome:?}"
+        );
+    }
+
+    /// Enter with a selection dispatches WorkflowDrillDown with the child
+    /// session id (not the shell subagent_id).
+    #[test]
+    fn enter_drills_with_child_session_id() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        agent.subagent_sessions.insert(
+            "child-exec-99".into(),
+            stub_agent(
+                "sa-shell-only",
+                "child-exec-99",
+                "execute",
+                "drill-target",
+                false,
+            ),
+        );
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
+        match outcome {
+            InputOutcome::Action(Action::WorkflowDrillDown { child_session_id }) => {
+                assert_eq!(
+                    child_session_id, "child-exec-99",
+                    "drill-down must carry child_session_id, not subagent_id"
+                );
+                assert_ne!(child_session_id, "sa-shell-only");
+            }
+            other => panic!("expected WorkflowDrillDown, got {other:?}"),
+        }
+    }
+
+    /// First `j` with no selection must land on the first visible row —
+    /// not skip it by applying +1 from a synthetic index 0.
+    #[test]
+    fn first_j_selects_first_visible_agent() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        // Two execute agents so ordered.len() > 1 exposes the off-by-one.
+        agent.subagent_sessions.insert(
+            "child-a".into(),
+            stub_agent("sa-a", "child-a", "execute", "aaa-first", false),
+        );
+        agent.subagent_sessions.insert(
+            "child-b".into(),
+            stub_agent("sa-b", "child-b", "execute", "bbb-second", false),
+        );
+        assert!(agent.workflow_selected.is_none());
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        let focused = {
+            let goal = agent.goal_state.as_ref().unwrap();
+            let mut snap = derive_workflow_snapshot(goal, &agent.subagent_sessions);
+            snap.view_phase_id = agent.workflow_view_phase;
+            focused_agent_rows(&snap)
+                .into_iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(focused.len() >= 2, "fixture needs ≥2 visible rows");
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some(focused[0].as_str()),
+            "first j must select the first visible row, not skip it"
+        );
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some(focused[1].as_str()),
+            "second j advances to the next row"
+        );
+    }
+
+    /// First `k` with no selection lands on the last visible row.
+    #[test]
+    fn first_k_selects_last_visible_agent() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        agent.subagent_sessions.insert(
+            "child-a".into(),
+            stub_agent("sa-a", "child-a", "execute", "aaa-first", false),
+        );
+        agent.subagent_sessions.insert(
+            "child-b".into(),
+            stub_agent("sa-b", "child-b", "execute", "bbb-second", false),
+        );
+        let focused = {
+            let goal = agent.goal_state.as_ref().unwrap();
+            let mut snap = derive_workflow_snapshot(goal, &agent.subagent_sessions);
+            snap.view_phase_id = agent.workflow_view_phase;
+            focused_agent_rows(&snap)
+                .into_iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let _ = agent.handle_input(&char_key('k'), &ActionRegistry::defaults());
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some(focused.last().unwrap().as_str()),
+            "first k with no selection selects the last visible row"
+        );
+    }
+
+    /// Enter must not drill a selection that is no longer visible
+    /// (stale after phase change / agent removal).
+    #[test]
+    fn enter_does_not_drill_stale_invisible_selection() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        agent.subagent_sessions.insert(
+            "child-plan-hidden".into(),
+            stub_agent("sa-p", "child-plan-hidden", "plan", "planner", true),
+        );
+        agent.subagent_sessions.insert(
+            "child-exec-vis".into(),
+            stub_agent("sa-e", "child-exec-vis", "execute", "worker", false),
+        );
+        // Stale selection points at a plan agent while following execute.
+        agent.workflow_selected = Some(std::sync::Arc::from("child-plan-hidden"));
+        agent.workflow_view_phase = None;
+        let outcome = agent.handle_input(&key(KeyCode::Enter), &ActionRegistry::defaults());
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::WorkflowDrillDown { .. })
+            ),
+            "Enter must not drill a non-visible selection, got {outcome:?}"
+        );
+        assert!(
+            agent.workflow_selected.is_none(),
+            "stale selection must be pruned"
+        );
+    }
+
+    /// Esc closes the panel and clears selection + view override.
+    #[test]
+    fn esc_clears_selection_and_view_phase() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(make_goal_executing());
+        agent.show_goal_detail = true;
+        agent.subagent_sessions.insert(
+            "child-exec-1".into(),
+            stub_agent("sa-e", "child-exec-1", "execute", "worker", false),
+        );
+        let _ = agent.handle_input(&char_key('j'), &ActionRegistry::defaults());
+        assert!(agent.workflow_selected.is_some());
+        let _ = agent.handle_input(&key(KeyCode::Right), &ActionRegistry::defaults());
+        assert!(agent.workflow_view_phase.is_some());
+        let _ = agent.handle_input(&key(KeyCode::Esc), &ActionRegistry::defaults());
+        assert!(!agent.show_goal_detail);
+        assert_eq!(agent.workflow_view_phase, None);
+        assert_eq!(agent.workflow_selected, None);
     }
 }

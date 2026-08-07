@@ -53,6 +53,11 @@ pub struct WorkflowPhase {
 /// One agent row inside the active (or selected) phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowAgentRow {
+    /// Canonical row identity: the child's session id.
+    ///
+    /// Must match `workflow_selected` and `Action::WorkflowDrillDown` so
+    /// highlight, j/k selection, and Enter drill-down agree even when the
+    /// shell's `subagent_id` differs from `child_session_id`.
     pub id: String,
     pub label: String,
     pub phase_id: &'static str,
@@ -209,7 +214,9 @@ pub fn derive_workflow_snapshot(
                 }
             };
             WorkflowAgentRow {
-                id: info.subagent_id.to_string(),
+                // Child session id is the single source of truth for
+                // selection highlight, j/k order, and WorkflowDrillDown.
+                id: info.child_session_id.to_string(),
                 label,
                 phase_id: structured_or_sniffed_phase(info),
                 status: agent_status(info),
@@ -465,8 +472,41 @@ fn format_elapsed_ms(ms: u64) -> String {
     }
 }
 
+/// Agent rows the panel's agents column currently shows for `snap`.
+///
+/// When following the pipeline (`view_phase_id` is `None`), filters to the
+/// active phase and falls back to all agents only if that phase is empty.
+/// When browsing an explicit phase, returns exactly that phase's agents
+/// (empty when the phase has none — no silent mix-in of other phases).
+///
+/// Shared by render and j/k selection so the selection can never point at
+/// a row the panel is not drawing.
+pub fn focused_agent_rows(snap: &WorkflowSnapshot) -> Vec<&WorkflowAgentRow> {
+    let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
+    let agent_rows_for_active: Vec<&WorkflowAgentRow> = snap
+        .agents
+        .iter()
+        .filter(|a| a.phase_id == focus_phase_id)
+        .collect();
+    // Fall back to all agents only when FOLLOWING the pipeline and the
+    // active phase has none yet (e.g. a completed goal whose phase
+    // bookkeeping drained). Browsing to an explicitly chosen phase always
+    // shows exactly that phase's agents — an empty phase renders empty
+    // rather than silently mixing other phases' rows under its header.
+    if agent_rows_for_active.is_empty() {
+        if snap.view_phase_id.is_none() {
+            snap.agents.iter().collect()
+        } else {
+            Vec::new()
+        }
+    } else {
+        agent_rows_for_active
+    }
+}
+
 /// Render the two-column workflow panel into `area`.
 ///
+/// `selected` is the currently selected agent row id (`child_session_id`).
 /// Returns the number of rows written (for height budgeting).
 pub fn render_workflow_panel(
     buf: &mut Buffer,
@@ -544,26 +584,7 @@ pub fn render_workflow_panel(
     let phase_rows = snap.phases.len() as u16;
     // The agents column shows the VIEWED phase when the user browsed away
     // from the pipeline's active phase (Left/Right).
-    let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
-    let agent_rows_for_active: Vec<&WorkflowAgentRow> = snap
-        .agents
-        .iter()
-        .filter(|a| a.phase_id == focus_phase_id)
-        .collect();
-    // Fall back to all agents only when FOLLOWING the pipeline and the
-    // active phase has none yet (e.g. a completed goal whose phase
-    // bookkeeping drained). Browsing to an explicitly chosen phase always
-    // shows exactly that phase's agents — an empty phase renders empty
-    // rather than silently mixing other phases' rows under its header.
-    let agent_rows: Vec<&WorkflowAgentRow> = if agent_rows_for_active.is_empty() {
-        if snap.view_phase_id.is_none() {
-            snap.agents.iter().collect()
-        } else {
-            Vec::new()
-        }
-    } else {
-        agent_rows_for_active
-    };
+    let agent_rows = focused_agent_rows(snap);
 
     let body_rows = phase_rows.max(agent_rows.len() as u16).min(
         area.height.saturating_sub(rows_used),
@@ -679,23 +700,10 @@ pub fn render_workflow_panel(
 
 /// Preferred height for the workflow panel given a snapshot.
 pub fn workflow_panel_height(snap: &WorkflowSnapshot, max: u16) -> u16 {
-    // The agents column shows the VIEWED phase when the user browsed away
-    // (Left/Right); the height must budget for the same rows the render
-    // will draw, so it follows the view phase too — and, like the render,
-    // only falls back to all agents when following the pipeline.
-    let focus_phase_id = snap.view_phase_id.unwrap_or(snap.active_phase_id);
-    let agents_in_active = snap
-        .agents
-        .iter()
-        .filter(|a| a.phase_id == focus_phase_id)
-        .count()
-        .max(if snap.agents.is_empty() || snap.view_phase_id.is_some() {
-            0
-        } else {
-            // When the active phase is empty, we fall back to all agents.
-            snap.agents.len()
-        });
-    let body = (snap.phases.len()).max(agents_in_active) as u16;
+    // Budget for the same rows the render will draw (view phase + empty
+    // active-phase fallback when following the pipeline).
+    let agents_shown = focused_agent_rows(snap).len();
+    let body = (snap.phases.len()).max(agents_shown) as u16;
     // header + body, at least 4 (header + 3 phases)
     (1 + body.max(3)).min(max).max(4)
 }
@@ -835,24 +843,37 @@ mod tests {
         map.insert("v1".into(), verifier);
         map.insert("w1".into(), worker);
         let snap = derive_workflow_snapshot(&goal, &map);
+        // Row id is child_session_id (canonical for selection/drill-down).
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "v1").map(|a| a.phase_id),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-v1")
+                .map(|a| a.phase_id),
             Some("verify"),
             "verifier with keyword-free name must land in Verify via structured phase"
         );
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "w1").map(|a| a.phase_id),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-w1")
+                .map(|a| a.phase_id),
             Some("execute"),
             "worker with keyword-free name must land in Execute via structured phase"
         );
         // attempt 2 (1-based) => one retry shown.
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "v1").map(|a| a.retry),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-v1")
+                .map(|a| a.retry),
             Some(1),
             "structured attempt must drive the retry count without prose"
         );
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "w1").map(|a| a.retry),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-w1")
+                .map(|a| a.retry),
             Some(0)
         );
         // Phase totals group by the structured phase.
@@ -873,11 +894,17 @@ mod tests {
         map.insert("b".into(), stub_subagent("b", "planner", "plan", true));
         let snap = derive_workflow_snapshot(&goal, &map);
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "a").map(|a| a.phase_id),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-a")
+                .map(|a| a.phase_id),
             Some("verify")
         );
         assert_eq!(
-            snap.agents.iter().find(|a| a.id == "b").map(|a| a.phase_id),
+            snap.agents
+                .iter()
+                .find(|a| a.id == "child-b")
+                .map(|a| a.phase_id),
             Some("plan")
         );
     }
@@ -991,6 +1018,126 @@ mod tests {
         assert!(
             !text2.contains("quality-gate-1"),
             "browsing to an empty phase must not fall back to other phases, got:\n{text2}"
+        );
+    }
+
+    /// Row id is the child session id so selection highlight matches the
+    /// id stored in `workflow_selected` / used for `WorkflowDrillDown`
+    /// when `subagent_id ≠ child_session_id`.
+    #[test]
+    fn row_id_is_child_session_id_not_subagent_id() {
+        let goal = stub_goal(GoalDisplayPhase::Executing, false, false);
+        let mut map = HashMap::new();
+        let mut worker = stub_subagent("sa-distinct", "worker", "general-purpose", false);
+        // stub already sets child_session_id = "child-sa-distinct"
+        worker.goal_phase = Some(Arc::from("execute"));
+        map.insert("child-sa-distinct".into(), worker);
+        let snap = derive_workflow_snapshot(&goal, &map);
+        assert_eq!(snap.agents.len(), 1);
+        assert_eq!(
+            snap.agents[0].id, "child-sa-distinct",
+            "row id must be child_session_id for highlight/drill-down alignment"
+        );
+        assert_ne!(
+            snap.agents[0].id, "sa-distinct",
+            "row id must not be the shell subagent_id when they differ"
+        );
+    }
+
+    fn buffer_has_reversed(buf: &Buffer, area: Rect) -> bool {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell(ratatui::layout::Position::new(x, y))
+                    && cell.style().add_modifier.contains(Modifier::REVERSED)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell(ratatui::layout::Position::new(x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    /// Rendering with `selected = child_session_id` reverse-styles that
+    /// row's label; selecting the mismatched subagent_id does not.
+    #[test]
+    fn selected_highlight_matches_child_session_id() {
+        let goal = stub_goal(GoalDisplayPhase::Executing, false, false);
+        let mut map = HashMap::new();
+        let mut worker = stub_subagent("sa-1", "worker", "general-purpose", false);
+        worker.goal_phase = Some(Arc::from("execute"));
+        worker.description = Arc::from("unique-label-xyz");
+        map.insert("child-sa-1".into(), worker);
+        let snap = derive_workflow_snapshot(&goal, &map);
+        let area = Rect::new(0, 0, 100, 12);
+        let theme = Theme::current();
+
+        let mut buf_ok = Buffer::empty(area);
+        render_workflow_panel(&mut buf_ok, area, &snap, &theme, Some("child-sa-1"));
+        let text = buffer_text(&buf_ok, area);
+        assert!(
+            text.contains("unique-label-xyz"),
+            "agent label must render, got:\n{text}"
+        );
+        assert!(
+            buffer_has_reversed(&buf_ok, area),
+            "selecting by child_session_id must reverse-style the row"
+        );
+
+        let mut buf_bad = Buffer::empty(area);
+        render_workflow_panel(&mut buf_bad, area, &snap, &theme, Some("sa-1"));
+        assert!(
+            !buffer_has_reversed(&buf_bad, area),
+            "selecting by subagent_id must not highlight when ids differ"
+        );
+    }
+
+    /// When following the pipeline, focused rows exclude other phases'
+    /// agents; browsing an empty phase yields no rows.
+    #[test]
+    fn focused_rows_scope_to_active_or_viewed_phase() {
+        let goal = stub_goal(GoalDisplayPhase::Planning, true, false);
+        let mut map = HashMap::new();
+        let mut planner = stub_subagent("p1", "planner", "plan", false);
+        planner.goal_phase = Some(Arc::from("plan"));
+        let mut worker = stub_subagent("w1", "stage-2", "general-purpose", false);
+        worker.goal_phase = Some(Arc::from("execute"));
+        let mut skeptic = stub_subagent("s1", "quality-gate", "general-purpose", false);
+        skeptic.goal_phase = Some(Arc::from("verify"));
+        map.insert("child-p1".into(), planner);
+        map.insert("child-w1".into(), worker);
+        map.insert("child-s1".into(), skeptic);
+
+        let mut snap = derive_workflow_snapshot(&goal, &map);
+        assert_eq!(snap.active_phase_id, "plan");
+        let following = focused_agent_rows(&snap);
+        assert_eq!(following.len(), 1);
+        assert_eq!(following[0].id, "child-p1");
+        assert!(!following.iter().any(|a| a.id == "child-w1"));
+        assert!(!following.iter().any(|a| a.id == "child-s1"));
+
+        snap.view_phase_id = Some("execute");
+        let exec_rows = focused_agent_rows(&snap);
+        assert_eq!(exec_rows.len(), 1);
+        assert_eq!(exec_rows[0].id, "child-w1");
+
+        snap.agents.retain(|a| a.phase_id != "execute");
+        snap.view_phase_id = Some("execute");
+        assert!(
+            focused_agent_rows(&snap).is_empty(),
+            "browsed empty phase must yield no focused rows"
         );
     }
 }
