@@ -314,6 +314,33 @@ impl PtyHarness {
         }
     }
 
+    /// Block until the screen no longer contains `text` or `timeout`
+    /// expires.
+    ///
+    /// Mirrors [`wait_for_text`](Self::wait_for_text): checks the current
+    /// screen state first, then polls. Useful for dismissal assertions
+    /// where the key event (e.g. a bare ESC) may land after the key bytes
+    /// were injected.
+    pub fn wait_for_text_gone(&mut self, text: &str, timeout: Duration) -> Result<()> {
+        if !self.screen.contains(text) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!(
+                    "timed out after {timeout:?} waiting for text to disappear: {text:?}\nscreen contents:\n{}",
+                    self.screen.contents()
+                );
+            }
+            self.update(Duration::from_millis(50).min(remaining));
+            if !self.screen.contains(text) {
+                return Ok(());
+            }
+        }
+    }
+
     /// Return all raw bytes emitted by the child PTY so far.
     pub fn raw_output(&self) -> &[u8] {
         &self.raw_output

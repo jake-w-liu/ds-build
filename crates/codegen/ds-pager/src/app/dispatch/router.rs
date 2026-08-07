@@ -1255,17 +1255,21 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::WorkflowDrillDown { child_session_id } => {
-            // Switch the active view to the child agent whose session id
-            // matches (live subagent scrollback peek). No-op when the
-            // child session is gone.
-            if let Some(id) = app.agents.iter().find_map(|(id, a)| {
-                a.session
-                    .session_id
-                    .as_ref()
-                    .is_some_and(|s| s.0.as_ref() == child_session_id)
-                    .then_some(*id)
-            }) {
-                app.active_view = ActiveView::Agent(id);
+            // Peek the selected subagent's live scrollback: open the
+            // child view fullscreen within its owning agent (mirror of
+            // the dashboard's subagent attach). Goal subagents are
+            // created on `SubagentSpawned` inside the owning agent's
+            // `subagent_sessions`/`subagent_views` — they are never
+            // top-level `app.agents` entries, so matching `app.agents`
+            // by session id can never resolve one (the drill-down was a
+            // silent no-op for every goal subagent as shipped in
+            // v0.1.82). No-op when the child session is gone.
+            if let Some(agent) = app
+                .agents
+                .values_mut()
+                .find(|a| a.subagent_sessions.contains_key(child_session_id.as_str()))
+            {
+                agent.open_subagent_fullscreen(child_session_id);
             }
             vec![]
         }

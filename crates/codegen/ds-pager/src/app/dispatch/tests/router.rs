@@ -2304,3 +2304,94 @@ fn toggle_scroll_log_flips_recorder_and_reports_path() {
         "disable must be confirmed, got {texts:?}"
     );
 }
+
+/// Workflow drill-down opens the selected subagent's view fullscreen in
+/// its owning agent.
+///
+/// Regression: the v0.1.82 router arm searched `app.agents` by session
+/// id, but goal subagents live in the owning agent's
+/// `subagent_sessions`/`subagent_views` (created on `SubagentSpawned`) —
+/// they are never top-level `app.agents` entries, so the drill-down was
+/// a silent no-op for every goal subagent (live-observed: Enter in the
+/// goal panel left the overlay open).
+#[test]
+fn workflow_drill_down_opens_owned_subagent_view() {
+    use crate::app::subagent::SubagentInfo;
+    use crate::test_util::make_agent_view;
+
+    let mut app = test_app_with_agent();
+    let parent = AgentId(0);
+    let child_sid = "goal-planner-1";
+    {
+        let agent = app.agents.get_mut(&parent).unwrap();
+        agent.subagent_sessions.insert(
+            child_sid.to_string(),
+            SubagentInfo {
+                subagent_id: Arc::from("sa-1"),
+                child_session_id: Arc::from(child_sid),
+                description: Arc::from("plan the work"),
+                subagent_type: Arc::from("planner"),
+                persona: None,
+                role: None,
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                started_at: Instant::now(),
+                last_progress_at: Instant::now(),
+                finished: false,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                prompt: None,
+                child_cwd: None,
+                worktree_path: None,
+                goal_phase: Some(Arc::from("plan")),
+                goal_attempt: Some(1),
+                child_updates_replayed: false,
+            },
+        );
+        // The child view is what gets shown fullscreen on drill-down.
+        agent.subagent_views.insert(
+            child_sid.to_string(),
+            Box::new(make_agent_view(Some(child_sid), "/tmp")),
+        );
+    }
+    let _ = dispatch(
+        Action::WorkflowDrillDown {
+            child_session_id: child_sid.to_string(),
+        },
+        &mut app,
+    );
+    let agent = app.agents.get(&parent).unwrap();
+    assert_eq!(
+        agent.active_subagent.as_deref(),
+        Some(child_sid),
+        "drill-down must open the owned subagent view fullscreen"
+    );
+    // Unknown child ids stay no-ops.
+    let _ = dispatch(
+        Action::WorkflowDrillDown {
+            child_session_id: "never-spawned".to_string(),
+        },
+        &mut app,
+    );
+    let agent = app.agents.get(&parent).unwrap();
+    assert_eq!(agent.active_subagent.as_deref(), Some(child_sid));
+}

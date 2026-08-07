@@ -230,6 +230,20 @@ pub enum ScenarioStep {
     AssertContains { text: String },
     /// Assert text is absent from the current screen.
     AssertNotContains { text: String },
+    /// Poll until the text is absent from the screen (or `timeout_ms`).
+    /// Distinct from [`ScenarioStep::AssertNotContains`]: that asserts the
+    /// current snapshot; this waits for a state change (e.g. an overlay
+    /// dismissal whose key event may arrive late).
+    WaitForAbsent {
+        text: String,
+        #[serde(default = "default_wait_timeout_ms")]
+        timeout_ms: u64,
+    },
+    /// Debug aid: snapshot the current screen into the run artifact dir
+    /// without failing the run. Settles the event loop for 800ms first so
+    /// late-arriving key events (bare ESC disambiguation) land before the
+    /// capture.
+    CaptureScreen { label: String },
     /// Type literal text into the TUI.
     TypeText { text: String },
     /// Inject keys using ptyctl notation, for example `<Enter>`, `<Esc>`, `jj`.
@@ -720,6 +734,28 @@ fn run_step(
             if harness.contains_text(text) {
                 bail!("expected screen not to contain {text:?}");
             }
+        }
+        ScenarioStep::WaitForAbsent { text, timeout_ms } => {
+            harness
+                .wait_for_text_gone(text, Duration::from_millis(*timeout_ms))
+                .with_context(|| format!("wait for text gone {text:?}"))?;
+        }
+        // Debug aid: snapshot the current screen into the run artifact
+        // dir without failing the run. Settles first so late key events
+        // (bare-ESC disambiguation) have landed.
+        ScenarioStep::CaptureScreen { label } => {
+            harness.update(Duration::from_millis(800));
+            let artifacts = capture_artifacts(
+                harness,
+                run_dir,
+                step_number,
+                label,
+                "capture",
+            )
+            .map_err(|e| anyhow!("capture screen {label:?}: {e}"))?;
+            let mut outcome = StepOutcome::passed(step_number, step);
+            outcome.artifacts = artifacts;
+            return Ok(outcome);
         }
         ScenarioStep::TypeText { text } => {
             harness
@@ -1863,6 +1899,8 @@ fn action_name(step: &ScenarioStep) -> &'static str {
         ScenarioStep::WaitForText { .. } => "wait_for_text",
         ScenarioStep::AssertContains { .. } => "assert_contains",
         ScenarioStep::AssertNotContains { .. } => "assert_not_contains",
+        ScenarioStep::WaitForAbsent { .. } => "wait_for_absent",
+        ScenarioStep::CaptureScreen { .. } => "capture_screen",
         ScenarioStep::TypeText { .. } => "type_text",
         ScenarioStep::Keys { .. } => "keys",
         ScenarioStep::Paste { .. } => "paste",

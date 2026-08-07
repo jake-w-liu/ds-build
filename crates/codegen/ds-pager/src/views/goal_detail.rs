@@ -462,6 +462,15 @@ pub fn goal_detail_area(
     } else {
         0
     };
+    // "Decisions" section: leading blank + header + up to 6 entries
+    // (most recent first). Must be in the height budget or the section
+    // clips the commands hint below it once the first decision lands
+    // (regression: v0.1.82 shipped the section without a height term).
+    let decisions_lines = if goal.decisions.is_empty() {
+        0u16
+    } else {
+        2 + goal.decisions.len().min(6) as u16
+    };
     // "Completion review" section: blank + header + 3 content lines.
     // Rendered only when the goal has at least one classifier signal.
     let completion_review_lines = if has_classifier_activity(goal) {
@@ -482,6 +491,7 @@ pub fn goal_detail_area(
         + per_model_lines
         + completion_review_lines
         + history_lines
+        + decisions_lines
         + 1;
     let v_margin = 2u16;
     let h = content_h.min(screen.height.saturating_sub(v_margin * 2));
@@ -1242,6 +1252,53 @@ mod tests {
         goal.status = GoalDisplayStatus::UserPaused;
         let with_hint = goal_detail_area(screen, &goal, &[], &HashMap::new()).height;
         assert_eq!(with_hint, baseline + 1);
+    }
+
+    #[test]
+    fn goal_detail_area_grows_for_decisions_and_hint_stays_visible() {
+        // Regression: the Decisions section shipped in v0.1.82 without a
+        // height-budget term, so once the first decision landed the
+        // section (and the commands hint below it) was clipped from the
+        // overlay.
+        use ds_shell::session::goal_tracker::{GoalDecisionEntry, GoalDecisionKind};
+        let screen = Rect::new(0, 0, 120, 40);
+        let mut goal = make_goal();
+        let baseline = goal_detail_area(screen, &goal, &[], &HashMap::new()).height;
+        goal.decisions = vec![
+            GoalDecisionEntry {
+                timestamp: "t1".into(),
+                kind: GoalDecisionKind::PlanAccepted,
+                detail: "plan.md".into(),
+                round: None,
+            },
+            GoalDecisionEntry {
+                timestamp: "t2".into(),
+                kind: GoalDecisionKind::Verdict,
+                detail: "achieved".into(),
+                round: Some(1),
+            },
+        ];
+        let with_decisions = goal_detail_area(screen, &goal, &[], &HashMap::new()).height;
+        // blank + header + 2 entries = +4 rows in the height budget.
+        assert_eq!(with_decisions, baseline + 4);
+
+        let text = render_to_text(&goal);
+        assert!(
+            text.contains("Decisions:"),
+            "expected decisions header, got:\n{text}"
+        );
+        assert!(
+            text.contains("plan_accepted"),
+            "expected plan_accepted row, got:\n{text}"
+        );
+        assert!(
+            text.contains("verdict"),
+            "expected verdict row, got:\n{text}"
+        );
+        assert!(
+            text.contains("j/k select"),
+            "commands hint must stay visible once decisions render, got:\n{text}"
+        );
     }
 
     /// Helper: render the goal-detail modal at a known size and return
