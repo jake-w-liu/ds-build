@@ -35,8 +35,13 @@ impl AgentView {
                 .subagent_sessions
                 .values()
                 .filter(|info| {
+                    // Match the panel's OWN phase assignment (structured
+                    // wire phase when present, keyword sniffer otherwise)
+                    // so the selection can never skip a row the panel
+                    // shows — a non-goal subagent sniffed into Execute
+                    // must stay selectable while browsing Execute.
                     view_phase.is_none_or(|vp| {
-                        info.goal_phase.as_deref() == Some(vp)
+                        crate::views::workflow_panel::structured_or_sniffed_phase(info) == vp
                     })
                 })
                 .collect();
@@ -453,10 +458,12 @@ impl AgentView {
                 // swallowed ALL keys, so typed text vanished and letters
                 // like g/q/j/k in it randomly closed the panel or moved
                 // the selection). Only the panel's own keys are owned,
-                // and only while the draft is empty — once the user has
-                // typed anything, Enter sends, Esc clears, and the
-                // letters type like normal.
-                let prompt_empty = self.prompt.text().is_empty();
+                // and only while the prompt has no content — text OR
+                // image chips (mirror of the Esc policy's `has_content`)
+                // — once the user has typed anything, Enter sends, Esc
+                // clears, and the letters type like normal.
+                let prompt_empty =
+                    self.prompt.text().is_empty() && self.prompt.images.is_empty();
                 let panel_key = matches!(
                     key.code,
                     KeyCode::Esc
@@ -1834,6 +1841,204 @@ mod goal_panel_input_tests {
                 InputOutcome::Action(Action::WorkflowDrillDown { .. })
             ),
             "empty-draft Enter with no selection must not drill down, got {outcome:?}"
+        );
+    }
+}
+
+/// Image chips count as prompt content: with an image attached (and no
+/// text), Enter must not be panel-owned — it falls through so the image
+/// can be sent, exactly like a typed draft.
+#[cfg(test)]
+mod goal_panel_image_chip_tests {
+    use super::test_fixtures::make_agent;
+    use super::AgentPane;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
+    use crate::app::app_view::InputOutcome;
+    use crate::prompt_images::PastedImage;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn panel_open_enter_with_image_chip_does_not_drill() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(GoalDisplayState {
+            goal_id: "g-1".into(),
+            objective: "o".into(),
+            status: GoalDisplayStatus::Active,
+            phase: GoalDisplayPhase::Planning,
+            token_budget: None,
+            tokens_used: 0,
+            elapsed_ms: 0,
+            total_deliverables: 0,
+            completed_deliverables: 0,
+            current_deliverable_id: None,
+            current_deliverable_title: None,
+            current_subagent_role: None,
+            total_worker_rounds: 0,
+            total_verify_rounds: 0,
+            live_subagent_tokens: None,
+            live_tokens_by_model: Vec::new(),
+            live_context_pct: None,
+            live_turn_count: None,
+            live_tool_call_count: None,
+            last_event: None,
+            last_event_detail: None,
+            last_event_timestamp: None,
+            token_baseline: 0,
+            finished_subagent_tokens: 0,
+            deliverables: vec![],
+            pause_message: None,
+            classifier_runs_attempted: None,
+            classifier_max_runs: None,
+            last_classifier_verdict: None,
+            last_classifier_details_path: None,
+            last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
+            verifying_completion: false,
+            planning: true,
+            received_at: std::time::Instant::now(),
+            elapsed_floor_ms: 0,
+        });
+        agent.show_goal_detail = true;
+        agent.prompt.images.push(PastedImage {
+            element_id: ds_ratatui_textarea::ElementId::from_raw(1),
+            display_number: 1,
+            mime_type: "image/png".into(),
+            dimensions: Some((640, 480)),
+            byte_len: 1536,
+            encoded_bytes: Some(std::sync::Arc::from(vec![1u8])),
+            source_path: None,
+            staged_temp_path: None,
+            session_image_path: None,
+            preview: Default::default(),
+        });
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+        assert!(
+            !matches!(
+                outcome,
+                InputOutcome::Action(Action::WorkflowDrillDown { .. })
+            ),
+            "Enter with an image chip must not drill down, got {outcome:?}"
+        );
+        assert!(
+            agent.show_goal_detail,
+            "panel stays open while the image is in the prompt"
+        );
+    }
+}
+
+/// The j/k selection must match the PANEL's phase assignment, not the raw
+/// wire field: a non-goal subagent (no goal_phase, keyword-sniffed into
+/// Execute) is shown in the panel's Execute column and must stay
+/// selectable while browsing Execute.
+#[cfg(test)]
+mod goal_panel_selection_sniff_tests {
+    use super::test_fixtures::make_agent;
+    use super::AgentPane;
+    use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
+    use crate::app::subagent::SubagentInfo;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    #[test]
+    fn browse_selection_includes_sniffed_non_goal_agents() {
+        let mut agent = make_agent();
+        agent.set_active_pane(AgentPane::Prompt, true);
+        agent.goal_state = Some(GoalDisplayState {
+            goal_id: "g-1".into(),
+            objective: "o".into(),
+            status: GoalDisplayStatus::Active,
+            phase: GoalDisplayPhase::Planning,
+            token_budget: None,
+            tokens_used: 0,
+            elapsed_ms: 0,
+            total_deliverables: 0,
+            completed_deliverables: 0,
+            current_deliverable_id: None,
+            current_deliverable_title: None,
+            current_subagent_role: None,
+            total_worker_rounds: 0,
+            total_verify_rounds: 0,
+            live_subagent_tokens: None,
+            live_tokens_by_model: Vec::new(),
+            live_context_pct: None,
+            live_turn_count: None,
+            live_tool_call_count: None,
+            last_event: None,
+            last_event_detail: None,
+            last_event_timestamp: None,
+            token_baseline: 0,
+            finished_subagent_tokens: 0,
+            deliverables: vec![],
+            pause_message: None,
+            classifier_runs_attempted: None,
+            classifier_max_runs: None,
+            last_classifier_verdict: None,
+            last_classifier_details_path: None,
+            last_classifier_details_exists: false,
+            last_classifier_infra_fallback: false,
+            decisions: Vec::new(),
+            verifying_completion: false,
+            planning: true,
+            received_at: std::time::Instant::now(),
+            elapsed_floor_ms: 0,
+        });
+        agent.subagent_sessions.insert(
+            "bg-1".into(),
+            SubagentInfo {
+                subagent_id: Arc::from("bg-1"),
+                child_session_id: Arc::from("bg-1"),
+                // No goal_phase on the wire → keyword-sniffed to execute.
+                description: Arc::from("stage-2 build"),
+                subagent_type: Arc::from("general-purpose"),
+                persona: None,
+                role: None,
+                model: None,
+                context_source: None,
+                resumed_from: None,
+                capability_mode: None,
+                context_normalized: false,
+                parent_prompt_id: None,
+                started_at: Instant::now(),
+                last_progress_at: Instant::now(),
+                finished: false,
+                status: None,
+                error: None,
+                duration_ms: None,
+                tool_calls: None,
+                turns: None,
+                turn_count: None,
+                tool_call_count: None,
+                tokens_used: None,
+                context_window_tokens: None,
+                context_usage_pct: None,
+                tools_used: Vec::new(),
+                error_count: None,
+                activity_label: None,
+                is_background: false,
+                pending_kill: false,
+                kill_requested_at: None,
+                scrollback_entry_id: None,
+                prompt: None,
+                child_cwd: None,
+                worktree_path: None,
+                goal_phase: None,
+                goal_attempt: None,
+                child_updates_replayed: false,
+            },
+        );
+        agent.workflow_view_phase = Some("execute");
+        agent.move_workflow_selection(1);
+        assert_eq!(
+            agent.workflow_selected.as_deref(),
+            Some("bg-1"),
+            "sniffed non-goal agents must stay selectable in the viewed phase"
         );
     }
 }

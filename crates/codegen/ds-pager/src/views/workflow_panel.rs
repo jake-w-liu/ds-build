@@ -160,7 +160,7 @@ fn retry_count(info: &SubagentInfo) -> u32 {
 /// `goal_phase = "verify"` on the wire, not because its description matched
 /// a keyword. Unknown structured values default to Execute (they are not
 /// plan/verify agents by the shell's own accounting).
-fn structured_or_sniffed_phase(info: &SubagentInfo) -> &'static str {
+pub(crate) fn structured_or_sniffed_phase(info: &SubagentInfo) -> &'static str {
     match info.goal_phase.as_deref() {
         Some("plan") => "plan",
         Some("verify") => "verify",

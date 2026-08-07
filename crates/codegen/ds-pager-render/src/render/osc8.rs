@@ -792,7 +792,9 @@ mod tests {
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(overlay.links()[0].col_start, 10);
-        assert_eq!(overlay.links()[0].col_end, 10 + 12);
+        // "https://www.deepseek.com" = 24 chars; col_end = x_offset + URL
+        // width (mirror of `scan_detects_url_in_plain_text`).
+        assert_eq!(overlay.links()[0].col_end, 10 + 24);
     }
 
     // ── File path detection ──

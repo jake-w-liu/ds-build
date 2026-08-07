@@ -88,8 +88,14 @@ pub fn detect() -> ColorLevel {
 /// The raw cached detection, without the terminal-native lock cap.
 fn detect_raw() -> ColorLevel {
     *COLOR_LEVEL.get_or_init(|| {
-        // Explicit opt-out via NO_COLOR takes priority.
-        if std::env::var_os("NO_COLOR").is_some() {
+        // NO_COLOR is a runtime product preference. Test binaries built
+        // with the `test-support` feature must be hermetic: the ambient
+        // shell environment (e.g. `NO_COLOR=1` in CI or a user shell)
+        // must not collapse the theme to all-Reset, which makes every
+        // color-based assertion match every span (and every cell look
+        // like a cursor). Tests that exercise the NO_COLOR path pass the
+        // level explicitly.
+        if std::env::var_os("NO_COLOR").is_some() && !cfg!(feature = "test-support") {
             return ColorLevel::None;
         }
 
