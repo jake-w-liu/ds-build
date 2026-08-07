@@ -100,8 +100,13 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
         Err(first_err) => {
-            // Try sanitizing: parse as Value, strip unknown tools, retry.
+            // Try sanitizing: parse as Value, rewrite DeepSeek's echoed
+            // reasoning.effort ("max") into async-openai's token set, patch
+            // action-less/queries-shaped web_search_call items, strip
+            // unknown tools, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
+                ds_sampling_types::normalize_responses_effort_for_parse(&mut value);
+                ds_sampling_types::normalize_web_search_call_items(&mut value);
                 // Strip tools that async_openai's rs::Tool can't deserialize
                 // (e.g., DeepSeek-specific "x_search"). Instead of maintaining a
                 // hardcoded allowlist, try deserializing each tool entry —
@@ -1209,6 +1214,7 @@ impl SamplingClient {
         ds_sampling_types::patch_reasoning_text_types(&mut request_body);
         // DeepSeek Responses effort tokens (max / none) vs async-openai (xhigh / minimal).
         ds_sampling_types::patch_deepseek_responses_effort(&mut request_body);
+        ds_sampling_types::patch_deepseek_web_search_input_items(&mut request_body);
         let http_request = ds_headers
             .apply(self.post(self.endpoint("responses")))
             .json(&request_body);
@@ -1260,7 +1266,16 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
+        // DeepSeek's Responses API diverges from async-openai's typed
+        // shapes in three ways, so the body is normalized before typed
+        // parsing: it echoes `reasoning.effort: "max"` (unknown variant),
+        // sends `reasoning.summary` as an empty array, and uses
+        // `web_search_call` actions shaped `{type: "search", queries: […]}`.
+        let mut body_value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|e| SamplingError::Serialization(e))?;
+        ds_sampling_types::normalize_responses_effort_for_parse(&mut body_value);
+        ds_sampling_types::normalize_web_search_call_items(&mut body_value);
+        let response_obj = serde_json::from_value::<rs::Response>(body_value).map_err(|e| {
             let raw_body = String::from_utf8_lossy(&bytes);
             tracing::error!(
                 error = %e,
@@ -1355,6 +1370,7 @@ impl SamplingClient {
         }
         ds_sampling_types::patch_reasoning_text_types(&mut request_body);
         ds_sampling_types::patch_deepseek_responses_effort(&mut request_body);
+        ds_sampling_types::patch_deepseek_web_search_input_items(&mut request_body);
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self
@@ -2895,3 +2911,61 @@ mod tests {
         ));
     }
 }
+
+    /// DeepSeek streams `web_search_call` items in `output_item.added`
+    /// WITHOUT the `action` field (it arrives only in the terminal
+    /// `output_item.done`); async-openai requires it, so the sanitize
+    /// path must insert a placeholder for the event to parse. The L2
+    /// only reads the done event's real action.
+    #[test]
+    fn deserialize_output_item_added_web_search_call_without_action() {
+        let sse = r#"{
+            "type": "response.output_item.added",
+            "item": {
+                "type": "web_search_call",
+                "id": "call_00_test",
+                "status": "in_progress"
+            },
+            "output_index": 1,
+            "sequence_number": 66
+        }"#;
+        let event = deserialize_response_event(sse).expect("sanitized parse must succeed");
+        let rs::ResponseStreamEvent::ResponseOutputItemAdded(e) = event else {
+            panic!("expected ResponseOutputItemAdded");
+        };
+        let rs::OutputItem::WebSearchCall(ws) = e.item else {
+            panic!("expected WebSearchCall item");
+        };
+        assert_eq!(ws.id, "call_00_test");
+        assert_eq!(ws.status, rs::WebSearchToolCallStatus::InProgress);
+    }
+
+    /// The server echoes `reasoning.effort: "max"` (DeepSeek token);
+    /// the parse must succeed and round-trip to the product's Max.
+    #[test]
+    fn deserialize_completed_event_with_echoed_max_effort() {
+        let sse = r#"{
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 0,
+                "model": "ds-build",
+                "status": "completed",
+                "output": [],
+                "reasoning": { "effort": "max", "summary": [] }
+            }
+        }"#;
+        let event = deserialize_response_event(sse).expect("max effort must parse");
+        let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
+            panic!("expected ResponseCompleted");
+        };
+        let effort = e.response.reasoning.and_then(|r| r.effort).expect("effort");
+        assert_eq!(
+            ds_sampling_types::ReasoningEffort::from_responses_api(effort),
+            ds_sampling_types::ReasoningEffort::Max
+        );
+    }
+
+

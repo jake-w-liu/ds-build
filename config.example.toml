@@ -46,7 +46,8 @@ default_reasoning_effort = "max"
 [model.deepseek-v4-pro]
 api_key = "sk-PASTE_YOUR_DEEPSEEK_API_KEY_HERE"
 base_url = "https://api.deepseek.com/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
+supports_backend_search = true
 context_window = 1000000
 supports_reasoning_effort = true
 reasoning_effort = "max"
@@ -55,7 +56,8 @@ reasoning_efforts = ["high", "max"]
 [model.deepseek-v4-flash]
 api_key = "sk-PASTE_YOUR_DEEPSEEK_API_KEY_HERE"
 base_url = "https://api.deepseek.com/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
+supports_backend_search = true
 context_window = 1000000
 supports_reasoning_effort = true
 reasoning_effort = "max"

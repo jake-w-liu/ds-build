@@ -2301,6 +2301,110 @@ pub fn patch_deepseek_responses_effort(body: &mut serde_json::Value) {
     }
 }
 
+/// Rewrite DeepSeek's echoed `reasoning.effort` back into async-openai's
+/// token set before typed deserialization.
+///
+/// The Responses API **echoes the requested effort back** in the response's
+/// `reasoning.effort` (verified live: sending `"max"` returns
+/// `{"reasoning":{"effort":"max",...}}`). async-openai's `ReasoningEffort`
+/// only knows `none|minimal|low|medium|high|xhigh` and rejects `"max"`, so
+/// typed parsing of every event/response carrying the echo fails with
+/// `unknown variant 'max'`. This is the parse-side mirror of
+/// [`patch_deepseek_responses_effort`]: DeepSeek tokens (`none|low|high|max`)
+/// are mapped into the async-openai set before parsing; `from_responses_api`
+/// maps `xhigh` back to the product's `Max`, so the user-visible effort
+/// stays the DeepSeek token throughout.
+///
+/// DeepSeek also sends `reasoning.summary` as an empty ARRAY, while
+/// async-openai expects a string/map — the array is dropped (the L2 uses
+/// the streamed summary deltas, never the echoed summary).
+///
+/// Applies to both the nested streaming payload (`/response/reasoning/…`)
+/// and the standalone non-streaming response body (`/reasoning/…`).
+pub fn normalize_responses_effort_for_parse(body: &mut serde_json::Value) {
+    for pointer in ["/reasoning/effort", "/response/reasoning/effort"] {
+        let Some(effort) = body
+            .pointer_mut(pointer)
+            .and_then(|v| v.as_str().map(|s| s.to_owned()))
+        else {
+            continue;
+        };
+        let rewritten = match effort.as_str() {
+            "max" => "xhigh",
+            _ => continue, // none/low/high are valid async-openai tokens
+        };
+        if let Some(slot) = body.pointer_mut(pointer) {
+            *slot = serde_json::Value::String(rewritten.into());
+        }
+    }
+    for parent in ["/reasoning", "/response/reasoning"] {
+        if let Some(reasoning) = body.pointer_mut(parent).and_then(|v| v.as_object_mut())
+            && reasoning.get("summary").is_some_and(|v| v.is_array())
+        {
+            reasoning.remove("summary");
+        }
+    }
+}
+
+/// Normalize one `web_search_call` item into async-openai's shape.
+///
+/// DeepSeek diverges from OpenAI on two points (both verified live):
+/// - `response.output_item.added` streams the item WITHOUT `action` (the
+///   action arrives only in the terminal `output_item.done` event), while
+///   async-openai's `WebSearchToolCall` requires it;
+/// - `search` actions carry `queries: [String]` where async-openai
+///   requires `query: String`.
+///
+/// The sanitized values are never consumed for their fidelity: the L2
+/// transform only reads the done event's `WebSearchCall` for the
+/// conversation item, and the placeholder/rewritten query is only a
+/// parse-enabler.
+pub fn normalize_web_search_call_item(item: &mut serde_json::Value) {
+    let Some(obj) = item.as_object_mut() else {
+        return;
+    };
+    if obj.get("type").and_then(|t| t.as_str()) != Some("web_search_call") {
+        return;
+    }
+    let action = obj
+        .entry("action")
+        .or_insert_with(|| serde_json::json!({"type": "search"}));
+    let Some(action_obj) = action.as_object_mut() else {
+        return;
+    };
+    if action_obj.get("type").and_then(|t| t.as_str()) == Some("search")
+        && action_obj.get("query").is_none()
+    {
+        let query = action_obj
+            .get("queries")
+            .and_then(|q| q.as_array())
+            .and_then(|qs| qs.first())
+            .and_then(|q| q.as_str())
+            .unwrap_or("");
+        action_obj.insert("query".into(), serde_json::json!(query));
+        action_obj.remove("queries");
+    }
+}
+
+/// Walk every `web_search_call` item in a payload and normalize it for
+/// async-openai typed parsing. Covers the streamed event shape
+/// (`/item`), and both payload shapes' `output` arrays
+/// (`/output`, `/response/output`).
+pub fn normalize_web_search_call_items(value: &mut serde_json::Value) {
+    for path in ["/item", "/output", "/response/output"] {
+        let Some(slot) = value.pointer_mut(path) else {
+            continue;
+        };
+        if slot.is_object() {
+            normalize_web_search_call_item(slot);
+        } else if let Some(arr) = slot.as_array_mut() {
+            for item in arr.iter_mut() {
+                normalize_web_search_call_item(item);
+            }
+        }
+    }
+}
+
 /// Convert a ConversationItem to Responses API InputItem(s)
 fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
     match item {
@@ -9838,3 +9942,173 @@ mod tests {
         );
     }
 }
+
+/// The Responses API echoes the requested effort back
+/// (`reasoning.effort: "max"`); the parse-side normalization must rewrite
+/// it into async-openai's token set at both payload shapes.
+#[cfg(test)]
+mod responses_effort_parse_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_max_effort_at_both_payload_paths() {
+        // Streaming event shape: the response object is nested.
+        let mut event_body =
+            serde_json::json!({"type": "response.completed", "response": {
+                "reasoning": {"effort": "max", "summary": []},
+            }});
+        normalize_responses_effort_for_parse(&mut event_body);
+        assert_eq!(
+            event_body.pointer("/response/reasoning/effort"),
+            Some(&serde_json::json!("xhigh")),
+            "streaming payload effort must be rewritten for async-openai"
+        );
+
+        // Non-streaming response body shape: reasoning at the root.
+        let mut response_body = serde_json::json!({"reasoning": {"effort": "max"}});
+        normalize_responses_effort_for_parse(&mut response_body);
+        assert_eq!(
+            response_body.pointer("/reasoning/effort"),
+            Some(&serde_json::json!("xhigh")),
+            "response body effort must be rewritten for async-openai"
+        );
+    }
+
+    #[test]
+    fn leaves_valid_tokens_untouched() {
+        for token in ["none", "low", "high"] {
+            let mut body = serde_json::json!({"reasoning": {"effort": token}});
+            normalize_responses_effort_for_parse(&mut body);
+            assert_eq!(
+                body.pointer("/reasoning/effort"),
+                Some(&serde_json::json!(token)),
+                "{token} is a valid async-openai token and must stay"
+            );
+        }
+    }
+
+    /// Round-trip: DeepSeek token `max` on the wire → parse → product Max.
+    #[test]
+    fn max_effort_round_trips_to_product_max() {
+        let mut body = serde_json::json!({"reasoning": {"effort": "max"}});
+        normalize_responses_effort_for_parse(&mut body);
+        let effort: crate::rs::ReasoningEffort =
+            serde_json::from_value(body.pointer("/reasoning/effort").unwrap().clone()).unwrap();
+        assert_eq!(
+            crate::ReasoningEffort::from_responses_api(effort),
+            crate::ReasoningEffort::Max,
+            "the product-visible effort must stay the DeepSeek token"
+        );
+    }
+}
+
+    /// DeepSeek sends `reasoning.summary` as an empty array; async-openai
+    /// expects a string/map. The sanitizer must drop the array so typed
+    /// parsing succeeds (the L2 uses the streamed summary deltas).
+    #[test]
+    fn drops_array_summary_at_both_payload_paths() {
+        let mut event_body = serde_json::json!({"type": "response.completed", "response": {
+            "reasoning": {"effort": "high", "summary": []},
+        }});
+        normalize_responses_effort_for_parse(&mut event_body);
+        assert!(
+            event_body.pointer("/response/reasoning/summary").is_none(),
+            "array summary must be dropped from the streaming payload"
+        );
+        assert_eq!(
+            event_body.pointer("/response/reasoning/effort"),
+            Some(&serde_json::json!("high")),
+            "valid effort stays untouched"
+        );
+
+        let mut response_body = serde_json::json!({"reasoning": {"summary": [], "effort": "max"}});
+        normalize_responses_effort_for_parse(&mut response_body);
+        assert!(
+            response_body.pointer("/reasoning/summary").is_none(),
+            "array summary must be dropped from the response body"
+        );
+        assert_eq!(
+            response_body.pointer("/reasoning/effort"),
+            Some(&serde_json::json!("xhigh")),
+            "max effort still rewritten"
+        );
+    }
+
+/// Rewrite `web_search_call` input items back into DeepSeek's wire shape.
+///
+/// DeepSeek's Responses INPUT schema requires a `search` action to carry
+/// `queries: [String]` (verified live: `action.query` alone is rejected
+/// with `missing field 'queries'`). The parse-side sanitizer
+/// ([`normalize_web_search_call_item`]) rewrites the RESPONSE's `queries`
+/// into async-openai's `query` so the typed parse succeeds, so a
+/// `web_search_call` item in the conversation carries `action.query`.
+/// When that conversation is re-sent as INPUT (a subsequent turn in the
+/// same goal/turn loop), the item must go back to the DeepSeek shape or
+/// the server 400s. This is the request-side mirror of the parse-side
+/// sanitizer — `query` becomes `queries: [query]`.
+pub fn patch_deepseek_web_search_input_items(body: &mut serde_json::Value) {
+    let Some(input) = body.pointer_mut("/input") else {
+        return;
+    };
+    let Some(items) = input.as_array_mut() else {
+        return;
+    };
+    for item in items.iter_mut() {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        if obj.get("type").and_then(|t| t.as_str()) != Some("web_search_call") {
+            continue;
+        }
+        let Some(action) = obj.get_mut("action").and_then(|a| a.as_object_mut()) else {
+            continue;
+        };
+        if action.get("type").and_then(|t| t.as_str()) != Some("search") {
+            continue;
+        }
+        if action.get("queries").is_none() {
+            if let Some(query) = action.remove("query") {
+                action.insert("queries".into(), serde_json::json!([query]));
+            }
+        }
+    }
+}
+
+    /// A web_search_call item in the conversation (carrying async-openai's
+    /// `action.query` after the parse-side sanitizer) must be restored to
+    /// DeepSeek's input shape (`action.queries`) before re-sending — the
+    /// server rejects `action.query` with `missing field 'queries'`.
+    #[test]
+    fn request_patch_restores_deepseek_queries_shape() {
+        let mut body = serde_json::json!({
+            "input": [
+                {"type": "web_search_call", "id": "call_1", "status": "completed",
+                 "action": {"type": "search", "query": "ptyctl cli run"}},
+                {"type": "web_search_call", "id": "call_2", "status": "completed",
+                 "action": {"type": "open_page", "url": "https://example.com"}},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "hi"}]}
+            ]
+        });
+        patch_deepseek_web_search_input_items(&mut body);
+        let search = &body["input"][0];
+        assert_eq!(
+            search["action"]["queries"],
+            serde_json::json!(["ptyctl cli run"]),
+            "search action must carry queries"
+        );
+        assert!(
+            search["action"].get("query").is_none(),
+            "query must be replaced by queries"
+        );
+        // Non-search actions and non-web-search items stay untouched.
+        assert_eq!(
+            body["input"][1]["action"]["url"],
+            serde_json::json!("https://example.com")
+        );
+        assert_eq!(body["input"][2]["role"], serde_json::json!("user"));
+        // No input array → no-op.
+        let mut no_input = serde_json::json!({"model": "x"});
+        patch_deepseek_web_search_input_items(&mut no_input);
+        assert_eq!(no_input, serde_json::json!({"model": "x"}));
+    }

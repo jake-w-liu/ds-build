@@ -825,7 +825,9 @@ pub fn parse_remote_model_value(
             "messages" => Some(crate::sampling::ApiBackend::Messages),
             _ => None,
         })
-        .unwrap_or_default();
+        // The fetched catalog (DeepSeek's /v1/models) does not advertise
+        // apiBackend; the Responses API is the product default for it.
+        .unwrap_or(crate::sampling::ApiBackend::Responses);
     Some(crate::agent::config::ModelEntryConfig {
         id,
         model,
@@ -895,7 +897,10 @@ pub fn parse_remote_model_value(
             .or_else(|| obj.get("supports_backend_search"))
             .or_else(|| meta.and_then(|m| m.get("supportsBackendSearch")))
             .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+            // The fetched catalog (DeepSeek's /v1/models) does not
+            // advertise this flag; DeepSeek's Responses API natively
+            // hosts web_search + x_search, so default it on.
+            .unwrap_or(true),
         compactions_remaining: obj
             .get("compactionsRemaining")
             .or_else(|| obj.get("compactions_remaining"))

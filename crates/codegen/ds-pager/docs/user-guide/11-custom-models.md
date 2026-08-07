@@ -59,11 +59,15 @@ DS supports three API backends. Set `api_backend` in your `[model.*]` config to 
 
 | Value | API | Default |
 |-------|-----|---------|
-| `"chat_completions"` | OpenAI Chat Completions (`/v1/chat/completions`) | Yes |
-| `"responses"` | OpenAI Responses (`/v1/responses`) | |
+| `"chat_completions"` | OpenAI Chat Completions (`/v1/chat/completions`) | |
+| `"responses"` | OpenAI Responses (`/v1/responses`) | Yes |
 | `"messages"` | Anthropic Messages (`/v1/messages`) | |
 
-When you omit `api_backend`, DS uses `chat_completions`.
+When you omit `api_backend`, DS uses `responses` for models discovered from
+the DeepSeek catalog, and `chat_completions` otherwise. The shipped example
+config sets DeepSeek models to `"responses"` explicitly — it is the
+recommended protocol for DeepSeek (native reasoning items, tool calls,
+structured output, and usage accounting).
 
 To send provider-specific authentication or version headers -- for example, Anthropic's `x-api-key` -- use the `extra_headers` field described below. DS sends those headers verbatim with every request to the endpoint.
 
@@ -302,6 +306,13 @@ web_search = "my-custom-model"
 model = "my-custom-model"
 supports_backend_search = true
 ```
+
+DeepSeek models default to `supports_backend_search = true` (the fetched
+catalog default). With the Responses backend this uses DeepSeek's **native**
+`web_search`/`x_search` server-side tools — the model searches and grounds
+its answers on the API side, and the client-side DuckDuckGo-scraping
+`web_search` function tool is dropped from the request. Set
+`supports_backend_search = false` to force the client-side tool instead.
 
 ---
 
