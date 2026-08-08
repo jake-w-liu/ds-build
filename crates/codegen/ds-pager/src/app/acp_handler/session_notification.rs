@@ -955,13 +955,14 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 let last_classifier_details_exists = last_classifier_details_path
                     .as_deref()
                     .is_some_and(|p| std::path::Path::new(p).exists());
-                // Workflow display is on by default: when a goal first becomes
-                // active, surface the orchestration panel directly instead of
-                // requiring the user to press `g`. Only the None→Some
-                // transition re-opens it, so a manual `Esc` / `g` dismissal
-                // stays closed for the rest of that goal; the next goal
-                // re-opens it here.
-                let goal_started = agent.goal_state.is_none();
+                // A workflow is discoverable through its status chip / `g`,
+                // but starting a goal must not take over the screen. Preserve
+                // an explicit open/closed choice on updates for the same goal;
+                // every genuinely new goal starts closed with fresh navigation.
+                let goal_started = agent
+                    .goal_state
+                    .as_ref()
+                    .is_none_or(|current| current.goal_id != goal_id);
                 agent.goal_state = Some(GoalDisplayState {
                     goal_id,
                     objective,
@@ -1002,10 +1003,9 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                     elapsed_floor_ms,
                 });
                 if goal_started {
-                    agent.show_goal_detail = true;
-                    // Fresh goal: the panel starts on the pipeline's
-                    // active phase (drop any stale browse override and
-                    // any selection from a previous goal).
+                    agent.show_goal_detail = false;
+                    // Fresh goal: drop stale browse state so an explicit open
+                    // starts on the new pipeline's active phase.
                     agent.workflow_view_phase = None;
                     agent.workflow_selected = None;
                 }

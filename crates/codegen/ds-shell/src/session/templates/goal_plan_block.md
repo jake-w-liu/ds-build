@@ -23,7 +23,10 @@ Plan: {PLAN_PATH}
   per requested result/regime/claim (no hard cap; scale the batch to the task,
   `background: true`, then collect all outputs before gating) — and/or use
   direct computation to challenge the final artifact independently. Cover
-  every requested result and the acceptance-critical reasoning behind it;
-  check domains, signs, units, conditions, regimes, and numerical error where
-  applicable. Keep supporting evidence in `{SCRATCH}` when useful, but do not
-  create ceremony the task does not require.
+  every requested result and the acceptance-critical reasoning behind it. Keep
+  a private five-gate ledger for `contract-closure`, `derivation-integrity`,
+  `evidence-provenance`, `invariant-ledger`, and `state-isolation`; each gate
+  must carry a claim-bound observation or a concrete `N/A` reason. Freeze
+  authoritative inputs and the pre-edit/last-validated artifact state in
+  `{SCRATCH}`, make narrow edits, and recheck every changed dependency. Do not
+  expose this workflow ledger in the user-facing artifact unless requested.

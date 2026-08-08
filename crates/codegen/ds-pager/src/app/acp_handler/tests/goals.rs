@@ -263,6 +263,41 @@
     }
 
     #[test]
+    fn workflow_panel_stays_closed_until_explicitly_opened() {
+        let mut app = make_app_with_agent("sess-A");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            // Seed stale state to prove the new-goal transition cleans it even
+            // though the panel itself remains hidden.
+            agent.workflow_view_phase = Some("verify");
+            agent.workflow_selected = Some("old-child".into());
+        }
+
+        assert!(send_goal_update(&mut app, "g1", "active", 100));
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(!agent.show_goal_detail, "enabling a goal must not auto-open its workflow");
+        assert_eq!(agent.workflow_view_phase, None);
+        assert_eq!(agent.workflow_selected, None);
+
+        // An explicit user open stays open across ordinary updates for the
+        // same goal.
+        agent.toggle_goal_detail();
+        assert!(agent.show_goal_detail);
+        send_goal_update(&mut app, "g1", "active", 200);
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().show_goal_detail,
+            "same-goal updates must preserve an explicit open"
+        );
+
+        // A different goal is a new workflow and starts hidden again.
+        send_goal_update(&mut app, "g2", "active", 10);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(!agent.show_goal_detail);
+        assert_eq!(agent.workflow_view_phase, None);
+        assert_eq!(agent.workflow_selected, None);
+    }
+
+    #[test]
     fn goal_switch_resets_elapsed_floor() {
         // A NEW goal (different id) must start its own clock and NOT inherit
         // the prior goal's carried elapsed floor.
@@ -450,4 +485,3 @@
             "deliverables is wire-compat-only in the simplified goal model"
         );
     }
-

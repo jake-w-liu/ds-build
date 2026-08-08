@@ -24,5 +24,8 @@ and inlines any outstanding verifier gaps above. For math/physics research,
 recheck the changed final artifact with a PARALLEL batch of `attacker-math`
 critics (one per requested result/regime/claim — no hard cap) or
 direct independent computation. Cover every requested result and rerun the
-checks affected by the edit; scale deeper checks to the risk of the claim.
+checks affected by the edit. Refresh the private `contract-closure`,
+`derivation-integrity`, `evidence-provenance`, `invariant-ledger`, and
+`state-isolation` rows; do not expose that workflow ledger unless the user asks.
+Scale deeper checks to the risk of the claim.
 </system-reminder>

@@ -824,6 +824,31 @@ macro_rules! attacker_output_contract {
     };
 }
 
+/// Math critics must prove coverage as well as report defects. The ledger is
+/// intentionally compact and claim-bound: a bare CAS success or a generic
+/// "units checked" assertion cannot support an approval.
+macro_rules! attacker_math_output_contract {
+    () => {
+        "## Required output format\n\n\
+         Return only a compact validation ledger followed by distilled findings; no raw dumps or stage narration.\n\n\
+         ```\n\
+         VALIDATION LEDGER\n\
+         - contract-closure: PASS|FAIL|N/A — <result/equation>; <boundary/domain check + observation>\n\
+         - derivation-integrity: PASS|FAIL|N/A — <step/result>; <independent implication check + observation>\n\
+         - evidence-provenance: PASS|FAIL|N/A — <claim>; <artifact + input/command + observed output/tolerance>\n\
+         - invariant-ledger: PASS|FAIL|N/A — <result>; <units/normalization/convention check + observation>\n\
+         - state-isolation: PASS|FAIL|N/A — <artifact>; <frozen baseline/diff + changed-dependency recheck>\n\
+\n\
+         FINDINGS\n\
+         - [severity: critical|high|medium|low] [gate: contract-closure|derivation-integrity|evidence-provenance|invariant-ledger|state-isolation] equation/problem/or/file:location — defect\n\
+           evidence: <one-line claim-bound proof or missing check>\n\
+           fix_hint: <optional one-line remediation>\n\
+         ```\n\n\
+         Use `N/A` only with a concrete reason tied to the scoped assignment. If no finding survives, end with exactly:\n\
+         `NO FINDINGS — acceptance criteria hold under this lens.`"
+    };
+}
+
 /// Prompt for **attacker-code** — adversarial code review lens.
 pub const ATTACKER_CODE_PROMPT: &str = concat!(
     "You are an adversarial code reviewer. Find defects that would block acceptance.\n\n",
@@ -859,22 +884,22 @@ pub const ATTACKER_MATH_PROMPT: &str = concat!(
     "prioritize governing equations, sensitive assumptions, primary conclusions,\n",
     "and high-risk numerical or physical links rather than mechanically testing\n",
     "every line.\n\n",
-    "Lenses (apply ALL that fit):\n",
-    "- EQUALITY / RESIDUALS — independently recompute critical steps and primary results\n",
-    "- DIMENSIONS / UNITS — check governing relations and material unit claims\n",
-    "- DOMAIN / REGIMES — signs, branches, BC/IC, admissibility, thresholds, and limits\n",
-    "- NUMERICS — tolerances, convergence, residual/error, conservation, and sensitivity\n",
-    "- CONSISTENCY — convention switches, contradictions, and requested counts/structure\n\n",
+    "Five mandatory validation gates (record each; use N/A only with a scoped reason):\n",
+    "- CONTRACT-CLOSURE — enumerate requested results, domains, branches, BC/IC, and every boundary/critical equality case\n",
+    "- DERIVATION-INTEGRITY — check consequential implications step by step; a correct final formula never excuses a false step\n",
+    "- EVIDENCE-PROVENANCE — bind every CAS/numerical check to a claim, final-artifact location, exact input, output, and tolerance\n",
+    "- INVARIANT-LEDGER — propagate units, dimensions, normalization, signs, coordinates/gauge/Fourier conventions, and conservation\n",
+    "- STATE-ISOLATION — compare against authoritative inputs and the frozen pre-edit state; detect broad-rewrite loss and recheck changed dependencies\n\n",
     "Guidelines:\n",
     "- Prefer ${{ tools.by_kind.execute }} for recomputation; use ${{ tools.by_kind.search }}/",
     "${{ tools.by_kind.read }}/${{ tools.by_kind.list }} for artifacts\n",
     "- Read the actual final artifact and authoritative task sources; do not verify a retyped surrogate\n",
     "- Cite equation labels, problem IDs, or file:line for artifact-backed work\n",
     "- Do not accept a remembered formula without checking hypotheses\n",
-    "- Tool claims require successful tool evidence in the current task trace\n",
+    "- Tool claims require successful, claim-bound tool evidence in the current task trace; an unbound successful run proves nothing\n",
     "- Accept valid alternative derivations and clearly defined equivalent notation\n",
     "- Report only confirmed defects or requested claims that remain materially unsupported\n\n",
-    attacker_output_contract!(),
+    attacker_math_output_contract!(),
 );
 
 /// Prompt for **attacker-research** — adversarial research review lens.
@@ -1424,8 +1449,12 @@ mod tests {
         assert!(ATTACKER_MATH_PROMPT.contains("tools.by_kind.execute"));
         assert!(ATTACKER_MATH_PROMPT.contains("REVIEW THE FULL DELIVERABLE"));
         assert!(ATTACKER_MATH_PROMPT.contains("PROPORTIONAL TO RISK"));
-        assert!(ATTACKER_MATH_PROMPT.contains("EQUALITY / RESIDUALS"));
-        assert!(ATTACKER_MATH_PROMPT.contains("DIMENSIONS / UNITS"));
+        assert!(ATTACKER_MATH_PROMPT.contains("CONTRACT-CLOSURE"));
+        assert!(ATTACKER_MATH_PROMPT.contains("DERIVATION-INTEGRITY"));
+        assert!(ATTACKER_MATH_PROMPT.contains("EVIDENCE-PROVENANCE"));
+        assert!(ATTACKER_MATH_PROMPT.contains("INVARIANT-LEDGER"));
+        assert!(ATTACKER_MATH_PROMPT.contains("STATE-ISOLATION"));
+        assert!(ATTACKER_MATH_PROMPT.contains("VALIDATION LEDGER"));
         assert!(ATTACKER_MATH_PROMPT.contains("actual final artifact"));
         assert!(!ATTACKER_MATH_PROMPT.contains("=== READ-ONLY MODE ==="));
         assert!(ATTACKER_RESEARCH_PROMPT.contains("NO FINDINGS"));

@@ -217,11 +217,26 @@ quantitative results, set `## Goal kind` to `math`. Include one `gating` step
 that spawns a PARALLEL batch of `attacker-math` critics — one per requested
 result/regime/claim (no hard cap; spawn all with background, then collect every
 output before gating) — or uses direct independent computation
-against the actual final artifact. It must cover every requested result and the consequential
-reasoning whose failure could change those results, then select checks suited to
-the claim: residual/substitution, dimensions, BC/IC, signs and branches,
-special or limiting regimes, conservation, numerical convergence/error, or an
-independent derivation.
+against the actual final artifact. Across the `gating` steps, explicitly name
+and cover all five harness gates:
+
+- `contract-closure` — every requested result, domain, branch, BC/IC, and
+  boundary/critical equality case;
+- `derivation-integrity` — consequential implications, not only the final formula;
+- `evidence-provenance` — every symbolic/numerical check bound to its claim,
+  artifact location/version, exact input, observed output, and tolerance/error;
+- `invariant-ledger` — symbols, units, dimensions, normalization, signs, and
+  coordinate/gauge/Fourier conventions propagated consistently;
+- `state-isolation` — authoritative inputs and a pre-edit/last-validated artifact
+  snapshot/digest/diff preserved, with every changed dependency rechecked.
+
+These gates are a private verification ledger, not a user-facing workflow
+section. A gate that truly does not apply still appears with a concrete `N/A`
+reason. The independent check must cover every requested result and the
+consequential reasoning whose failure could change those results, using
+residual/substitution, dimensions, BC/IC, signs and branches, special or
+limiting regimes, conservation, numerical convergence/error, or an independent
+derivation as appropriate.
 
 Scale the depth to the task. A short closed derivation may justify checking each
 step; a long research report should prioritize conclusions, governing
@@ -229,8 +244,8 @@ relations, sensitive assumptions, and high-risk numerical or physical links
 instead of mechanically testing every line. Require reproducible code/data and
 tolerances when material to numerical claims. Structural checks such as
 compilation and marker preservation remain supporting evidence. Do not require
-a fixed manifest, mutation portfolio, transcript schema, preferred derivation,
-or canonical spelling unless OBJECTIVE or a named source asks for it.
+a user-facing manifest, mutation portfolio, preferred derivation, or canonical
+spelling unless OBJECTIVE or a named source asks for it.
 
 Each step gives the **action** (run the tests,
 exercise the entry point, read the artifact) and the

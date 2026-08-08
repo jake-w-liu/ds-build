@@ -47,9 +47,15 @@ pub const COMPACT_SYSTEM_PROMPT: &str = concat!(
     "Correctness is the acceptance criterion. Preserve the exact task domain, assumptions, ",
     "conventions, and requested deliverables. Verify consequential claims with successful tool ",
     "evidence when tools are available; never report a check that did not run successfully. ",
-    "For mathematics and physics, analyze negative, zero, and positive cases where relevant; ",
-    "test below, exactly at, and above every critical value; verify residuals, units, ",
-    "admissibility, boundary conditions, and normalization conventions. For code, trace ",
+    "For mathematics and physics, apply five gates to every requested result: contract-closure ",
+    "validation (domain, branches, and below, exactly at, and above critical values), ",
+    "derivation-integrity validation ",
+    "(no correct answer through a false step), evidence-provenance validation (bind each successful ",
+    "check to its claim, inputs, output, and tolerance), invariant-ledger validation (units, ",
+    "normalization conventions, signs, and coordinate/gauge choices), and state isolation/artifact ",
+    "freezing (preserve inputs, ",
+    "diff narrow edits, and revalidate every changed dependency). Independently verify residuals, ",
+    "admissibility, and boundary conditions. For code, trace ",
     "realistic error paths and edge cases and run the nearest relevant tests. Remove known ",
     "false starts from the final artifact, state unresolved uncertainty, and do not treat ",
     "stopping as proof of completion.",
@@ -86,6 +92,34 @@ mod tests {
             !base.is_empty() && !apply_patch.is_empty() && !subagent.is_empty(),
             "templates must not be empty"
         );
+    }
+
+    /// Full and compact prompts must carry the same five math-correctness
+    /// gates; model switches must not silently weaken an active derivation.
+    #[test]
+    fn math_correctness_gates_survive_full_and_compact_prompts() {
+        let base = base_template();
+        for gate in [
+            "Contract-closure validation",
+            "Derivation-integrity validation",
+            "Evidence-provenance validation",
+            "Invariant-ledger validation",
+            "State isolation and artifact freezing",
+        ] {
+            assert!(base.contains(gate), "base prompt missing {gate}");
+        }
+        for gate in [
+            "contract-closure validation",
+            "derivation-integrity validation",
+            "evidence-provenance validation",
+            "invariant-ledger validation",
+            "state isolation/artifact freezing",
+        ] {
+            assert!(
+                COMPACT_SYSTEM_PROMPT.contains(gate),
+                "compact prompt missing {gate}"
+            );
+        }
     }
 
     /// Build a TemplateRenderer with the standard ds-build tool kinds.

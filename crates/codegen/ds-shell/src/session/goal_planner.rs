@@ -1270,6 +1270,19 @@ mod tests {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("attacker-math"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("actual final artifact"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Scale the depth to the task"));
+        for gate in [
+            "contract-closure",
+            "derivation-integrity",
+            "evidence-provenance",
+            "invariant-ledger",
+            "state-isolation",
+        ] {
+            assert!(
+                GOAL_PLANNER_PROMPT_TEMPLATE.contains(gate),
+                "planner prompt missing {gate}"
+            );
+        }
+        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("private verification ledger"));
         assert!(!GOAL_PLANNER_PROMPT_TEMPLATE.contains("adversarial-math-verify.log"));
         assert!(!GOAL_PLANNER_PROMPT_TEMPLATE.contains("verification_manifest.json"));
     }
@@ -1313,7 +1326,8 @@ mod tests {
         );
         // Control: a complete math plan succeeds.
         let good = "## Goal kind\nmath\n## Verification plan\n\
-                    1. gating: attacker-math independently recomputes the requested results from the final artifact\n";
+                    1. gating: attacker-math independently recomputes the requested results from the final artifact; \
+                    contract-closure; derivation-integrity; evidence-provenance; invariant-ledger; state-isolation\n";
         let plan_file2 = dir.path().join("plan2.md");
         let spawner2 = Arc::new(MockSpawner::ok_writes(&plan_file2, good.as_bytes()));
         let outcome2 = run_goal_planner(

@@ -172,7 +172,10 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    clearly mapped notation, harmless tool warning, or the absence of a
    self-authored manifest the task never requested. For rendered output, inspect
    enough of the final artifact to support the relevant criterion, expanding to
-   every page only when the task or observed failures make that necessary.
+   every page only when the task or observed failures make that necessary. An
+   approving math verdict MUST also emit the five claim-bound `math_checks`
+   rows defined in the output contract; missing or unbound rows are a verifier
+   contract failure and cannot approve completion.
 {KIND_LENS}
 ## Output contract — STRICT
 
@@ -189,6 +192,13 @@ Write this object (fixed schema) with your file-write tool:
   "evidence": "string — one-line summary citation",
   "confidence": "high",
   "blocking": "none",
+  "math_checks": [
+    {"gate": "contract-closure", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
+    {"gate": "derivation-integrity", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
+    {"gate": "evidence-provenance", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
+    {"gate": "invariant-ledger", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
+    {"gate": "state-isolation", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"}
+  ],
   "details_md": "Markdown summary of your findings"
 }
 ```
@@ -198,6 +208,11 @@ Write this object (fixed schema) with your file-write tool:
 - `evidence` (string): a one-line summary citation; for `code-change`, FINAL_RESPONSE prose is NOT evidence.
 - `confidence` (string): `"high"` | `"medium"` | `"low"`.
 - `blocking` (string, default `"none"`): `"none"` | `"contradiction"` | `"unverifiable"` (rule 8).
+- `math_checks` (array): mandatory when the math lens applies and
+  `refuted: false`; emit exactly one claim-bound row for each of the five gate
+  names shown in the schema. `target` and `evidence` must be non-empty.
+  `not_applicable` requires a concrete reason in `evidence`; an approving
+  verdict cannot contain `fail`. Non-math verdicts may omit this field.
 - `details_md` (string, optional): Markdown writeup; if omitted, the aggregator
   falls back to the details file below.
 

@@ -34,6 +34,17 @@ assumptions, domains, conventions, governing relations, and boundary/initial
 conditions needed by the requested result. Preserve source-requested symbols,
 but accept clearly defined equivalent notation and valid alternative methods.
 
+Maintain a PRIVATE five-gate ledger: (1) `contract-closure` enumerates every
+requested result, domain/branch, and boundary/critical equality case;
+(2) `derivation-integrity` checks consequential implications rather than only
+the final formula; (3) `evidence-provenance` binds each successful symbolic or
+numerical run to its claim, actual artifact location/version, exact input,
+observed output, and tolerance/error; (4) `invariant-ledger` propagates units,
+normalization, signs, and conventions; (5) `state-isolation` freezes
+authoritative inputs and the pre-edit/last-validated artifact state, then
+rechecks every changed dependency. Record a concrete reason for any inapplicable
+gate. Do not narrate this ledger to the user unless asked.
+
 Before `{GOAL_TOOL}(completed: true)`, inspect the actual final artifact and use
 `attacker-math` or direct independent computation to challenge every requested
 result plus the consequential steps that support it. Apply residuals,

@@ -895,6 +895,81 @@ impl Finding {
     }
 }
 
+/// One claim-bound row in a math skeptic's five-gate approval record. The
+/// field is optional on the generic verdict wire format, but a math approval
+/// is rejected unless all five canonical gates are present and valid.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub(crate) struct MathValidationCheck {
+    #[serde(default)]
+    pub gate: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub evidence: String,
+}
+
+fn canonical_math_gate(raw: &str) -> Option<&'static str> {
+    let normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_', '/'], "-");
+    match normalized.as_str() {
+        "contract-closure" | "contract-closure-validation" => Some("contract-closure"),
+        "derivation-integrity" | "derivation-integrity-validation" => Some("derivation-integrity"),
+        "evidence-provenance" | "evidence-provenance-validation" => Some("evidence-provenance"),
+        "invariant-ledger" | "invariant-ledger-validation" => Some("invariant-ledger"),
+        "state-isolation"
+        | "state-isolation-validation"
+        | "state-isolation-artifact-freezing"
+        | "state-isolation-and-artifact-freezing" => Some("state-isolation"),
+        _ => None,
+    }
+}
+
+/// An approving math verdict must prove that it covered every gate. `fail`
+/// cannot coexist with approval; `not_applicable` is accepted only when it is
+/// still bound to a non-empty target and concrete evidence/reason.
+fn validate_math_approval_checks(checks: &[MathValidationCheck]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for check in checks {
+        let Some(gate) = canonical_math_gate(&check.gate) else {
+            return Err(format!("unknown math gate `{}`", check.gate.trim()));
+        };
+        if !seen.insert(gate) {
+            return Err(format!("duplicate math gate `{gate}`"));
+        }
+        if check.target.trim().is_empty() {
+            return Err(format!("math gate `{gate}` has no target"));
+        }
+        if check.evidence.trim().is_empty() {
+            return Err(format!("math gate `{gate}` has no claim-bound evidence"));
+        }
+        let status = check
+            .status
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_");
+        match status.as_str() {
+            "pass" | "not_applicable" | "n/a" => {}
+            "fail" => return Err(format!("math gate `{gate}` failed in an approval verdict")),
+            _ => {
+                return Err(format!(
+                    "math gate `{gate}` has invalid status `{}`",
+                    check.status.trim()
+                ));
+            }
+        }
+    }
+    for required in MATH_VALIDATION_GATES {
+        if !seen.contains(required) {
+            return Err(format!("missing math gate `{required}`"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SkepticVerdict {
     pub refuted: bool,
@@ -905,6 +980,8 @@ pub(crate) struct SkepticVerdict {
     /// Structured findings (the implementer-facing gap list); empty when
     /// the verifier emitted none (then the `evidence` fallback is used).
     pub findings: Vec<Finding>,
+    /// Structured five-gate record. Required only to approve a math goal.
+    pub math_checks: Vec<MathValidationCheck>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -921,6 +998,8 @@ struct SkepticVerdictRaw {
     details_md: Option<String>,
     #[serde(default)]
     findings: Option<Vec<Finding>>,
+    #[serde(default)]
+    math_checks: Option<Vec<MathValidationCheck>>,
 }
 
 /// Parse the JSON body the skeptic wrote to its `{VERDICT_FILE}`.
@@ -961,6 +1040,7 @@ pub(crate) fn parse_verdict_json(body: &str) -> Option<SkepticVerdict> {
         blocking,
         details_md: raw.details_md.unwrap_or_default(),
         findings,
+        math_checks: raw.math_checks.unwrap_or_default(),
     })
 }
 
@@ -1342,6 +1422,18 @@ pub(crate) enum GoalKind {
     Math,
 }
 
+/// Canonical wire/plan names for the five mandatory math-correctness gates.
+/// These strings are shared by plan validation and structured verdict
+/// validation so the planner, implementer, and skeptic cannot silently use
+/// different checklists.
+const MATH_VALIDATION_GATES: [&str; 5] = [
+    "contract-closure",
+    "derivation-integrity",
+    "evidence-provenance",
+    "invariant-ledger",
+    "state-isolation",
+];
+
 /// Parse the `## Goal kind` value from a plan-file body. Reads the first
 /// non-empty line after the header; trims backticks/whitespace/emphasis
 /// and normalizes space/underscore separators so a near-miss tag
@@ -1410,7 +1502,13 @@ This goal explains or diagnoses something; the failure mode to hunt is a fluent,
 const KIND_LENS_MATH: &str = "\n## Math / quantitative correctness lens\n\n\
 This goal produces mathematical derivations, physical formulations, proofs, simulations, or quantitative results. Structural completeness is supporting evidence, never a substitute for correctness.\n\n\
 Read the authoritative task sources and the actual final artifact. Independently challenge every requested result and the consequential reasoning whose failure could change a conclusion. For a short derivation, checking each step may be proportionate; for a long research artifact, prioritize governing equations, sensitive assumptions, primary conclusions, and high-risk numerical or physical links instead of mechanically testing every line.\n\n\
-Use the checks that fit the claim: re-derivation, residual/substitution, dimensions, signs and branches, BC/IC, admissibility, special and limiting regimes, conservation, and numerical convergence/error or sensitivity. Numerical claims need reproducible inputs and enough tolerance/convergence evidence to support the stated precision. Tool-backed checks are preferred when they materially reduce uncertainty, but a fixed log or manifest is not evidence by itself.\n\n\
+Apply all five harness gates and record one claim-bound `math_checks` row for each before approving:\n\
+- `contract-closure`: enumerate every requested result and test its domain, branches, BC/IC, boundary values, and critical equality cases against the original relation.\n\
+- `derivation-integrity`: check every consequential implication; reject a correct final formula reached through a false equality, illegal division, dropped branch, sign/factor error, or unmet hypothesis.\n\
+- `evidence-provenance`: bind each CAS/numerical/tool observation to the exact claim, current final-artifact location/version, input/command, output, and tolerance/error. An unbound successful run is not evidence.\n\
+- `invariant-ledger`: propagate symbols, units, dimensions, normalization, signs, coordinate/gauge/Fourier conventions, admissibility, and conservation from assumptions through the final answer.\n\
+- `state-isolation`: compare authoritative inputs and the frozen pre-edit/last-validated state to the current artifact; detect whole-artifact rewrite loss and recheck every changed dependency. Use `not_applicable` only with a concrete reason.\n\n\
+Use re-derivation, residual/substitution, special and limiting regimes, or numerical convergence/error and sensitivity as appropriate. Numerical claims need reproducible inputs and enough tolerance/convergence evidence to support the stated precision. Tool-backed checks are preferred when they materially reduce uncertainty, but a fixed log or manifest is not evidence by itself.\n\n\
 Refute confirmed mathematical errors, missing requested results, unsupported material claims, inconsistent conventions, and contradictions between prose, equations, sources, or computed evidence. Accept valid alternative derivations and clearly defined equivalent notation. Do not add benchmark-specific forms, require ceremony the task did not request, or reject harmless presentation differences.\n";
 
 /// The review-lens block for `kind` (empty string for `None` — generic verifier).
@@ -1623,9 +1721,9 @@ pub(crate) fn plan_requires_math_adversarial(objective: &str, plan: &str) -> boo
     }
 }
 
-/// Static check: a math-required plan must (1) tag kind `math` and (2) include
-/// a `gating` verification step that performs adversarial / independent
-/// recomputation. Evidence shape is deliberately task-specific.
+/// Static check: a math-required plan must (1) tag kind `math`, (2) include a
+/// `gating` adversarial / independent recomputation, and (3) cover all five
+/// canonical math-correctness gates in gating (not evidence-only) steps.
 pub(crate) fn validate_math_plan_contract(
     objective: &str,
     plan: &str,
@@ -1643,6 +1741,13 @@ pub(crate) fn validate_math_plan_contract(
         return Err(
             "math plan missing gating adversarial/independent recomputation step \
              in ## Verification plan",
+        );
+    }
+    if !plan_has_complete_math_gate_coverage(plan) {
+        return Err(
+            "math plan's gating verification steps must cover contract-closure, \
+             derivation-integrity, evidence-provenance, invariant-ledger, and \
+             state-isolation",
         );
     }
     Ok(())
@@ -1673,6 +1778,13 @@ pub(crate) fn validate_math_plan_contract_source_aware(
              in ## Verification plan",
         );
     }
+    if !plan_has_complete_math_gate_coverage(plan) {
+        return Err(
+            "math plan's gating verification steps must cover contract-closure, \
+             derivation-integrity, evidence-provenance, invariant-ledger, and \
+             state-isolation",
+        );
+    }
     Ok(())
 }
 
@@ -1693,12 +1805,10 @@ pub(crate) fn plan_requires_math_adversarial_source_aware(
     }
 }
 
-/// True when one numbered/bulleted item in `## Verification plan` is both
-/// gating and an independent mathematical check.
-///
-/// Keeping the signals in one list item prevents unrelated prose elsewhere in
-/// the plan—or an `evidence`-only check—from satisfying the completion gate.
-fn plan_has_adversarial_math_gate(plan: &str) -> bool {
+/// Extract normalized numbered/bulleted items from `## Verification plan`.
+/// Continuation lines stay attached to their item; later sections are outside
+/// the contract and cannot satisfy a gate accidentally.
+fn verification_plan_items(plan: &str) -> Vec<String> {
     let mut in_verification_plan = false;
     let mut items: Vec<String> = Vec::new();
 
@@ -1723,13 +1833,24 @@ fn plan_has_adversarial_math_gate(plan: &str) -> bool {
             item.push_str(&line.to_ascii_lowercase());
         }
     }
+    items
+}
 
-    items.iter().any(|item| {
-        let has_gating_tag = item.split_whitespace().take(3).any(|token| {
-            token
-                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
-                == "gating"
-        });
+fn is_gating_verification_item(item: &str) -> bool {
+    item.split_whitespace().take(3).any(|token| {
+        token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-') == "gating"
+    })
+}
+
+/// True when one numbered/bulleted item in `## Verification plan` is both
+/// gating and an independent mathematical check.
+///
+/// Keeping the signals in one list item prevents unrelated prose elsewhere in
+/// the plan—or an `evidence`-only check—from satisfying the completion gate.
+fn plan_has_adversarial_math_gate(plan: &str) -> bool {
+    verification_plan_items(plan).iter().any(|item| {
+        let has_gating_tag = is_gating_verification_item(item);
+
         let uses_math_attacker = item.contains("attacker-math");
         let explicitly_rechecks = [
             "recompute",
@@ -1759,10 +1880,26 @@ fn plan_has_adversarial_math_gate(plan: &str) -> bool {
         ]
         .iter()
         .any(|signal| item.contains(signal));
-        let has_independent_check =
-            uses_math_attacker || explicitly_rechecks || (establishes_independence && performs_math);
+        let has_independent_check = uses_math_attacker
+            || explicitly_rechecks
+            || (establishes_independence && performs_math);
         has_gating_tag && has_independent_check
     })
+}
+
+/// Every canonical gate must appear in a gating verification item. This is a
+/// coverage check, not a prescribed proof method: the plan remains free to
+/// choose task-appropriate residuals, derivations, numerical tests, or N/A
+/// justifications.
+fn plan_has_complete_math_gate_coverage(plan: &str) -> bool {
+    let gating = verification_plan_items(plan)
+        .into_iter()
+        .filter(|item| is_gating_verification_item(item))
+        .collect::<Vec<_>>()
+        .join(" ");
+    MATH_VALIDATION_GATES
+        .iter()
+        .all(|gate| gating.contains(gate))
 }
 
 fn is_markdown_list_item(line: &str) -> bool {
@@ -1846,6 +1983,13 @@ Write this object (fixed schema) with your file-write tool:\n\n\
   \"evidence\": \"string — one-line summary citation\",\n\
   \"confidence\": \"high\",\n\
   \"blocking\": \"none\",\n\
+  \"math_checks\": [\n\
+    {\"gate\": \"contract-closure\", \"status\": \"pass|fail|not_applicable\", \"target\": \"result/equation/artifact\", \"evidence\": \"claim-bound observation or N/A reason\"},\n\
+    {\"gate\": \"derivation-integrity\", \"status\": \"pass|fail|not_applicable\", \"target\": \"result/equation/artifact\", \"evidence\": \"claim-bound observation or N/A reason\"},\n\
+    {\"gate\": \"evidence-provenance\", \"status\": \"pass|fail|not_applicable\", \"target\": \"result/equation/artifact\", \"evidence\": \"claim-bound observation or N/A reason\"},\n\
+    {\"gate\": \"invariant-ledger\", \"status\": \"pass|fail|not_applicable\", \"target\": \"result/equation/artifact\", \"evidence\": \"claim-bound observation or N/A reason\"},\n\
+    {\"gate\": \"state-isolation\", \"status\": \"pass|fail|not_applicable\", \"target\": \"result/equation/artifact\", \"evidence\": \"claim-bound observation or N/A reason\"}\n\
+  ],\n\
   \"details_md\": \"Markdown summary of your findings\"\n\
 }\n\
 ```\n\n\
@@ -1860,6 +2004,9 @@ prose is NOT evidence.\n\
 - `confidence` (string): `\"high\"` | `\"medium\"` | `\"low\"`.\n\
 - `blocking` (string, default `\"none\"`): `\"none\"` | `\"contradiction\"` | \
 `\"unverifiable\"`.\n\
+- `math_checks` (array): mandatory when the math lens applies and `refuted: false`; \
+exactly one non-empty, claim-bound row per canonical gate. `not_applicable` needs \
+a concrete reason; an approval cannot contain `fail`. Non-math verdicts may omit it.\n\
 - `details_md` (string, optional): Markdown writeup; if omitted, the aggregator \
 falls back to the `{DETAILS_FILE}` contents.\n\n\
 ### 2. Details → `{DETAILS_FILE}`\n\n\
@@ -2033,10 +2180,11 @@ fn skeptic_failure(skeptic_idx: u32, note: String, latency_ms: u64) -> SkepticRe
 /// Read skeptic `skeptic_idx`'s verdict after its terminal response.
 /// The JSON verdict file is authoritative; the terminal token is a
 /// secondary signal used only when the JSON is missing/malformed — and in
-/// strict mode even that cannot approve: a missing/malformed JSON record is
-/// a synthetic REFUTE (the terminal token may only tighten to refute), so
-/// no acceptance can ride on an unstructured signal with unknown confidence
-/// and zero evidence.
+/// strict mode even that cannot approve. Math approval also never falls back
+/// to a terminal token, regardless of strict mode, because the terminal signal
+/// cannot carry the mandatory five-gate record. In either case, the terminal
+/// token may only tighten to refute; no acceptance can ride on an unstructured
+/// signal with unknown confidence and zero evidence.
 async fn read_skeptic_verdict(
     skeptic_idx: u32,
     details_raw: &str,
@@ -2044,6 +2192,7 @@ async fn read_skeptic_verdict(
     terminal: &str,
     started: std::time::Instant,
     strict: bool,
+    require_math_checks: bool,
 ) -> SkepticResult {
     let json_body = tokio::fs::read_to_string(verdict_raw).await.ok();
     if let Some(body) = json_body.as_deref()
@@ -2054,8 +2203,22 @@ async fn read_skeptic_verdict(
             blocking,
             details_md: parsed_md,
             findings,
+            math_checks,
         }) = parse_verdict_json(body)
     {
+        if require_math_checks
+            && !refuted
+            && let Err(reason) = validate_math_approval_checks(&math_checks)
+        {
+            return skeptic_failure(
+                skeptic_idx,
+                format!(
+                    "math approval record invalid: {reason} — synthetic REFUTE \
+                     (verifier-side contract failure, not an implementer gap)"
+                ),
+                started.elapsed().as_millis() as u64,
+            );
+        }
         // Keep the referenced per-skeptic file non-empty: if the skeptic
         // produced a verdict but never wrote its report, persist the JSON
         // `details_md` fallback to the path the aggregate references.
@@ -2078,9 +2241,12 @@ async fn read_skeptic_verdict(
         };
     }
 
-    // JSON missing / malformed — fall back to the terminal token.
-    match parse_skeptic_terminal_response(terminal) {
-        Some(refuted) if !strict => SkepticResult {
+    // JSON missing / malformed — a non-strict generic verdict may fall back to
+    // the terminal token. A math terminal can only tighten to refute: it cannot
+    // supply the structured five-gate approval record.
+    let terminal_verdict = parse_skeptic_terminal_response(terminal);
+    match terminal_verdict {
+        Some(refuted) if !strict && (!require_math_checks || refuted) => SkepticResult {
             skeptic_idx,
             refuted,
             confidence: SkepticConfidence::Unknown,
@@ -2095,11 +2261,16 @@ async fn read_skeptic_verdict(
             latency_ms: started.elapsed().as_millis() as u64,
         },
         _ => {
-            // Strict mode: an unstructured signal must never approve. The
-            // terminal token may tighten to refute, but a missing/malformed
-            // JSON record always degrades to a synthetic refute (the
-            // adversarial bias-to-fail, enforced at the per-skeptic level).
-            let note = if strict {
+            // Structured approval is unavailable. Strict mode and the math
+            // five-gate policy both fail closed; the terminal token may only
+            // tighten to refute (the adversarial bias-to-fail, enforced at the
+            // per-skeptic level).
+            let note = if require_math_checks && terminal_verdict == Some(false) {
+                "math verdict policy: verdict JSON missing/malformed and the terminal \
+                 token cannot carry the five-gate approval record — synthetic REFUTE \
+                 (verifier-side contract failure, not an implementer gap)"
+                    .to_string()
+            } else if strict {
                 "strict verdict policy: verdict JSON missing/malformed — synthetic REFUTE \
                  (unstructured signals cannot approve; verifier-side contract failure, \
                  not an implementer gap)"
@@ -2227,6 +2398,7 @@ async fn run_one_skeptic(
                     &terminal,
                     started,
                     strict,
+                    inputs.require_math_validation,
                 )
                 .await;
             }
@@ -2275,6 +2447,7 @@ async fn run_one_skeptic(
                 &terminal,
                 started,
                 strict,
+                inputs.require_math_validation,
             )
             .await
         }
@@ -2318,6 +2491,8 @@ struct SkepticInputs<'a> {
     /// Previous round's gaps summary for the `{PRIOR_GAPS}` placeholder
     /// (see [`VerificationStageInputs::prior_gaps`]).
     prior_gaps: Option<&'a str>,
+    /// Math approvals require a complete, claim-bound five-gate record.
+    require_math_validation: bool,
 }
 
 /// Stage-level inputs threaded into [`run_verification_stage`]. Borrowed
@@ -2626,6 +2801,7 @@ pub(crate) async fn run_verification_stage_with_backpressure(
         implementer_scratch: implementer_scratch.as_ref(),
         scratch_dir_ready: inputs.scratch_dir_ready,
         prior_gaps: inputs.prior_gaps,
+        require_math_validation: matches!(goal_kind, Some(GoalKind::Math)),
     };
 
     // Escalating panel: when N > 1, run skeptic 0 alone first. A
@@ -3360,6 +3536,93 @@ mod tests {
         assert!(v.findings.is_empty());
     }
 
+    fn complete_math_checks_value() -> serde_json::Value {
+        serde_json::json!([
+            {
+                "gate": "contract-closure",
+                "status": "pass",
+                "target": "result R and critical point c",
+                "evidence": "substitution below/at/above c matched the original equation"
+            },
+            {
+                "gate": "derivation-integrity",
+                "status": "pass",
+                "target": "equations (2) through (7)",
+                "evidence": "each implication was independently re-derived"
+            },
+            {
+                "gate": "evidence-provenance",
+                "status": "pass",
+                "target": "final.tex:eq:R",
+                "evidence": "SymPy input and zero residual are recorded for eq:R"
+            },
+            {
+                "gate": "invariant-ledger",
+                "status": "pass",
+                "target": "R",
+                "evidence": "dimensions and normalization agree from assumptions to final result"
+            },
+            {
+                "gate": "state-isolation",
+                "status": "not_applicable",
+                "target": "workspace artifact state",
+                "evidence": "no mutable artifact was edited in this scoped proof"
+            }
+        ])
+    }
+
+    fn complete_math_checks() -> Vec<MathValidationCheck> {
+        serde_json::from_value(complete_math_checks_value()).unwrap()
+    }
+
+    #[test]
+    fn math_approval_requires_exactly_one_claim_bound_row_per_gate() {
+        let checks = complete_math_checks();
+        assert!(validate_math_approval_checks(&checks).is_ok());
+
+        let mut missing = checks.clone();
+        missing.pop();
+        assert_eq!(
+            validate_math_approval_checks(&missing).unwrap_err(),
+            "missing math gate `state-isolation`"
+        );
+
+        let mut duplicate = checks.clone();
+        duplicate.push(checks[0].clone());
+        assert_eq!(
+            validate_math_approval_checks(&duplicate).unwrap_err(),
+            "duplicate math gate `contract-closure`"
+        );
+
+        let mut unbound = checks.clone();
+        unbound[2].evidence.clear();
+        assert_eq!(
+            validate_math_approval_checks(&unbound).unwrap_err(),
+            "math gate `evidence-provenance` has no claim-bound evidence"
+        );
+
+        let mut failed = checks;
+        failed[1].status = "fail".into();
+        assert_eq!(
+            validate_math_approval_checks(&failed).unwrap_err(),
+            "math gate `derivation-integrity` failed in an approval verdict"
+        );
+    }
+
+    #[test]
+    fn parse_verdict_json_preserves_math_checks_for_policy_gate() {
+        let body = serde_json::json!({
+            "refuted": false,
+            "evidence": "five claim-bound checks recorded",
+            "confidence": "high",
+            "math_checks": complete_math_checks_value()
+        })
+        .to_string();
+        let verdict = parse_verdict_json(&body).expect("verdict parses");
+        assert_eq!(verdict.math_checks.len(), MATH_VALIDATION_GATES.len());
+        assert!(validate_math_approval_checks(&verdict.math_checks).is_ok());
+    }
+
     #[test]
     fn parse_verdict_json_parses_findings_and_drops_empty() {
         let body = r##"{
@@ -4063,6 +4326,7 @@ mod tests {
             "Refuted",
             std::time::Instant::now(),
             false,
+            false,
         )
         .await;
 
@@ -4094,6 +4358,7 @@ mod tests {
             "Refuted",
             std::time::Instant::now(),
             false,
+            false,
         )
         .await;
 
@@ -4124,12 +4389,118 @@ mod tests {
             "Not Refuted",
             std::time::Instant::now(),
             false,
+            false,
         )
         .await;
 
         assert!(!r.refuted);
         let on_disk = tokio::fs::read_to_string(&details).await.unwrap();
         assert_eq!(on_disk, "json fallback");
+    }
+
+    /// A generic-looking approval is insufficient for a math goal: without
+    /// the five claim-bound rows it becomes a synthetic refute even when the
+    /// terminal token and ordinary verdict fields say Not Refuted.
+    #[tokio::test]
+    async fn read_skeptic_verdict_rejects_unbound_math_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let details = dir.path().join("skeptic-math.md");
+        let verdict = dir.path().join("verdict-math.json");
+        tokio::fs::write(
+            &verdict,
+            r#"{"refuted":false,"evidence":"looks correct","confidence":"high"}"#,
+        )
+        .await
+        .unwrap();
+
+        let result = read_skeptic_verdict(
+            0,
+            details.to_str().unwrap(),
+            verdict.to_str().unwrap(),
+            "Not Refuted",
+            std::time::Instant::now(),
+            true,
+            true,
+        )
+        .await;
+
+        assert!(result.refuted, "unbound math approval must fail closed");
+        assert_eq!(result.confidence, SkepticConfidence::Unknown);
+        assert!(
+            result
+                .fallback_note
+                .as_deref()
+                .is_some_and(|note| note.contains("missing math gate `contract-closure`")),
+            "missing-gate reason must remain observable: {:?}",
+            result.fallback_note
+        );
+    }
+
+    #[tokio::test]
+    async fn read_skeptic_verdict_rejects_terminal_only_math_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let details = dir.path().join("skeptic-math.md");
+        let missing_verdict = dir.path().join("missing-verdict-math.json");
+
+        let result = read_skeptic_verdict(
+            0,
+            details.to_str().unwrap(),
+            missing_verdict.to_str().unwrap(),
+            "Not Refuted",
+            std::time::Instant::now(),
+            false,
+            true,
+        )
+        .await;
+
+        assert!(
+            result.refuted,
+            "terminal-only math approval must fail closed even in non-strict mode"
+        );
+        assert_eq!(result.confidence, SkepticConfidence::Unknown);
+        assert!(
+            result
+                .fallback_note
+                .as_deref()
+                .is_some_and(|note| note.contains("cannot carry the five-gate approval record")),
+            "terminal-fallback reason must remain observable: {:?}",
+            result.fallback_note
+        );
+    }
+
+    #[tokio::test]
+    async fn read_skeptic_verdict_accepts_complete_math_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let details = dir.path().join("skeptic-math.md");
+        let verdict = dir.path().join("verdict-math.json");
+        let body = serde_json::json!({
+            "refuted": false,
+            "evidence": "five claim-bound checks recorded",
+            "confidence": "high",
+            "math_checks": complete_math_checks_value(),
+            "details_md": "# Math validation\n\nall gates passed"
+        })
+        .to_string();
+        tokio::fs::write(&verdict, body).await.unwrap();
+
+        let result = read_skeptic_verdict(
+            0,
+            details.to_str().unwrap(),
+            verdict.to_str().unwrap(),
+            "Not Refuted",
+            std::time::Instant::now(),
+            true,
+            true,
+        )
+        .await;
+
+        assert!(!result.refuted);
+        assert_eq!(result.confidence, SkepticConfidence::High);
+        assert!(result.fallback_note.is_none());
+        assert_eq!(
+            tokio::fs::read_to_string(details).await.unwrap(),
+            "# Math validation\n\nall gates passed"
+        );
     }
 
     /// Per-attempt scratch paths must not change the fingerprint, or the
@@ -4320,6 +4691,24 @@ mod tests {
             assert!(tmpl.contains("\"findings\""));
             assert!(tmpl.contains("\"kind\": \"bug|gap|todo\""));
             assert!(tmpl.contains("PRIMARY output the implementer acts on"));
+        }
+    }
+
+    #[test]
+    fn verifier_prompts_pin_claim_bound_math_approval_schema() {
+        for tmpl in [
+            GOAL_VERIFIER_PROMPT_TEMPLATE,
+            GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE,
+        ] {
+            assert!(tmpl.contains("\"math_checks\""));
+            assert!(tmpl.contains("\"status\": \"pass|fail|not_applicable\""));
+            assert!(tmpl.contains("\"target\""));
+            for gate in MATH_VALIDATION_GATES {
+                assert!(
+                    tmpl.contains(&format!("\"gate\": \"{gate}\"")),
+                    "verifier prompt missing explicit row for {gate}"
+                );
+            }
         }
     }
 
@@ -4787,6 +5176,15 @@ mod tests {
         assert!(kind_lens(Some(GoalKind::Math)).contains("For a short derivation"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("residual/substitution"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("equivalent notation"));
+        for gate in MATH_VALIDATION_GATES {
+            assert!(
+                kind_lens(Some(GoalKind::Math)).contains(gate),
+                "math lens missing {gate}"
+            );
+        }
+        assert!(kind_lens(Some(GoalKind::Math)).contains("correct final formula"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("unbound successful run"));
+        assert!(kind_lens(Some(GoalKind::Math)).contains("whole-artifact rewrite loss"));
         assert!(
             kind_lens(Some(GoalKind::Math))
                 .contains("fixed log or manifest is not evidence by itself")
@@ -4797,8 +5195,16 @@ mod tests {
     #[test]
     fn math_plan_contract_requires_kind_and_independent_gate() {
         let obj = "Derive the closed form of the integral and prove that it holds.";
+        let five_gates = "contract-closure; derivation-integrity; evidence-provenance; \
+                          invariant-ledger; state-isolation";
         assert!(objective_suggests_math(obj));
-        assert!(validate_math_plan_contract("implement a REST API", "# Plan\n## Goal kind\ncode-change\n").is_ok());
+        assert!(
+            validate_math_plan_contract(
+                "implement a REST API",
+                "# Plan\n## Goal kind\ncode-change\n"
+            )
+            .is_ok()
+        );
 
         let bad_kind = "## Goal kind\nanalysis\n## Verification plan\n1. gating: adversarial recompute\n";
         assert!(validate_math_plan_contract(obj, bad_kind).is_err());
@@ -4806,31 +5212,47 @@ mod tests {
         let no_gate = "## Goal kind\nmath\n## Verification plan\n1. evidence: file exists\n";
         assert!(validate_math_plan_contract(obj, &no_gate).is_err());
 
-        let good = "## Goal kind\nmath\n## Verification plan\n\
-                    1. gating: attacker-math independently recomputes the requested results\n";
-        assert!(validate_math_plan_contract(obj, good).is_ok());
+        let good = format!(
+            "## Goal kind\nmath\n## Verification plan\n\
+             1. gating: attacker-math independently recomputes the requested results; {five_gates}\n"
+        );
+        assert!(validate_math_plan_contract(obj, &good).is_ok());
 
-        let signals_outside_verification =
+        let missing_state_isolation = "## Goal kind\nmath\n## Verification plan\n\
+            1. gating: attacker-math independently recomputes every result; contract-closure; \
+               derivation-integrity; evidence-provenance; invariant-ledger\n";
+        assert_eq!(
+            validate_math_plan_contract(obj, missing_state_isolation).unwrap_err(),
+            "math plan's gating verification steps must cover contract-closure, \
+             derivation-integrity, evidence-provenance, invariant-ledger, and state-isolation"
+        );
+
+        let signals_outside_verification = format!(
             "## Goal kind\nmath\n## Verification plan\n1. gating: compile the artifact\n\
-             ## Risks / Contradictions\n- independent adversarial recomputation may be expensive\n";
+             ## Risks / Contradictions\n- independent adversarial recomputation may be expensive; {five_gates}\n"
+        );
         assert!(
-            validate_math_plan_contract(obj, signals_outside_verification).is_err(),
+            validate_math_plan_contract(obj, &signals_outside_verification).is_err(),
             "keywords outside the verification section must not satisfy the gate",
         );
 
-        let split_steps = "## Goal kind\nmath\n## Verification plan\n\
-                           1. gating: compile the artifact\n\
-                           2. evidence: attacker-math independently recomputes the results\n";
+        let split_steps = format!(
+            "## Goal kind\nmath\n## Verification plan\n\
+             1. gating: compile the artifact\n\
+             2. evidence: attacker-math independently recomputes the results; {five_gates}\n"
+        );
         assert!(
-            validate_math_plan_contract(obj, split_steps).is_err(),
+            validate_math_plan_contract(obj, &split_steps).is_err(),
             "gating and independent recomputation must belong to the same verification step",
         );
 
-        let wrapped_good = "## Goal kind\nmath\n## Verification plan\n\
-                            1. gating: direct independent computation against the actual\n\
-                               final artifact, including residuals and limiting cases\n\
-                            ## Non-goals\n- preferred notation\n";
-        assert!(validate_math_plan_contract(obj, wrapped_good).is_ok());
+        let wrapped_good = format!(
+            "## Goal kind\nmath\n## Verification plan\n\
+             1. gating: direct independent computation against the actual\n\
+                final artifact, including residuals and limiting cases; {five_gates}\n\
+             ## Non-goals\n- preferred notation\n"
+        );
+        assert!(validate_math_plan_contract(obj, &wrapped_good).is_ok());
 
         for equivalent_check in [
             "independent recomputation of every requested result",
@@ -4839,7 +5261,8 @@ mod tests {
             "adversarial numerical validation of the reported values",
         ] {
             let plan = format!(
-                "## Goal kind\nmath\n## Verification plan\n1. **gating**: {equivalent_check}\n"
+                "## Goal kind\nmath\n## Verification plan\n\
+                 1. **gating**: {equivalent_check}; {five_gates}\n"
             );
             assert!(
                 validate_math_plan_contract(obj, &plan).is_ok(),
@@ -5127,9 +5550,32 @@ mod tests {
             Self {
                 terminal: Ok("Not Refuted".into()),
                 verdict_json: Some(
-                    "{\"refuted\":false,\"evidence\":\"diff hunk src/foo.rs:1\",\"confidence\":\"medium\",\"details_md\":\"# Skeptic\\n\\nlooks good\"}".into(),
+                    serde_json::json!({
+                        "refuted": false,
+                        "evidence": "diff hunk src/foo.rs:1",
+                        "confidence": "medium",
+                        "math_checks": complete_math_checks_value(),
+                        "details_md": "# Skeptic\n\nlooks good"
+                    })
+                    .to_string(),
                 ),
                 details_md: b"# Skeptic details\nnot refuted body\n".to_vec(),
+                hold: None,
+            }
+        }
+        fn not_refuted_without_math_checks() -> Self {
+            Self {
+                terminal: Ok("Not Refuted".into()),
+                verdict_json: Some(
+                    serde_json::json!({
+                        "refuted": false,
+                        "evidence": "generic approval without a five-gate record",
+                        "confidence": "high",
+                        "details_md": "# Skeptic\n\ngeneric approval"
+                    })
+                    .to_string(),
+                ),
+                details_md: b"# Skeptic details\ngeneric approval\n".to_vec(),
                 hold: None,
             }
         }
@@ -5194,8 +5640,14 @@ mod tests {
             Self {
                 terminal: Ok("Not Refuted".into()),
                 verdict_json: Some(
-                    r#"{"refuted":false,"evidence":"src/x.rs:1","confidence":"low","details_md":""}"#
-                        .into(),
+                    serde_json::json!({
+                        "refuted": false,
+                        "evidence": "src/x.rs:1",
+                        "confidence": "low",
+                        "math_checks": complete_math_checks_value(),
+                        "details_md": ""
+                    })
+                    .to_string(),
                 ),
                 details_md: b"# Skeptic on-disk\nrendered from disk\n".to_vec(),
                 hold: None,
@@ -5622,6 +6074,54 @@ mod tests {
         assert!(log.iter().any(|t| t == "fired"));
         assert!(log.iter().any(|t| t == "skeptic:0:false:medium"));
         assert!(log.iter().any(|t| t == "agg:0/1:true"));
+    }
+
+    #[tokio::test]
+    async fn verification_stage_math_lens_rejects_generic_approval() {
+        let spawner = Arc::new(MockSpawner::new([
+            MockResponse::not_refuted_without_math_checks(),
+        ]));
+        let observed = spawner.clone();
+        let (log, emit) = collect_events();
+        let workspace = tempfile::tempdir().unwrap();
+        let verifier_id = unique_verifier_id();
+
+        let result = run_verification_stage(
+            spawner,
+            stage_inputs(
+                "Derive the closed-form threshold and prove its boundary case.",
+                "The derivation is complete.",
+                workspace.path(),
+                &verifier_id,
+                1,
+                1,
+            ),
+            &emit,
+        )
+        .await;
+
+        let GoalClassifierOutcome::NotAchieved {
+            details_path,
+            gaps_summary,
+            ..
+        } = result.outcome
+        else {
+            panic!("math approval without five gate rows must not achieve");
+        };
+        assert!(gaps_summary.contains("math approval record invalid"));
+        assert!(gaps_summary.contains("missing math gate `contract-closure`"));
+        assert!(
+            observed.prompts.lock().unwrap()[0].contains("Math / quantitative correctness lens"),
+            "math objective must receive the math verifier lens"
+        );
+        assert!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .any(|tag| tag == "skeptic:0:true:unknown"),
+            "invalid approval must emit a synthetic refute"
+        );
+        let _ = tokio::fs::remove_file(details_path).await;
     }
 
     /// `prior_gaps` must reach the spawned skeptic prompts through the
@@ -7205,6 +7705,7 @@ mod tests {
             implementer_scratch: "/tmp/ds-goal-test/implementer",
             scratch_dir_ready: true,
             prior_gaps: None,
+            require_math_validation: false,
         };
 
         let result = run_one_skeptic(
