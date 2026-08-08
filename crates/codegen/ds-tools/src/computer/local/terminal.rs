@@ -4177,6 +4177,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_persistent_shell_dump_does_not_abort_later_semicolon_list() {
+        let backend = LocalTerminalBackend::with_persistent_shell();
+
+        // The first run initializes and snapshots the persistent shell. The
+        // dump helper's private strict options must not become user state.
+        let init_request = make_request("true");
+        let init_output_file = init_request.output_file.clone();
+        let init = backend.run(init_request).await.unwrap();
+        assert_eq!(init.exit_code, Some(0));
+
+        let request = make_request("false; printf 'after\\n'");
+        let output_file = request.output_file.clone();
+        let result = backend.run(request).await.unwrap();
+
+        assert_eq!(
+            result.exit_code,
+            Some(0),
+            "a default semicolon list must continue after a failure: {:?}",
+            result.combined_output
+        );
+        assert_eq!(result.combined_output, "after\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&output_file).await.unwrap(),
+            "after\n",
+            "the durable terminal log must contain the captured output"
+        );
+
+        let _ = tokio::fs::remove_file(init_output_file).await;
+        let _ = tokio::fs::remove_file(output_file).await;
+    }
+
+    #[tokio::test]
     async fn test_persistent_shell_env_var_persists() {
         let backend = LocalTerminalBackend::with_persistent_shell();
 

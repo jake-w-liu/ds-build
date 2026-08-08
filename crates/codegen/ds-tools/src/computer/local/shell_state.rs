@@ -74,6 +74,15 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
+  # Capture the caller's options before enabling the dump helper's own strict
+  # mode. Recording options afterwards injects errexit/pipefail into every
+  # subsequent persistent-shell command, so a normal `false; echo after`
+  # sequence stops at `false` even when the user never enabled errexit.
+  local posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -v '^set -o nounset$' | command grep -v '^set +o nounset$' || true)
+  local bash_opts
+  bash_opts=$(builtin shopt -p 2>/dev/null || true)
+
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -104,12 +113,8 @@ dump_bash_state() {
   env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|DS_SANDBOX|DS_AGENT=|SUDO_ASKPASS|DS_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -v '^set -o nounset$' | command grep -v '^set +o nounset$' || true)
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
-  local bash_opts
-  bash_opts=$(builtin shopt -p 2>/dev/null || true)
   _emit_encoded "$bash_opts" "BASH_OPTS_B64"
 
   local all_functions
@@ -129,6 +134,12 @@ dump_bash_state() {
 /// as base64-encoded replayable shell snippets.
 const DUMP_ZSH_STATE_SCRIPT: &str = r##"
 function dump_zsh_state() {
+  # `emulate -L ... -o errreturn -o pipefail` is private machinery for this
+  # helper. Snapshot the caller's options first so those helper-only options
+  # are not replayed into the next terminal command.
+  local zsh_opts
+  zsh_opts=$(builtin setopt 2>/dev/null | command grep -v '^nounset$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\n", $0}' || true)
+
   emulate -L zsh -o errreturn -o pipefail
   set -u
 
@@ -158,8 +169,6 @@ function dump_zsh_state() {
   env_vars=$(builtin typeset -xp 2>/dev/null | command grep -viE '_proxy=|DS_SANDBOX|DS_AGENT=|SUDO_ASKPASS|DS_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
-  local zsh_opts
-  zsh_opts=$(setopt 2>/dev/null | command grep -v '^nounset$' | command awk '{printf "builtin setopt %s 2>/dev/null || true\n", $0}' || true)
   _emit_encoded "$zsh_opts" "ZSH_OPTS_B64"
 
   local all_functions
@@ -1065,6 +1074,65 @@ mod tests {
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         (code, stdout)
+    }
+
+    /// A state dump may use strict options internally, but those options are
+    /// not user state and must not change the next command's control flow.
+    async fn assert_dump_helper_options_do_not_leak(shell: ShellKind) {
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState {
+            cwd,
+            snapshot: String::new(),
+            shell,
+        };
+
+        let (code, stdout) = run_command(&mut state, "true").await;
+        assert_eq!(code, 0, "initial state dump failed: {stdout:?}");
+        assert!(!state.snapshot.is_empty(), "initial state dump was empty");
+
+        let (code, stdout) = run_command(&mut state, "false; printf 'after\\n'").await;
+        assert_eq!(
+            code, 0,
+            "dump helper leaked a failure-abort option into the next command: {stdout:?}"
+        );
+        assert_eq!(
+            stdout, "after\n",
+            "semicolon-separated commands after a failure must still run by default"
+        );
+
+        let (code, stdout) =
+            run_command(&mut state, "false | true; printf 'pipeline=%s\\n' \"$?\"").await;
+        assert_eq!(code, 0, "default pipeline probe failed: {stdout:?}");
+        assert_eq!(
+            stdout, "pipeline=0\n",
+            "the dump helper's private pipefail option must not leak"
+        );
+
+        let (code, stdout) = run_command(&mut state, "set -o pipefail").await;
+        assert_eq!(code, 0, "could not enable user pipefail: {stdout:?}");
+        let (code, stdout) =
+            run_command(&mut state, "false | true; printf 'pipeline=%s\\n' \"$?\"").await;
+        assert_eq!(code, 0, "user pipefail probe failed: {stdout:?}");
+        assert_eq!(
+            stdout, "pipeline=1\n",
+            "an option explicitly enabled by the user must persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_dump_helper_options_do_not_leak() {
+        if !bash_available() {
+            return;
+        }
+        assert_dump_helper_options_do_not_leak(ShellKind::Bash).await;
+    }
+
+    #[tokio::test]
+    async fn zsh_dump_helper_options_do_not_leak() {
+        if !zsh_available() {
+            return;
+        }
+        assert_dump_helper_options_do_not_leak(ShellKind::Zsh).await;
     }
 
     #[tokio::test]
