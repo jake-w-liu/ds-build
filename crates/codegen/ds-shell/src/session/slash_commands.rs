@@ -2579,13 +2579,13 @@ mod tests {
 
     #[test]
     fn goal_structure_modifier_is_activated_and_removed_from_objective() {
-        match resolve_goal("/structure start from AGENT_INSTRUCTIONS.txt --budget 500000") {
+        match resolve_goal("/structure complete the remaining work --budget 500000") {
             BuiltinAction::GoalSet {
                 objective,
                 token_budget,
                 structured,
             } => {
-                assert_eq!(objective, "start from AGENT_INSTRUCTIONS.txt");
+                assert_eq!(objective, "complete the remaining work");
                 assert_eq!(token_budget, Some(500_000));
                 assert!(structured);
             }

@@ -129,7 +129,6 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::SchedulerList(_)
         | ToolInput::UpdateGoal(_)
         | ToolInput::HeadroomRetrieve(_)
-        | ToolInput::MprValidateArtifact(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

@@ -96,9 +96,6 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::ds_build::scheduler::list::SchedulerListInput),
     UpdateGoal(UpdateGoalInput),
     HeadroomRetrieve(crate::implementations::ds_build::headroom_retrieve::HeadroomRetrieveInput),
-    MprValidateArtifact(
-        crate::implementations::ds_build::mpr_validate::MprValidateArtifactInput,
-    ),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

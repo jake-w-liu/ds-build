@@ -388,9 +388,8 @@ impl ChannelSpawner {
 pub(crate) struct GoalPlannerInputs<'a> {
     pub objective: &'a str,
     /// Workspace root (parent session cwd). Used by the source-aware math
-    /// contract check to follow named local sources (e.g. a wrapper
-    /// objective pointing at `AGENT_INSTRUCTIONS.txt`), matching the final
-    /// verifier's detection.
+    /// contract check to follow path-like tokens in the objective that name
+    /// local files, matching the final verifier's detection.
     pub workspace_root: &'a Path,
     pub context: &'a str,
     pub plan_file: &'a Path,

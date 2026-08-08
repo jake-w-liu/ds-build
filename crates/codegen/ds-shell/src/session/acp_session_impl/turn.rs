@@ -2707,78 +2707,76 @@ mod completion_requirement_tests {
 
     #[test]
     fn accepts_only_a_clean_successful_final_solo_tool_call() {
+        // Generic required tool name — completion gate is name-agnostic.
         let result = completed(
-            vec![outcome("mpr_validate_artifact", 1, 0)],
-            &["mpr_validate_artifact"],
+            vec![outcome("required_check", 1, 0)],
+            &["required_check"],
             true,
             None,
             false,
         );
-        assert!(completion_requirement_satisfied(
-            &result,
-            "mpr_validate_artifact"
-        ));
+        assert!(completion_requirement_satisfied(&result, "required_check"));
     }
 
     #[test]
     fn rejects_bad_calls_and_accepts_a_repaired_clean_final_call() {
-        let name_only = completed(vec![], &["mpr_validate_artifact"], false, None, false);
+        let name_only = completed(vec![], &["required_check"], false, None, false);
         assert!(!completion_requirement_satisfied(
             &name_only,
-            "mpr_validate_artifact"
+            "required_check"
         ));
 
         // A success from an earlier invocation must not make a denied or
         // malformed final call appear successful.
         let stale_success = completed(
-            vec![outcome("mpr_validate_artifact", 1, 0)],
-            &["mpr_validate_artifact"],
+            vec![outcome("required_check", 1, 0)],
+            &["required_check"],
             false,
             None,
             false,
         );
         assert!(!completion_requirement_satisfied(
             &stale_success,
-            "mpr_validate_artifact"
+            "required_check"
         ));
 
         let failed = completed(
-            vec![outcome("mpr_validate_artifact", 0, 1)],
-            &["mpr_validate_artifact"],
+            vec![outcome("required_check", 0, 1)],
+            &["required_check"],
             false,
             None,
             false,
         );
         assert!(!completion_requirement_satisfied(
             &failed,
-            "mpr_validate_artifact"
+            "required_check"
         ));
 
         let failed_then_succeeded = completed(
-            vec![outcome("mpr_validate_artifact", 1, 1)],
-            &["mpr_validate_artifact"],
+            vec![outcome("required_check", 1, 1)],
+            &["required_check"],
             true,
             None,
             false,
         );
         assert!(completion_requirement_satisfied(
             &failed_then_succeeded,
-            "mpr_validate_artifact"
+            "required_check"
         ));
 
         let mixed_batch = completed(
             vec![
-                outcome("mpr_validate_artifact", 1, 0),
+                outcome("required_check", 1, 0),
                 outcome("edit_file", 1, 0),
             ],
-            &["mpr_validate_artifact", "edit_file"],
+            &["required_check", "edit_file"],
             false,
             None,
             false,
         );
         assert!(!completion_requirement_satisfied(
             &mixed_batch,
-            "mpr_validate_artifact"
+            "required_check"
         ));
     }
 

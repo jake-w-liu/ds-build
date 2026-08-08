@@ -1649,11 +1649,10 @@ pub(crate) fn validate_math_plan_contract(
 }
 
 /// Source-aware sibling of [`validate_math_plan_contract`]: the wrapper
-/// objective may be a pointer (e.g. "start from AGENT_INSTRUCTIONS.txt and
-/// complete all") whose quantitative content lives in named local sources.
-/// The planner gate must use the SAME traversal the final verifier uses
-/// ([`objective_or_named_sources_suggests_math`]) so a misclassified wrapper
-/// cannot slip past the static contract check.
+/// objective may only name local paths whose quantitative content lives in
+/// those files. The planner gate must use the SAME traversal the final
+/// verifier uses ([`objective_or_named_sources_suggests_math`]) so a
+/// misclassified wrapper cannot slip past the static contract check.
 pub(crate) fn validate_math_plan_contract_source_aware(
     objective: &str,
     workspace_root: &std::path::Path,
@@ -4859,29 +4858,32 @@ mod tests {
     #[test]
     fn quantitative_source_detection_follows_named_text_chain_without_tree_scan() {
         let dir = tempfile::tempdir().unwrap();
+        // Fixture names are local to this test only — not product contracts.
+        let wrapper = dir.path().join("a.txt");
+        let math = dir.path().join("b.tex");
         std::fs::write(
-            dir.path().join("AGENT_INSTRUCTIONS.txt"),
-            b"Read research_questions.tex and complete every requested subpart.\n",
+            &wrapper,
+            b"Read b.tex and complete every requested subpart.\n",
         )
         .unwrap();
         std::fs::write(
-            dir.path().join("research_questions.tex"),
+            &math,
             b"Derive the governing equation, state boundary conditions, and perform numerical validation.\n",
         )
         .unwrap();
         assert!(objective_or_named_sources_suggests_math(
-            "Start from AGENT_INSTRUCTIONS.txt and complete all.",
+            "Start from a.txt and complete all.",
             dir.path(),
         ));
 
         std::fs::write(
-            dir.path().join("README.md"),
-            b"See notes.txt for project release history.\n",
+            dir.path().join("c.md"),
+            b"See d.txt for project release history.\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join("notes.txt"), b"Release notes only.\n").unwrap();
+        std::fs::write(dir.path().join("d.txt"), b"Release notes only.\n").unwrap();
         assert!(!objective_or_named_sources_suggests_math(
-            "Summarize README.md.",
+            "Summarize c.md.",
             dir.path(),
         ));
     }
