@@ -1248,9 +1248,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::TaskComplete(result) => dispatch_task_result(result, app),
         Action::ToggleGoalDetail => {
             with_active_agent(app, |agent| {
-                if agent.goal_state.is_some() {
-                    agent.show_goal_detail = !agent.show_goal_detail;
-                }
+                agent.toggle_goal_detail();
             });
             vec![]
         }

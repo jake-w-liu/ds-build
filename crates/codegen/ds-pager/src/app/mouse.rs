@@ -57,9 +57,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 if self.hit_goal_status.contains(mouse.column, mouse.row) {
-                    if self.goal_state.is_some() {
-                        self.show_goal_detail = !self.show_goal_detail;
-                    }
+                    self.toggle_goal_detail();
                     return InputOutcome::Changed;
                 }
                 if self.hit_context.contains(mouse.column, mouse.row) {
@@ -1133,7 +1131,7 @@ mod tests {
     use crate::app::agent::AgentState;
     use crate::app::agent_view::PromptMode;
     use crate::app::agent_view::test_fixtures::{
-        make_running_agent, running_agent_local_only, test_pasted_image,
+        make_agent, make_running_agent, running_agent_local_only, test_pasted_image,
     };
     use crossterm::event::KeyModifiers;
     use ratatui::buffer::Buffer;
@@ -1178,6 +1176,39 @@ mod tests {
     /// Left-click the row's `[cancel]` (delete) button.
     fn click_delete(agent: &mut AgentView, selected_id: u64) -> InputOutcome {
         click_queue_button(agent, selected_id, |a, c, r| a.queue.delete_click(c, r))
+    }
+
+    /// The workflow browse phase and row selection are scoped to one panel
+    /// opening. Clicking the status chip must clear both on close and open,
+    /// matching the keyboard and close-button paths.
+    #[test]
+    fn goal_status_click_resets_panel_navigation_on_every_toggle() {
+        let mut agent = make_agent();
+        agent.goal_state = Some(crate::app::agent::GoalDisplayState::test_stub());
+        agent.show_goal_detail = true;
+        agent.workflow_view_phase = Some("verify");
+        agent.workflow_selected = Some("child-verifier".into());
+        agent.hit_goal_status.rect = Some(Rect::new(3, 4, 8, 1));
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::empty(),
+        };
+
+        assert!(matches!(agent.handle_mouse(&click), InputOutcome::Changed));
+        assert!(!agent.show_goal_detail, "first click closes the panel");
+        assert_eq!(agent.workflow_view_phase, None, "close resets phase view");
+        assert_eq!(agent.workflow_selected, None, "close resets row selection");
+
+        // Seed stale state to prove the opening half of the toggle also
+        // enforces the per-open invariant rather than relying on the close.
+        agent.workflow_view_phase = Some("execute");
+        agent.workflow_selected = Some("child-worker".into());
+        assert!(matches!(agent.handle_mouse(&click), InputOutcome::Changed));
+        assert!(agent.show_goal_detail, "second click reopens the panel");
+        assert_eq!(agent.workflow_view_phase, None, "open follows active phase");
+        assert_eq!(agent.workflow_selected, None, "open starts unselected");
     }
     /// Mouse "Send now" (interject) on the last local row keeps the pane open
     /// when a server row remains — the third sibling site of the same fix.

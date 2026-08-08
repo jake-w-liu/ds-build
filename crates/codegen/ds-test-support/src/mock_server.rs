@@ -753,9 +753,15 @@ impl MockInferenceServer {
         let scripted_rs = scripted.clone();
         let scripted_settings = scripted.clone();
         let scripted_msg = scripted;
+        let agent_turns_cc = agent_turns.clone();
+        let agent_turns_rs = agent_turns.clone();
+        let agent_turns_msg = agent_turns;
         let delay_cc = chunk_delay.clone();
         let delay_rs = chunk_delay.clone();
         let delay_msg = chunk_delay;
+        let completion_gate_cc = completion_gate.clone();
+        let completion_gate_rs = completion_gate.clone();
+        let completion_gate_msg = completion_gate;
 
         Router::new()
             .route(
@@ -765,9 +771,9 @@ impl MockInferenceServer {
                     let required = token_cc.clone();
                     let mode = mode_cc.clone();
                     let scripted = scripted_cc.clone();
-                    let agent_turns = agent_turns.clone();
+                    let agent_turns = agent_turns_cc.clone();
                     let delay = delay_cc.clone();
-                    let completion_gate = completion_gate.clone();
+                    let completion_gate = completion_gate_cc.clone();
                     async move {
                         let auth = Self::extract_auth(&headers);
                         log.record(
@@ -839,7 +845,9 @@ impl MockInferenceServer {
                     let required = token_rs.clone();
                     let mode = mode_rs.clone();
                     let scripted = scripted_rs.clone();
+                    let agent_turns = agent_turns_rs.clone();
                     let delay = delay_rs.clone();
+                    let completion_gate = completion_gate_rs.clone();
                     async move {
                         let auth = Self::extract_auth(&headers);
                         log.record(
@@ -894,15 +902,25 @@ impl MockInferenceServer {
                             .and_then(Value::as_str)
                             .unwrap_or("test-model");
 
-                        let events = match &*mode.read().unwrap() {
-                            ResponseMode::Echo => {
-                                sse::responses_api_events(&format!("Echo: {user_msg}"), model)
-                            }
-                            ResponseMode::Fixed(text) => {
-                                sse::responses_api_events_exact(text, model)
+                        let (events, gate) = match Self::pop_agent_turn(&agent_turns, &body) {
+                            Some(text) => (
+                                sse::responses_api_events_exact(&text, model),
+                                Some(completion_gate.clone()),
+                            ),
+                            None => {
+                                let events = match &*mode.read().unwrap() {
+                                    ResponseMode::Echo => sse::responses_api_events(
+                                        &format!("Echo: {user_msg}"),
+                                        model,
+                                    ),
+                                    ResponseMode::Fixed(text) => {
+                                        sse::responses_api_events_exact(text, model)
+                                    }
+                                };
+                                (events, None)
                             }
                         };
-                        let stream = paced_events(events, *delay.read().unwrap(), None);
+                        let stream = paced_events(events, *delay.read().unwrap(), gate);
                         Sse::new(stream)
                             .keep_alive(KeepAlive::default())
                             .into_response()
@@ -916,8 +934,10 @@ impl MockInferenceServer {
                     let required = token_msg.clone();
                     let mode = mode_msg.clone();
                     let scripted = scripted_msg.clone();
+                    let agent_turns = agent_turns_msg.clone();
                     let stop_reason = messages_stop_reason.clone();
                     let delay = delay_msg.clone();
+                    let completion_gate = completion_gate_msg.clone();
                     async move {
                         let auth = Self::extract_auth(&headers);
                         log.record(
@@ -975,15 +995,26 @@ impl MockInferenceServer {
                         let stop = stop_reason.read().unwrap().clone();
                         // Messages streams its text as a single delta, so the
                         // fixed text is byte-exact by construction.
-                        let events = match &*mode.read().unwrap() {
-                            ResponseMode::Echo => {
-                                sse::messages_api_events(&format!("Echo: {user_msg}"), model, &stop)
-                            }
-                            ResponseMode::Fixed(text) => {
-                                sse::messages_api_events(text, model, &stop)
+                        let (events, gate) = match Self::pop_agent_turn(&agent_turns, &body) {
+                            Some(text) => (
+                                sse::messages_api_events(&text, model, &stop),
+                                Some(completion_gate.clone()),
+                            ),
+                            None => {
+                                let events = match &*mode.read().unwrap() {
+                                    ResponseMode::Echo => sse::messages_api_events(
+                                        &format!("Echo: {user_msg}"),
+                                        model,
+                                        &stop,
+                                    ),
+                                    ResponseMode::Fixed(text) => {
+                                        sse::messages_api_events(text, model, &stop)
+                                    }
+                                };
+                                (events, None)
                             }
                         };
-                        let stream = paced_events(events, *delay.read().unwrap(), None);
+                        let stream = paced_events(events, *delay.read().unwrap(), gate);
                         Sse::new(stream)
                             .keep_alive(KeepAlive::default())
                             .into_response()
@@ -1224,6 +1255,122 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(messages_stream_text(&body), MERMAID_TEXT);
+    }
+
+    #[tokio::test]
+    async fn agent_turn_fifo_applies_to_every_backend_and_skips_aux_requests() {
+        let server = MockInferenceServer::start().await.unwrap();
+        server.set_response("fallback");
+        server.set_agent_turns([
+            "responses agent turn".to_string(),
+            "chat agent turn".to_string(),
+            "messages agent turn".to_string(),
+        ]);
+        let client = reqwest::Client::new();
+
+        // A one-tool auxiliary request must use the fallback without consuming
+        // the first queued agent turn.
+        let body = client
+            .post(format!("{}/responses", server.url()))
+            .json(&json!({
+                "model": "test-model",
+                "input": [{ "role": "user", "content": "aux" }],
+                "tools": [{}],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(responses_stream_text(&body), "fallback");
+
+        let body = client
+            .post(format!("{}/responses", server.url()))
+            .json(&json!({
+                "model": "test-model",
+                "input": [{ "role": "user", "content": "agent" }],
+                "tools": [{}, {}],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(responses_stream_text(&body), "responses agent turn");
+
+        let body = client
+            .post(format!("{}/chat/completions", server.url()))
+            .json(&json!({
+                "model": "test-model",
+                "messages": [{ "role": "user", "content": "agent" }],
+                "tools": [{}, {}],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(chat_stream_text(&body), "chat agent turn");
+
+        let body = client
+            .post(format!("{}/messages", server.url()))
+            .json(&json!({
+                "model": "test-model",
+                "messages": [{ "role": "user", "content": "agent" }],
+                "tools": [{}, {}],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(messages_stream_text(&body), "messages agent turn");
+    }
+
+    #[tokio::test]
+    async fn agent_turn_honors_completion_gate_on_every_backend() {
+        type StreamTextParser = fn(&str) -> String;
+        let cases: [(&str, StreamTextParser); 3] = [
+            ("responses", responses_stream_text),
+            ("chat/completions", chat_stream_text),
+            ("messages", messages_stream_text),
+        ];
+        for (path, parse_text) in cases {
+            let server = MockInferenceServer::start().await.unwrap();
+            let expected = format!("held {path} turn");
+            server.set_agent_turns([expected.clone()]);
+            server.hold_agent_completions();
+
+            let response = reqwest::Client::new()
+                .post(format!("{}/{path}", server.url()))
+                .json(&json!({
+                    "model": "test-model",
+                    "input": [{ "role": "user", "content": "agent" }],
+                    "messages": [{ "role": "user", "content": "agent" }],
+                    "tools": [{}, {}],
+                }))
+                .send()
+                .await
+                .unwrap();
+            let mut body = Box::pin(response.text());
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(250), body.as_mut())
+                    .await
+                    .is_err(),
+                "held {path} agent turn must not emit its terminal event"
+            );
+            server.release_agent_completions();
+            let body = tokio::time::timeout(Duration::from_secs(2), body)
+                .await
+                .unwrap_or_else(|_| panic!("released {path} stream must finish"))
+                .unwrap();
+            assert_eq!(parse_text(&body), expected, "backend path {path}");
+        }
     }
 
     #[tokio::test]

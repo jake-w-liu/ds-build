@@ -303,15 +303,13 @@ pub fn derive_workflow_snapshot(
         };
         let active_ord = order(active_phase_id);
         let this_ord = order(id);
-        if this_ord < active_ord {
-            WorkflowPhaseStatus::Complete
-        } else if total > 0 && done >= total && total > 0 {
+        if this_ord < active_ord || (total > 0 && done >= total) {
             WorkflowPhaseStatus::Complete
         } else if total > 0
             && agents
                 .iter()
                 .any(|a| a.phase_id == id && matches!(a.status, WorkflowAgentStatus::Failed))
-            && done + 1 <= total
+            && done < total
             && agents
                 .iter()
                 .filter(|a| a.phase_id == id)
@@ -526,6 +524,8 @@ pub fn render_workflow_panel(
     let right_w = area.width.saturating_sub(left_w + 1);
 
     let mut rows_used = 0u16;
+    // One shared row set drives the header, body, selection, and height.
+    let agent_rows = focused_agent_rows(snap);
 
     // Header row: "Phases" | "<ViewedPhase> · N agents"
     if rows_used < area.height {
@@ -541,6 +541,8 @@ pub fn render_workflow_panel(
             .iter()
             .filter(|a| a.phase_id == focus_phase_id)
             .count();
+        let following_all_agents =
+            snap.view_phase_id.is_none() && n_in_phase == 0 && !agent_rows.is_empty();
         let left = Line::from(Span::styled(
             " Phases",
             Style::default()
@@ -551,7 +553,13 @@ pub fn render_workflow_panel(
             .view_phase_id
             .is_some_and(|vp| vp != snap.active_phase_id);
         let viewing_suffix = if viewing { " (viewing)" } else { "" };
-        let right_label = if n_in_phase == 0 {
+        let right_label = if following_all_agents {
+            format!(
+                " All agents · {} agent{}",
+                agent_rows.len(),
+                if agent_rows.len() == 1 { "" } else { "s" },
+            )
+        } else if n_in_phase == 0 {
             format!(" {active_name}{viewing_suffix}")
         } else {
             format!(
@@ -584,11 +592,9 @@ pub fn render_workflow_panel(
     let phase_rows = snap.phases.len() as u16;
     // The agents column shows the VIEWED phase when the user browsed away
     // from the pipeline's active phase (Left/Right).
-    let agent_rows = focused_agent_rows(snap);
-
-    let body_rows = phase_rows.max(agent_rows.len() as u16).min(
-        area.height.saturating_sub(rows_used),
-    );
+    let body_rows = phase_rows
+        .max(agent_rows.len() as u16)
+        .min(area.height.saturating_sub(rows_used));
 
     for row in 0..body_rows {
         let y = area.y + rows_used + row;
@@ -1138,6 +1144,35 @@ mod tests {
         assert!(
             focused_agent_rows(&snap).is_empty(),
             "browsed empty phase must yield no focused rows"
+        );
+    }
+
+    /// When following an empty active phase, the column deliberately falls
+    /// back to every workflow agent. Its header must describe those same rows
+    /// instead of labelling a mixed list as the empty active phase.
+    #[test]
+    fn fallback_header_describes_all_rendered_agents() {
+        let mut goal = stub_goal(GoalDisplayPhase::Idle, false, false);
+        goal.status = GoalDisplayStatus::Complete;
+        let mut map = HashMap::new();
+        let mut planner = stub_subagent("p1", "planner", "plan", true);
+        planner.goal_phase = Some(Arc::from("plan"));
+        let mut worker = stub_subagent("w1", "worker", "general-purpose", true);
+        worker.goal_phase = Some(Arc::from("execute"));
+        map.insert("child-p1".into(), planner);
+        map.insert("child-w1".into(), worker);
+
+        let snap = derive_workflow_snapshot(&goal, &map);
+        assert_eq!(snap.active_phase_id, "verify");
+        assert_eq!(focused_agent_rows(&snap).len(), 2, "fallback precondition");
+
+        let area = Rect::new(0, 0, 100, 12);
+        let mut buf = Buffer::empty(area);
+        render_workflow_panel(&mut buf, area, &snap, &Theme::current(), None);
+        let text = buffer_text(&buf, area);
+        assert!(
+            text.contains("All agents · 2 agents"),
+            "fallback header must describe the mixed-phase rows, got:\n{text}"
         );
     }
 }

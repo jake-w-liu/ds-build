@@ -19,6 +19,19 @@ use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 impl AgentView {
+    /// Toggle the goal-detail overlay and start every opening from the live
+    /// workflow phase with no stale row selection. Keeping this transition in
+    /// one method makes keyboard actions and status-chip clicks honor the same
+    /// per-open navigation contract.
+    pub(in crate::app) fn toggle_goal_detail(&mut self) {
+        if self.goal_state.is_none() {
+            return;
+        }
+        self.show_goal_detail = !self.show_goal_detail;
+        self.workflow_view_phase = None;
+        self.workflow_selected = None;
+    }
+
     /// Bind this view to a root session id, resetting the per-session
     /// reconnect cursor and both dedup highwaters (ACP + DeepSeek) when the id
     /// actually changes — all three are meaningless against another session's

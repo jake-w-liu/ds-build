@@ -1106,11 +1106,8 @@ impl AgentView {
             && key.modifiers.is_empty()
             && self.goal_state.is_some()
         {
-            // Opening the panel with `g` always starts from the
-            // pipeline's active phase (the view override is per-open).
-            if !self.show_goal_detail {
-                self.workflow_view_phase = None;
-            }
+            // The dispatched toggle resets phase browsing and row selection,
+            // so every opening follows the pipeline's live active phase.
             return InputOutcome::Action(Action::ToggleGoalDetail);
         }
         if let Event::Key(key) = ev
