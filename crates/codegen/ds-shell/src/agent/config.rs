@@ -2463,22 +2463,14 @@ impl Config {
     /// Fail-closed verification: infra-class goal verification failures
     /// pause the goal instead of recording `Achieved`.
     pub(crate) fn resolve_goal_fail_closed_verification(&self) -> Resolved<bool> {
-        BoolFlag::env("DS_GOAL_FAIL_CLOSED_VERIFICATION")
-            .config(self.goal.fail_closed_verification)
-            // Fail-closed by default for goal mode: an infra-class
-            // verification failure pauses the goal instead of recording a
-            // false `Achieved`. Opt out explicitly to restore the legacy
-            // fail-open (achieved-on-infra-error) behavior.
-            .default(true)
-            .resolve()
+        // Legacy settings are still accepted during migration, but may not
+        // weaken the final correctness gate.
+        Resolved::new(true, ConfigSource::Default)
     }
     /// Strict skeptic verdicts: a missing/malformed verdict JSON is a
     /// synthetic refute, never an approval without the structured record.
     pub(crate) fn resolve_goal_strict_skeptic_verdicts(&self) -> Resolved<bool> {
-        BoolFlag::env("DS_GOAL_STRICT_SKEPTIC_VERDICTS")
-            .config(self.goal.strict_skeptic_verdicts)
-            .default(false)
-            .resolve()
+        Resolved::new(true, ConfigSource::Default)
     }
     /// Shared single-pair resolution. Precedence: kill-switch ⇒
     /// `InheritCurrent`/`Config` > `config_pair` ⇒ `Explicit`/`Config` >

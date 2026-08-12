@@ -695,6 +695,7 @@ pub enum BuiltinAgentName {
     AttackerCode,
     AttackerMath,
     AttackerResearch,
+    FinalVerifier,
     BrowserUse,
     #[strum(serialize = "ds-build-orchestrator")]
     DsBuildOrchestrator,
@@ -727,6 +728,7 @@ impl BuiltinAgentName {
             Self::AttackerCode => AgentDefinition::attacker_code(),
             Self::AttackerMath => AgentDefinition::attacker_math(),
             Self::AttackerResearch => AgentDefinition::attacker_research(),
+            Self::FinalVerifier => AgentDefinition::final_verifier(),
             Self::BrowserUse => AgentDefinition::browser_use(),
             Self::DsBuildOrchestrator => AgentDefinition::ds_build_orchestrator(),
         }
@@ -1596,7 +1598,9 @@ impl AgentDefinition {
     pub fn attacker_code() -> Self {
         use crate::prompt::subagent_prompts;
         Self {
-            description: ds_tool_types::ATTACKER_CODE_SUBAGENT.description.to_string(),
+            description: ds_tool_types::ATTACKER_CODE_SUBAGENT
+                .description
+                .to_string(),
             tool_config: explore_toolset(),
             permission_mode: PermissionMode::Plan,
             prompt_body: Some(subagent_prompts::ATTACKER_CODE_PROMPT.to_string()),
@@ -1610,7 +1614,9 @@ impl AgentDefinition {
     pub fn attacker_math() -> Self {
         use crate::prompt::subagent_prompts;
         Self {
-            description: ds_tool_types::ATTACKER_MATH_SUBAGENT.description.to_string(),
+            description: ds_tool_types::ATTACKER_MATH_SUBAGENT
+                .description
+                .to_string(),
             tool_config: attacker_math_toolset(),
             // Default (not Plan): Plan is forward-compat-only today but
             // must not silently deny shell if that path is wired later.
@@ -1635,6 +1641,28 @@ impl AgentDefinition {
             inherit_skills: false,
             background: Some(false),
             ..Self::base(BuiltinAgentName::AttackerResearch, "")
+        }
+    }
+    /// Harness-owned final verifier. Its exact toolset is restored by the
+    /// subagent coordinator even if a project agent shadows this name.
+    pub fn final_verifier() -> Self {
+        Self {
+            description: "Harness-owned read-only correctness verifier.".to_string(),
+            tool_config: attacker_math_toolset(),
+            permission_mode: PermissionMode::Default,
+            discover_skills: false,
+            inherit_skills: false,
+            agents_md: false,
+            inject_default_tools: false,
+            mcp_inheritance: McpInheritance::None,
+            prompt_body: Some(
+                "You are a final correctness verifier. Inspect the immutable reviewed snapshot, \
+                 independently check every assigned facet, and return the exact structured verdict \
+                 requested by the harness. You cannot modify reviewed artifacts."
+                    .to_string(),
+            ),
+            background: Some(false),
+            ..Self::base(BuiltinAgentName::FinalVerifier, "")
         }
     }
     /// Browser Use agent definition.
@@ -1884,7 +1912,9 @@ mod tests {
     /// until classified.
     fn expected_strict_harness(name: BuiltinAgentName) -> bool {
         match name {
-            BuiltinAgentName::Codex | BuiltinAgentName::DsBuildOrchestrator => true,
+            BuiltinAgentName::Codex
+            | BuiltinAgentName::FinalVerifier
+            | BuiltinAgentName::DsBuildOrchestrator => true,
             BuiltinAgentName::DsBuild
             | BuiltinAgentName::DsBuildConcise
             | BuiltinAgentName::DsBuildPlan
@@ -1918,7 +1948,7 @@ mod tests {
     }
     #[test]
     fn is_strict_harness_agent_type_classifies_by_name() {
-        for strict in ["codex", "ds-build-orchestrator"] {
+        for strict in ["codex", "final-verifier", "ds-build-orchestrator"] {
             assert!(
                 is_strict_harness_agent_type(strict),
                 "{strict} should be strict"
@@ -2541,6 +2571,7 @@ description: Test default tool config
             ("attacker-code", BuiltinAgentName::AttackerCode),
             ("attacker-math", BuiltinAgentName::AttackerMath),
             ("attacker-research", BuiltinAgentName::AttackerResearch),
+            ("final-verifier", BuiltinAgentName::FinalVerifier),
             ("browser-use", BuiltinAgentName::BrowserUse),
         ] {
             let parsed = BuiltinAgentName::from_str(s).unwrap();
@@ -2577,6 +2608,37 @@ description: Test default tool config
         assert!(variants.contains(&BuiltinAgentName::AttackerCode));
         assert!(variants.contains(&BuiltinAgentName::AttackerMath));
         assert!(variants.contains(&BuiltinAgentName::AttackerResearch));
+        assert!(
+            !variants.contains(&BuiltinAgentName::FinalVerifier),
+            "the harness-owned final verifier must not be model-spawnable"
+        );
+    }
+
+    #[test]
+    fn final_verifier_has_only_read_and_sandboxed_compute_tools() {
+        use ds_tools::types::tool::ToolKind;
+
+        let verifier = AgentDefinition::final_verifier();
+        let kinds: Vec<_> = verifier
+            .tool_config
+            .tools
+            .iter()
+            .filter_map(|tool| tool.kind)
+            .collect();
+        assert!(kinds.contains(&ToolKind::Execute));
+        assert!(kinds.contains(&ToolKind::Read));
+        for forbidden in [
+            ToolKind::Edit,
+            ToolKind::Delete,
+            ToolKind::Write,
+            ToolKind::Move,
+            ToolKind::Task,
+            ToolKind::KillTaskAction,
+        ] {
+            assert!(!kinds.contains(&forbidden), "forbidden tool kind {forbidden:?}");
+        }
+        assert!(!verifier.inject_default_tools);
+        assert_eq!(verifier.mcp_inheritance, McpInheritance::None);
     }
     #[test]
     fn attacker_subagents_force_foreground_and_readonly() {

@@ -15,7 +15,7 @@ Inspect files named in OBJECTIVE/CONTEXT with your
 `{READ_TOOL}`/`{SEARCH_TOOL}`/`{LIST_TOOL}` tools to clarify scope, then follow
 workspace-local text files named by those sources until you have read the
 requirements/specification/input closure. Do not stop at a wrapper instruction
-file. Choose the goal kind and build the contract from the source contents, not
+file. Choose every applicable goal facet and build the contract from the source contents, not
 only from the literal OBJECTIVE. Do NOT modify the workspace; your only write is
 `{PLAN_FILE}`.
 
@@ -48,8 +48,6 @@ score) so the verifier sees it was deferred, not forgotten. If web research
 is unavailable or fails, note the gap under `## Assumed scope` and proceed
 from best knowledge.
 
-## Goal kind — pick exactly one
-
 ## Named sources and supplied checks
 
 Follow named local sources far enough to recover the real requirements, then
@@ -59,15 +57,23 @@ task-provided evaluators or build commands and include them as evidence, while
 keeping OBJECTIVE and its authoritative sources—not a checker implementation—as
 the contract.
 
-- `code-change` — modify the workspace; the diff is the evidence.
+## Goal facets — choose all that apply
+
+- `code` — modify the workspace; the diff is evidence.
 - `analysis` — understand existing code; deliverable is prose, diff may be empty.
 - `research` — gather external info; deliverable is a summary, diff may be empty.
 - `math` — mathematical/physical formulation, derivation, proof, closed form,
   scientific computation, or quantitative/numerical validation; correctness
   (not structure) is the gate. Use this whenever the objective or its named
   sources ask to formulate, derive, prove, solve, integrate, simulate, validate,
-  or produce a boxed/numerical result — even if the writeup lives in a Markdown
-  file (do NOT pick `analysis` for that).
+  or produce a boxed/numerical result. Add it alongside `code`, `research`, or
+  other applicable facets; wrapper wording must never suppress it.
+- `empirical` — experimental or statistical data analysis.
+- `sources` — material claims depend on supplied or external sources.
+- `citations` — citation-to-claim integrity is part of the deliverable.
+- `document-render` — compiled or rendered document output must be checked.
+- `state-regression` — always include this so a repair cannot silently revert
+  previously present work.
 
 ## Specify OUTCOMES, not architecture
 
@@ -151,13 +157,13 @@ dump, a headless-run log) as `evidence`, never as `gating`.
 
 Use your `{WRITE_TOOL}` tool to write Markdown to `{PLAN_FILE}` with these
 sections, in order. `## Implementation approach` and `## Task checklist` are
-`code-change` only; include `## Risks / Contradictions` only when one exists.
+`code` only; include `## Risks / Contradictions` only when one exists.
 
 ```
 # Plan: <one-sentence headline paraphrasing OBJECTIVE>
 
-## Goal kind
-<code-change | analysis | research | math>
+## Goal facets
+<comma-separated subset of code, analysis, research, math, empirical, sources, citations, document-render, state-regression>
 
 ## Acceptance criteria
 1. <gating, outcome-based criterion>
@@ -172,10 +178,10 @@ sections, in order. `## Implementation approach` and `## Task checklist` are
 <files / modules / external deps this goal touches>
 
 ## Implementation approach
-<code-change only: how to structure the code so it is easy to test>
+<code only: how to structure the code so it is easy to test>
 
 ## Task checklist
-- [ ] <code-change only: first concrete implementation step>
+- [ ] <code only: first concrete implementation step>
 - [ ] <next step>
 
 ## Risks / Contradictions
@@ -213,11 +219,10 @@ only checks that something exists, compiles, or parses is evidence, not gating.
 
 **Math/physics research correctness.** When the deliverable contains
 mathematical derivations, physical formulations, simulations, proofs, or
-quantitative results, set `## Goal kind` to `math`. Include one `gating` step
-that spawns a PARALLEL batch of `attacker-math` critics — one per requested
-result/regime/claim (no hard cap; spawn all with background, then collect every
-output before gating) — or uses direct independent computation
-against the actual final artifact. Across the `gating` steps, explicitly name
+quantitative results, include the `math` facet. Include a `gating` independent
+check against the actual final artifact. Group related results into a bounded
+number of coherent checks while covering every requested result; do not create
+one worker per sentence or equation. Across the `gating` steps, explicitly name
 and cover all five harness gates:
 
 - `contract-closure` — every requested result, domain, branch, BC/IC, and
@@ -227,8 +232,8 @@ and cover all five harness gates:
   artifact location/version, exact input, observed output, and tolerance/error;
 - `invariant-ledger` — symbols, units, dimensions, normalization, signs, and
   coordinate/gauge/Fourier conventions propagated consistently;
-- `state-isolation` — authoritative inputs and a pre-edit/last-validated artifact
-  snapshot/digest/diff preserved, with every changed dependency rechecked.
+- `state-isolation` — authoritative inputs and the frozen goal-start artifact
+  snapshot/digest/diff plus prior-round gaps, with every changed dependency rechecked.
 
 These gates are a private verification ledger, not a user-facing workflow
 section. A gate that truly does not apply still appears with a concrete `N/A`
@@ -283,12 +288,12 @@ and the best observable proxy explicitly.
 **Assumed scope** — specific files/modules/deps you expect to touch; do not
 restate OBJECTIVE.
 
-**Implementation approach** (`code-change` only) — structure the work so it is
+**Implementation approach** (`code` only) — structure the work so it is
 easy to test: separate pure logic from I/O and prefer small testable units.
 Design guidance, NOT an acceptance criterion — do not refute working code for
 diverging from it, and do not restate it as a criterion.
 
-**Task checklist** (`code-change` only) — 3-8 ordered `- [ ]` checkbox steps
+**Task checklist** (`code` only) — 3-8 ordered `- [ ]` checkbox steps
 the implementer executes and checks off as it goes; the harness mines the first
 unchecked box as the per-turn "next step" nudge. Steps are HOW guidance like
 the approach, never part of the judged contract — keep each small, concrete,

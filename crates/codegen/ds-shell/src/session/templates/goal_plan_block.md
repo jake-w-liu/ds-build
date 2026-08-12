@@ -27,6 +27,6 @@ Plan: {PLAN_PATH}
   a private five-gate ledger for `contract-closure`, `derivation-integrity`,
   `evidence-provenance`, `invariant-ledger`, and `state-isolation`; each gate
   must carry a claim-bound observation or a concrete `N/A` reason. Freeze
-  authoritative inputs and the pre-edit/last-validated artifact state in
+  authoritative inputs and the frozen goal-start artifact state plus prior-round gaps in
   `{SCRATCH}`, make narrow edits, and recheck every changed dependency. Do not
   expose this workflow ledger in the user-facing artifact unless requested.

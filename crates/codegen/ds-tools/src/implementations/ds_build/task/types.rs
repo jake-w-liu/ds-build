@@ -18,11 +18,13 @@
 
 use std::sync::Arc;
 
+use ds_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
-use ds_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
 
 use crate::register_resource;
+
+pub const FINAL_VERIFIER_AGENT_TYPE: &str = "final-verifier";
 
 // Request / Response
 
@@ -116,6 +118,16 @@ pub struct SubagentRuntimeOverrides {
     /// (implementer vs explorer). `None` for every non-goal spawn ⇒ the parent
     /// agent decides the flavor (unchanged behavior).
     pub harness_agent_type: Option<String>,
+    /// Harness-only filesystem boundary for an immutable final verifier.
+    /// Never populated from the model-facing `task` input.
+    pub verifier_sandbox: Option<VerifierSandboxSpec>,
+}
+
+/// Read-only reviewed tree plus the verifier's only writable directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierSandboxSpec {
+    pub reviewed_root: std::path::PathBuf,
+    pub scratch_root: std::path::PathBuf,
 }
 
 /// Re-export of [`ds_tool_types::is_not_sentinel`] for existing call sites.
@@ -942,11 +954,7 @@ mod tests {
         let ids: Vec<&str> = config.tools.iter().map(|tc| tc.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                "DsBuild:read_file",
-                "DsBuild:list_dir",
-                "DsBuild:grep",
-            ]
+            vec!["DsBuild:read_file", "DsBuild:list_dir", "DsBuild:grep",]
         );
     }
 

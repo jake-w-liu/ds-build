@@ -1081,6 +1081,7 @@ impl SessionActor {
                     );
                     need_baseline.then_some((src, dst))
                 };
+                let mut baseline_failed = false;
                 if let Some((src, dst)) = baseline_target {
                     match tokio::fs::copy(&src, &dst).await {
                         Ok(_) => {
@@ -1092,13 +1093,28 @@ impl SessionActor {
                                 o.plan_baseline_file = Some(dst);
                             }
                         }
-                        Err(err) => tracing::warn!(
-                            error = %err,
-                            src = %src.display(),
-                            "goal planner: failed to snapshot plan baseline; \
-                             PLAN_CHANGES will render (none)",
-                        ),
+                        Err(err) => {
+                            tracing::error!(
+                                error = %err,
+                                src = %src.display(),
+                                "goal planner: failed to snapshot plan baseline; pausing",
+                            );
+                            let _ = tokio::fs::remove_file(&src).await;
+                            if let Some(o) = self.goal_tracker.lock().snapshot_mut() {
+                                o.plan_file = None;
+                                o.plan_baseline_file = None;
+                            }
+                            baseline_failed = true;
+                        }
                     }
+                }
+                if baseline_failed {
+                    let _ = self
+                        .auto_pause_goal_if_active_with_message(
+                            crate::session::goal_tracker::GoalPauseReason::User,
+                            planner_failure_pause_message(),
+                        )
+                        .await;
                 }
             }
             crate::session::goal_planner::GoalPlannerOutcome::FailClosed { .. } => {

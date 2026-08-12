@@ -406,6 +406,15 @@ fn verify_owned_real_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// pre-existing destination — symlink included — fail the copy instead
 /// of being written through.
 fn copy_no_follow(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let mut src_f = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(src)?
+    };
+    #[cfg(not(unix))]
     let mut src_f = std::fs::File::open(src)?;
     let mut dest_f = std::fs::OpenOptions::new()
         .write(true)
@@ -424,9 +433,9 @@ fn parse_skeptic_report_order(name: &str) -> Option<(u32, u32)> {
     Some((attempt.parse().ok()?, idx.parse().ok()?))
 }
 
-/// Inline the per-skeptic reports below the just-rescued canonical
-/// details file — its path references die with the scratch root, so the
-/// rescued file must be self-contained.
+/// Inline current per-skeptic reports below the rescued canonical details
+/// file. Prefer the durable validated reports; use raw scratch reports only
+/// for legacy or infrastructure-fallback rounds.
 ///
 /// Numeric (attempt DESC, skeptic ASC) order so budget elision drops
 /// stale attempts, never the final attempt the canonical body
@@ -437,18 +446,58 @@ fn parse_skeptic_report_order(name: &str) -> Option<(u32, u32)> {
 fn append_skeptic_reports(scratch_root: &std::path::Path, dest: &std::path::Path) {
     use std::io::Write;
 
-    let Ok(entries) = std::fs::read_dir(scratch_root) else {
-        return;
-    };
-    let mut reports: Vec<((u32, u32), PathBuf)> = entries
-        .flatten()
-        .filter_map(|e| {
-            let path = e.path();
-            let (attempt, idx) =
-                parse_skeptic_report_order(path.file_name()?.to_string_lossy().as_ref())?;
-            Some(((attempt, idx), path))
+    // New verification rounds keep validated reports below a UUID namespace.
+    // Derive the current round from the aggregate filename so rescue inlines
+    // only the reports it references, not stale reports from older rounds.
+    let round_id = dest
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .and_then(|stem| stem.get(stem.len().saturating_sub(36)..))
+        .filter(|candidate| uuid::Uuid::parse_str(candidate).is_ok());
+    let mut reports: Vec<((u32, u32), PathBuf)> = round_id
+        .map(|round_id| {
+            let scratch_round_root = scratch_root.join("verification-rounds").join(round_id);
+            let durable_round_root = dest
+                .parent()
+                .map(|goal_dir| goal_dir.join("verification-rounds").join(round_id));
+            (0..crate::session::goal_classifier::GOAL_VERIFIER_SKEPTIC_MAX)
+                .filter_map(|idx| {
+                    if let Some(validated) = durable_round_root.as_ref().map(|round_root| {
+                        round_root
+                            .join("validated-verdicts")
+                            .join(format!("critic-{idx}.md"))
+                    }) && std::fs::symlink_metadata(&validated)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                    {
+                        return Some(((u32::MAX, idx), validated));
+                    }
+                    let raw = scratch_round_root
+                        .join(format!("critic-{idx}"))
+                        .join("details.md");
+                    std::fs::symlink_metadata(&raw)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                        .then_some(((u32::MAX, idx), raw))
+                })
+                .collect::<Vec<_>>()
         })
-        .collect();
+        .unwrap_or_default();
+
+    // Backward-compatible rescue for attempt-numbered reports written by
+    // older versions or synthetic tests.
+    if reports.is_empty() {
+        let Ok(entries) = std::fs::read_dir(scratch_root) else {
+            return;
+        };
+        reports = entries
+            .flatten()
+            .filter_map(|e| {
+                let path = e.path();
+                let (attempt, idx) =
+                    parse_skeptic_report_order(path.file_name()?.to_string_lossy().as_ref())?;
+                Some(((attempt, idx), path))
+            })
+            .collect();
+    }
     reports.sort_by_key(|&((attempt, idx), _)| (std::cmp::Reverse(attempt), idx));
     if reports.is_empty() {
         return;
@@ -458,11 +507,18 @@ fn append_skeptic_reports(scratch_root: &std::path::Path, dest: &std::path::Path
     };
     let mut budget = crate::session::goal_classifier::GOAL_VERIFIER_PANEL_MAX_BYTES as u64;
     for (_, report) in reports {
-        let name = report.file_name().unwrap_or_default().to_string_lossy();
+        let name = report
+            .strip_prefix(scratch_root)
+            .unwrap_or(&report)
+            .to_string_lossy();
         let header = format!("\n\n---\n## Inlined skeptic report: {name}\n\n");
-        let Ok(len) = std::fs::symlink_metadata(&report).map(|m| m.len()) else {
+        let Ok(metadata) = std::fs::symlink_metadata(&report) else {
             continue;
         };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let len = metadata.len();
         if header.len() as u64 + len > budget {
             let _ = out
                 .write_all(b"\n\n---\n(remaining skeptic reports elided: rescue budget reached)\n");
@@ -943,6 +999,18 @@ impl GoalTracker {
         self.goal_dir().join("plan.baseline.md")
     }
 
+    /// Content-addressed workspace state captured before the first goal worker
+    /// runs. Verification fails closed if this durable snapshot is unavailable.
+    pub fn initial_workspace_manifest_path(&self) -> PathBuf {
+        let verifier_id = self
+            .orchestration
+            .as_ref()
+            .map(|goal| goal.verifier_id.as_str())
+            .unwrap_or("inactive");
+        self.goal_dir()
+            .join(format!("initial-workspace-manifest-{verifier_id}.json"))
+    }
+
     /// Path to the strategist's advisory note (`<session_dir>/goal/strategy.md`).
     /// The strategist writes here, NOT `plan.md`. Its `PlanGuard` snapshots
     /// `plan.md` and restores it byte-for-byte (and on cancellation),
@@ -965,9 +1033,9 @@ impl GoalTracker {
     /// The stored source path is snapshot-controlled: `..` components
     /// are rejected (`starts_with` is lexical), the source root must
     /// pass [`verify_owned_real_dir`] (a squatted root could stage an
-    /// attacker file for the move), and the copy fallback is
-    /// [`copy_no_follow`]. The path is stamped only after a move from
-    /// the verified root succeeds; otherwise it is left unchanged.
+    /// attacker file for the copy), and [`copy_no_follow`] opens both ends
+    /// without following or replacing pre-existing entries. The path is
+    /// stamped only after that guarded copy succeeds.
     ///
     /// Runs under the tracker lock — bounded I/O (≤ the panel cap) on
     /// cold, one-shot transitions.
@@ -991,8 +1059,7 @@ impl GoalTracker {
         if !src.starts_with(&scratch_root) {
             return;
         }
-        // A symlink-squatted root could stage an attacker file for the
-        // rename below.
+        // A symlink-squatted root could stage an attacker file for the copy.
         if verify_owned_real_dir(&scratch_root).is_err() {
             return;
         }
@@ -1000,8 +1067,18 @@ impl GoalTracker {
             return;
         };
         let dest = goal_dir.join(name);
+        let Ok(source_metadata) = std::fs::symlink_metadata(&src) else {
+            return;
+        };
+        if !source_metadata.file_type().is_file()
+            || source_metadata.len()
+                > crate::session::goal_classifier::GOAL_VERIFIER_PANEL_MAX_BYTES as u64 + 1024
+            || std::fs::symlink_metadata(&dest).is_ok()
+        {
+            return;
+        }
         let _ = std::fs::create_dir_all(&goal_dir);
-        if std::fs::rename(&src, &dest).is_ok() || copy_no_follow(&src, &dest).is_ok() {
+        if copy_no_follow(&src, &dest).is_ok() {
             append_skeptic_reports(&scratch_root, &dest);
             o.last_classifier_details_path = Some(dest.to_string_lossy().into_owned());
         }
@@ -1221,10 +1298,7 @@ impl GoalTracker {
             return AutoResumeOutcome::NotEligible;
         }
         self.active_since = Some(Instant::now());
-        self.record_event(
-            GoalEvent::GoalResumed,
-            Some(format!("auto:{resumed_at}")),
-        );
+        self.record_event(GoalEvent::GoalResumed, Some(format!("auto:{resumed_at}")));
         self.record_decision(
             GoalDecisionKind::AutoResumed,
             format!("auto-resume #{resumed_at}"),
@@ -2729,7 +2803,10 @@ mod tests {
         activate_tracker(&mut t);
         t.update_live_progress(
             100,
-            vec![("deepseek-v4-pro".to_owned(), 60), ("deepseek-v4-flash".to_owned(), 40)],
+            vec![
+                ("deepseek-v4-pro".to_owned(), 60),
+                ("deepseek-v4-flash".to_owned(), 40),
+            ],
             200_000,
             50,
             3,
@@ -3570,6 +3647,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_transition_inlines_current_round_namespaced_reports() {
+        let session = tempfile::tempdir().unwrap();
+        let mut tracker = GoalTracker::new(session.path().to_path_buf());
+        activate_tracker(&mut tracker);
+        let verifier_id = tracker.snapshot().unwrap().verifier_id.clone();
+        let scratch = goal_scratch_root(&verifier_id);
+        let round_id = uuid::Uuid::now_v7().to_string();
+        let reports = session
+            .path()
+            .join("goal")
+            .join("verification-rounds")
+            .join(&round_id)
+            .join("validated-verdicts");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("critic-0.md"), "ROUND_CRITIC_ZERO").unwrap();
+        std::fs::write(reports.join("critic-1.md"), "ROUND_CRITIC_ONE").unwrap();
+        let details = scratch.join(format!("goal-classifier-{verifier_id}-{round_id}.md"));
+        std::fs::write(&details, "round aggregate").unwrap();
+        tracker.snapshot_mut().unwrap().last_classifier_details_path =
+            Some(details.to_string_lossy().into_owned());
+
+        assert!(tracker.complete());
+
+        let rescued = session
+            .path()
+            .join("goal")
+            .join(details.file_name().unwrap());
+        let body = std::fs::read_to_string(&rescued).unwrap();
+        let first = body.find("ROUND_CRITIC_ZERO").unwrap();
+        let second = body.find("ROUND_CRITIC_ONE").unwrap();
+        assert!(first < second);
+        assert!(body.contains("validated-verdicts/critic-0.md"));
+        assert!(!scratch.exists());
+    }
+
     /// Replacing a still-active goal (`create_goal` over-active) is the
     /// 4th root-removal site and must rescue like its terminal siblings.
     #[test]
@@ -3695,6 +3808,32 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rescue_classifier_details_rejects_symlink_source() {
+        let session = tempfile::tempdir().unwrap();
+        let mut tracker = GoalTracker::new(session.path().to_path_buf());
+        activate_tracker(&mut tracker);
+        let verifier_id = tracker.snapshot().unwrap().verifier_id.clone();
+        let scratch = goal_scratch_root(&verifier_id);
+        let victim = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(victim.path(), "untrusted").unwrap();
+        let details = scratch.join("goal-classifier-symlink.md");
+        std::os::unix::fs::symlink(victim.path(), &details).unwrap();
+        tracker.snapshot_mut().unwrap().last_classifier_details_path =
+            Some(details.to_string_lossy().into_owned());
+
+        assert!(tracker.complete());
+
+        assert!(
+            !session
+                .path()
+                .join("goal/goal-classifier-symlink.md")
+                .exists()
+        );
+        assert_eq!(std::fs::read_to_string(victim.path()).unwrap(), "untrusted");
+    }
+
     /// Numeric latest-attempt-first inlining: budget elision drops the
     /// stale attempt, never the final one (lexical order — `-1-` before
     /// `-10-` — would invert that).
@@ -3803,6 +3942,23 @@ mod tests {
             t.plan_baseline_path(),
             PathBuf::from("/tmp/plan-baseline-session-xyz/goal/plan.baseline.md"),
         );
+    }
+
+    #[test]
+    fn initial_workspace_manifest_namespace_changes_with_each_goal() {
+        let mut tracker = make_tracker();
+        activate_tracker(&mut tracker);
+        let first = tracker.initial_workspace_manifest_path();
+        tracker.create_goal(
+            "goal-2".into(),
+            "Build another widget".into(),
+            None,
+            0,
+            "2026-01-02T00:00:00Z".into(),
+            None,
+        );
+        let second = tracker.initial_workspace_manifest_path();
+        assert_ne!(first, second, "a new goal cannot reuse stale start state");
     }
 
     #[test]
@@ -3977,7 +4133,11 @@ mod tests {
             "plan written: /s/g/plan.md".to_string(),
             None,
         );
-        t.record_decision(GoalDecisionKind::Verdict, "NotAchieved".to_string(), Some(2));
+        t.record_decision(
+            GoalDecisionKind::Verdict,
+            "NotAchieved".to_string(),
+            Some(2),
+        );
         t.record_decision(
             GoalDecisionKind::StrategistAdvice,
             "strategy: restructure the verifier".to_string(),
@@ -3993,10 +4153,7 @@ mod tests {
         let restored: GoalOrchestration = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.decisions.len(), 4, "all decisions must survive");
         assert_eq!(restored.decisions[0].kind, GoalDecisionKind::PlanAccepted);
-        assert_eq!(
-            restored.decisions[0].detail,
-            "plan written: /s/g/plan.md"
-        );
+        assert_eq!(restored.decisions[0].detail, "plan written: /s/g/plan.md");
         assert!(restored.decisions[0].round.is_none());
         assert_eq!(restored.decisions[1].kind, GoalDecisionKind::Verdict);
         assert_eq!(restored.decisions[1].detail, "NotAchieved");
@@ -4036,7 +4193,10 @@ mod tests {
         let decisions = &t.snapshot().unwrap().decisions;
         assert_eq!(decisions.len(), cap);
         assert_eq!(decisions.first().unwrap().detail, "round-5");
-        assert_eq!(decisions.last().unwrap().detail, format!("round-{}", cap + 4));
+        assert_eq!(
+            decisions.last().unwrap().detail,
+            format!("round-{}", cap + 4)
+        );
     }
 
     /// Auto-resume records a structured decision with the counter detail

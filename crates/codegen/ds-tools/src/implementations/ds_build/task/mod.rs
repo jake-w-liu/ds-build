@@ -313,6 +313,7 @@ impl ds_tool_runtime::Tool for TaskTool {
                 // parent agent decides the flavor (the `/goal` harness override
                 // is set only by the harness-internal role spawners).
                 harness_agent_type: None,
+                verifier_sandbox: None,
             },
             run_in_background: input.run_in_background,
             // Model-spawned subagents must still appear in the idle reminder.
@@ -440,9 +441,9 @@ mod tests {
     };
     use crate::types::resources::Resources;
     use crate::types::tool_metadata::test_ctx;
+    use ds_tool_types::SubagentCapabilityMode;
     use std::sync::Arc;
     use tokio::sync::mpsc;
-    use ds_tool_types::SubagentCapabilityMode;
 
     /// Backend whose `ValidateType` events are auto-acked with `Ok`.
     fn make_backend() -> (
@@ -814,8 +815,7 @@ mod tests {
             serde_json::from_str(r#"{"description": "test", "prompt": "do it"}"#).unwrap();
         assert_eq!(input.subagent_type, "general-purpose");
         assert_eq!(
-            input.run_in_background,
-            None,
+            input.run_in_background, None,
             "run_in_background should default to None (agent definition decides)"
         );
     }

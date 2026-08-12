@@ -6,9 +6,9 @@
 
 use crate::session::events::{Event, GoalPlannerFailClosedReason, GoalRoleModelFailOpenReason};
 use crate::session::goal_role_tools::RoleToolNames;
+use ds_file_utils::events::EventWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use ds_file_utils::events::EventWriter;
 
 // Shared per-role model override + spawn-and-retry-once fail-open wrapper
 
@@ -507,11 +507,27 @@ pub(crate) async fn run_goal_planner(
     // so a resume can replan rather than skipping on "plan already present".
     match tokio::fs::read_to_string(inputs.plan_file).await {
         Ok(body) => {
-            if let Err(reason) = crate::session::goal_classifier::validate_math_plan_contract_source_aware(
-                inputs.objective,
-                inputs.workspace_root,
-                &body,
-            ) {
+            if let Err(reason) = crate::session::goal_classifier::validate_plan_contract(&body) {
+                tracing::warn!(
+                    plan_file = %plan_file_str,
+                    reason,
+                    "goal planner: plan failed the typed contract; failing closed",
+                );
+                let _ = tokio::fs::remove_file(inputs.plan_file).await;
+                return record_fail_closed(
+                    GoalPlannerFailClosedReason::InvalidPlan,
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                );
+            }
+            if let Err(reason) =
+                crate::session::goal_classifier::validate_math_plan_contract_source_aware(
+                    inputs.objective,
+                    inputs.workspace_root,
+                    &body,
+                )
+            {
                 tracing::warn!(
                     plan_file = %plan_file_str,
                     reason,
@@ -574,8 +590,8 @@ fn record_fail_closed(
 mod tests {
     use super::*;
     use crate::session::goal_role_tools::tests::{assert_no_tool_placeholders, summary_with};
-    use std::sync::{Arc, Mutex};
     use ds_tools::types::tool::ToolKind;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn planner_template_default_render_preserves_wording_and_has_no_placeholders() {
@@ -678,9 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_spawner_request_is_harness_internal() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
@@ -815,7 +829,8 @@ mod tests {
         let plan_file = tmp_plan_file("happy");
         let spawner = Arc::new(MockSpawner::ok_writes(
             &plan_file,
-            b"# Plan: foo\n\n## Goal kind\n\ncode-change\n",
+            b"# Plan: foo\n\n## Goal facets\ncode, state-regression\n\n\
+              ## Acceptance criteria\n1. X is done\n\n## Verification plan\n1. gating: verify X\n",
         ));
         let (log, emit) = collect_events();
 
@@ -1006,7 +1021,11 @@ mod tests {
     async fn malformed_terminal_with_file_present_still_succeeds() {
         // A botched terminal token is fine as long as the plan file is written.
         let plan_file = tmp_plan_file("malformed-but-written");
-        let mut spawner = MockSpawner::ok_writes(&plan_file, b"# Plan: foo\n");
+        let mut spawner = MockSpawner::ok_writes(
+            &plan_file,
+            b"# Plan: foo\n\n## Goal facets\nanalysis, state-regression\n\n\
+              ## Acceptance criteria\n1. X is answered\n\n## Verification plan\n1. gating: verify X\n",
+        );
         spawner.response = Ok("done.".to_string());
         let spawner = Arc::new(spawner);
         let (_, emit) = collect_events();
@@ -1267,7 +1286,6 @@ mod tests {
     fn planner_prompt_pins_math_kind_and_proportional_independent_checks() {
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("`math`"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Math/physics research correctness"));
-        assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("attacker-math"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("actual final artifact"));
         assert!(GOAL_PLANNER_PROMPT_TEMPLATE.contains("Scale the depth to the task"));
         for gate in [
@@ -1295,7 +1313,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan_file = dir.path().join("plan.md");
         // Planner writes a math-tagged plan without independent recomputation.
-        let bad_body = b"## Goal kind\nmath\n## Verification plan\n1. evidence: output file exists\n";
+        let bad_body = b"# Plan: incomplete math proof\n\n## Goal facets\nmath, state-regression\n\n\
+                         ## Acceptance criteria\n1. the result is correct\n\n## Verification plan\n\
+                         1. evidence: output file exists\n";
         let spawner = Arc::new(MockSpawner::ok_writes(&plan_file, bad_body));
         let tool_names = RoleToolNames::inherit_defaults();
         let outcome = run_goal_planner(
@@ -1325,7 +1345,8 @@ mod tests {
             "invalid plan must be deleted so resume can replan"
         );
         // Control: a complete math plan succeeds.
-        let good = "## Goal kind\nmath\n## Verification plan\n\
+        let good = "# Plan: verify the derivation\n\n## Goal facets\nmath, state-regression\n\n\
+                    ## Acceptance criteria\n1. the closed form is correct\n\n## Verification plan\n\
                     1. gating: attacker-math independently recomputes the requested results from the final artifact; \
                     contract-closure; derivation-integrity; evidence-provenance; invariant-ledger; state-isolation\n";
         let plan_file2 = dir.path().join("plan2.md");
@@ -1382,9 +1403,7 @@ mod tests {
     /// request's `harness_agent_type`, not the subagent_type.
     #[tokio::test]
     async fn channel_spawner_threads_harness_override_to_request() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
             event_tx: tx,
@@ -1684,9 +1703,7 @@ mod tests {
     /// `ChannelSpawner` whose explicit spawn fails still returns `Planned`.
     #[tokio::test]
     async fn planner_retries_to_inherit_instead_of_failing_closed() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
         let plan_file = tmp_plan_file("retry-failopen");
         let plan_for_coord = plan_file.clone();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1704,7 +1721,13 @@ mod tests {
                         ..Default::default()
                     });
                 } else {
-                    let _ = tokio::fs::write(&plan_for_coord, b"# Plan\n").await;
+                    let _ = tokio::fs::write(
+                        &plan_for_coord,
+                        b"# Plan: do X\n\n## Goal facets\nanalysis, state-regression\n\n\
+                          ## Acceptance criteria\n1. X is completed as requested\n\n\
+                          ## Verification plan\n1. gating: inspect the delivered result for X\n",
+                    )
+                    .await;
                     let _ = req.result_tx.send(SubagentResult {
                         success: true,
                         output: std::sync::Arc::from("Done"),
@@ -1757,10 +1780,8 @@ mod tests {
     /// fail-CLOSED cancellation semantics.
     #[tokio::test]
     async fn planner_cancellation_pauses_as_aborted_without_retry() {
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
         let plan_file = tmp_plan_file("cancel-aborted");
         let spawns = Arc::new(AtomicUsize::new(0));
         let spawns_coord = spawns.clone();

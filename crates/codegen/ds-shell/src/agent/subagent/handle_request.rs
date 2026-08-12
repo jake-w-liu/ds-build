@@ -96,13 +96,53 @@ pub(crate) async fn handle_subagent_request(
     gateway: &GatewaySender,
 ) {
     let start = std::time::Instant::now();
+    if request.subagent_type == FINAL_VERIFIER_AGENT_TYPE
+        && request.runtime_overrides.verifier_sandbox.is_none()
+    {
+        send_pre_spawn_failure(
+            request,
+            "final-verifier is reserved for harness-owned verification rounds",
+            coordinator,
+            &ctx,
+            gateway,
+        );
+        return;
+    }
+    if let Some(spec) = request.runtime_overrides.verifier_sandbox.clone() {
+        if request.subagent_type != FINAL_VERIFIER_AGENT_TYPE {
+            send_pre_spawn_failure(
+                request,
+                "verifier sandbox is reserved for the built-in final-verifier role",
+                coordinator,
+                &ctx,
+                gateway,
+            );
+            return;
+        }
+        if request.resume_from.is_some() || request.fork_context {
+            send_pre_spawn_failure(
+                request,
+                "final verifiers must be fresh sessions",
+                coordinator,
+                &ctx,
+                gateway,
+            );
+            return;
+        }
+        request.cwd = Some(spec.reviewed_root.to_string_lossy().into_owned());
+    }
     let Some(mut definition) = resolve_agent_definition(&request.subagent_type, &ctx)
     else {
         let msg = format!("Unknown subagent type: {}", request.subagent_type);
         send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
         return;
     };
-    match gate_subagent_type(&request.subagent_type, &ctx) {
+    let type_gate = if request.runtime_overrides.verifier_sandbox.is_some() {
+        SubagentValidateTypeOutcome::Ok
+    } else {
+        gate_subagent_type(&request.subagent_type, &ctx)
+    };
+    match type_gate {
         SubagentValidateTypeOutcome::Disabled => {
             let msg = format!(
                 "Subagent '{}' is disabled via [subagents.toggle] in config.toml",
@@ -157,13 +197,27 @@ pub(crate) async fn handle_subagent_request(
         defused: false,
         error: None,
     };
-    resolve_subagent_toolset(
-        &request.subagent_type,
-        request.runtime_overrides.harness_agent_type.as_deref(),
-        &ctx,
-        &mut definition,
-    );
-    let (role, role_key) = {
+    if request.runtime_overrides.verifier_sandbox.is_some() {
+        // Security boundary: project agents and harness-specific toolset
+        // overrides cannot shadow or widen the final verifier.
+        definition = ds_agent::config::AgentDefinition::final_verifier();
+        // Preserve only the host's equivalent read/grep tool names so the
+        // prompt and actual registry agree. `override_file_tools` swaps
+        // existing slots and cannot add the absent edit slot.
+        if let Some(file_tools) = ctx.file_tool_overrides.as_ref() {
+            definition.override_file_tools(file_tools.clone());
+        }
+    } else {
+        resolve_subagent_toolset(
+            &request.subagent_type,
+            request.runtime_overrides.harness_agent_type.as_deref(),
+            &ctx,
+            &mut definition,
+        );
+    }
+    let (role, role_key) = if request.runtime_overrides.verifier_sandbox.is_some() {
+        (None, None)
+    } else {
         let by_type = ctx.subagent_roles.get(&request.subagent_type);
         if by_type.is_some() {
             (by_type, Some(request.subagent_type.clone()))
@@ -783,12 +837,30 @@ pub(crate) async fn handle_subagent_request(
             ds_paths::AbsPathBuf::new(std::env::current_dir().unwrap_or_default())
                 .expect("current_dir should be absolute")
         });
+    let verifier_sandbox = request.runtime_overrides.verifier_sandbox.clone();
+    let terminal: Arc<dyn AsyncTerminalRunner> =
+        if let Some(spec) = verifier_sandbox.as_ref() {
+            match crate::session::verifier_runtime::VerifierTerminalRunner::new(
+                ctx.terminal.clone(),
+                spec,
+                request.id.clone(),
+            ) {
+                Ok(runner) => Arc::new(runner),
+                Err(error) => {
+                    pending_guard.set_error(error.clone());
+                    send_failure(request, &error);
+                    return;
+                }
+            }
+        } else {
+            ctx.terminal.clone()
+        };
     let mut tool_ctx = ToolContext::with_preloaded_env(
             child_cwd_abs,
             Some(gateway.clone()),
             Some(child_session_id.clone()),
             ctx.fs.clone(),
-            ctx.terminal.clone(),
+            terminal,
             ctx.hunk_tracker_handle.clone(),
             (*ctx.session_env).clone(),
         )

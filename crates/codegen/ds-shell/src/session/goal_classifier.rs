@@ -3,7 +3,7 @@
 //! The adversarial skeptic panel is the whole verification: it
 //! spawns N independent skeptic subagents in parallel,
 //! parses each one's JSON verdict (with terminal-token fallback), and
-//! aggregates via majority-refute to drive `update_goal(completed:
+//! aggregates unanimous structured approval to drive `update_goal(completed:
 //! true)`. Each spawn sends a `SubagentEvent::Spawn` directly over
 //! `tool_context.subagent_event_tx` — no `task` tool call, so the
 //! parent model's transcript stays clean. The spawn is hidden behind
@@ -16,7 +16,7 @@ pub(crate) mod evidence;
 
 use crate::session::events::{Event, GoalClassifierFailOpenReason};
 use crate::session::goal_planner::{
-    GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt, RoleSpawnOverride, spawn_with_fail_open_retry,
+    GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt, RoleSpawnOverride,
 };
 use crate::session::goal_role_tools::RoleToolNames;
 use crate::session::goal_tracker::GoalClassifierVerdict;
@@ -24,7 +24,6 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use ds_file_utils::events::EventWriter;
 
 // Constants
 
@@ -80,12 +79,10 @@ pub(crate) const GOAL_CLASSIFIER_CHANGES_PATH_TEMPLATE: &str =
 /// rule 5.
 const GIT_BASELINE_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Subagent type used for each verifier-skeptic spawn. `general-purpose`
-/// gives the subagent the full read/grep/file tool inventory needed
-/// to corroborate diff hunks against the workspace — the verifier
-/// prompt explicitly forbids workspace mutation. The configured `agent_type`
-/// selects the HARNESS, not this subagent type.
-const GOAL_CLASSIFIER_SUBAGENT_TYPE: &str = GOAL_ROLE_SUBAGENT_TYPE;
+/// Harness-owned role with read/search plus a kernel-sandboxed computation
+/// shell. Its toolset has no mutation or subagent capabilities.
+const GOAL_CLASSIFIER_SUBAGENT_TYPE: &str =
+    ds_tools::implementations::ds_build::task::types::FINAL_VERIFIER_AGENT_TYPE;
 
 /// Description shown in the pager subagent strip. Kept short — the
 /// stage may spawn up to `GOAL_VERIFIER_SKEPTIC_MAX` skeptics per
@@ -97,11 +94,9 @@ const GOAL_VERIFIER_PROMPT_TEMPLATE: &str = include_str!("templates/goal_verifie
 
 /// Default number of adversarial skeptics spawned per verification
 /// attempt. Override via `DS_GOAL_VERIFIER_N` (clamped 1..=5) or the
-/// remote `goal_verifier_count` setting. Default 3 yields a genuine
-/// majority vote (`⌈3/2⌉ = 2` not-refuted to pass): a lone outlier in
-/// either direction — one rubber-stamp or one false-refute — cannot
-/// decide the outcome, unlike N=2 where a 1-1 tie survives and a single
-/// lenient skeptic passes what a single strict one refutes.
+/// remote `goal_verifier_count` setting. Every critic must return a valid
+/// structured approval, so the default of three supplies independent coverage
+/// without allowing one vote to be ignored.
 pub(crate) const GOAL_VERIFIER_SKEPTIC_COUNT: u32 = 3;
 
 /// Lower/upper bounds for `DS_GOAL_VERIFIER_N` / remote
@@ -203,13 +198,11 @@ impl SpawnBackpressure {
 // Outcome + spawner abstraction
 
 /// Result of one classifier attempt. `Achieved` / `NotAchieved` are
-/// PARSE-class outcomes: the subagent produced a usable verdict.
-/// `FailOpenAchieved` is INFRA-class: the harness could not extract
-/// a verdict and treats the goal as achieved so an internal failure
-/// never blocks user progress. PARSE-class fail-closed outcomes
-/// (malformed terminal token, missing details file) map onto
-/// `NotAchieved`; telemetry distinguishes them via
-/// `Event::GoalClassifierFailClosed`.
+/// verdict-class outcomes: every critic produced a usable structured record.
+/// `FailOpenAchieved` is the legacy name for an infrastructure-class outcome;
+/// callers always pause without approval. Missing or malformed structured
+/// records reach that infrastructure outcome after the panel emits its
+/// diagnostics.
 #[derive(Debug, Clone)]
 pub(crate) enum GoalClassifierOutcome {
     Achieved {
@@ -263,6 +256,7 @@ pub(crate) trait GoalClassifierSpawner: Send + Sync {
         skeptic_idx: u32,
         prompt: RoleRenderedPrompt,
         details_path: &Path,
+        reviewed_root: &Path,
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError>;
 }
@@ -329,6 +323,16 @@ pub(crate) fn format_details_path(verifier_id: &str, attempt: u32) -> String {
         GOAL_CLASSIFIER_DETAILS_PATH_TEMPLATE
             .replace("{verifier_id}", verifier_id)
             .replace("{attempt}", &attempt.to_string()),
+    )
+}
+
+/// Return the aggregate details path for one immutable verification round.
+/// Attempt counters reset on resume, so they are deliberately not used as the
+/// freshness identity for real panel output.
+fn format_round_panel_details_path(verifier_id: &str, round_id: &str) -> String {
+    scratch_rooted(
+        verifier_id,
+        format!("goal-classifier-{verifier_id}-{round_id}.md"),
     )
 }
 
@@ -569,9 +573,6 @@ pub(crate) struct ChannelSpawner {
     /// current model — round-robin expansion + auth/capability fail-open is
     /// resolved parent-side before the spawner is built.
     pub(crate) skeptic_overrides: Vec<RoleSpawnOverride>,
-    /// Event sink for the spawn-and-retry-once fail-open telemetry; `None`
-    /// in tests / when no event log is wired.
-    pub(crate) events: Option<EventWriter>,
     /// `/goal` orchestration metadata surfaced on the wire: phase + 1-based
     /// attempt/round. Set by the caller that knows the current round.
     pub(crate) goal_phase: Option<&'static str>,
@@ -585,7 +586,8 @@ impl GoalClassifierSpawner for ChannelSpawner {
         id: &str,
         skeptic_idx: u32,
         prompt: RoleRenderedPrompt,
-        _details_path: &Path,
+        details_path: &Path,
+        reviewed_root: &Path,
         resume_from: Option<&str>,
     ) -> Result<String, SpawnError> {
         // Clone the primary render for the trace pair only when tracing; the
@@ -597,15 +599,26 @@ impl GoalClassifierSpawner for ChannelSpawner {
             .skeptic_overrides
             .get(skeptic_idx as usize)
             .unwrap_or(&inherit);
-        let outcome = spawn_with_fail_open_retry(
-            "skeptic",
-            Some(skeptic_idx),
-            override_,
-            self.events.as_ref(),
-            prompt,
-            |model, harness, prompt| self.send_one(id, prompt, model, harness, resume_from),
-        )
-        .await;
+        // Do not use the general role retry wrapper here. A second spawn under
+        // the same verdict path could consume files or tool events left by the
+        // first spawn, defeating the round-freshness guarantee. Any verifier
+        // runtime failure therefore fails this round closed.
+        let (model, harness) = if override_.is_explicit() {
+            (override_.model.clone(), override_.agent_type.clone())
+        } else {
+            (None, None)
+        };
+        let outcome = self
+            .send_one(
+                id,
+                prompt.primary,
+                model,
+                harness,
+                resume_from,
+                details_path,
+                reviewed_root,
+            )
+            .await;
 
         match &outcome {
             Ok(text) => record_subagent_trace(
@@ -632,8 +645,9 @@ impl GoalClassifierSpawner for ChannelSpawner {
 
 impl ChannelSpawner {
     /// Send one skeptic spawn (model + harness override resolved by the caller)
-    /// and await its terminal result. The fail-open wrapper calls this once
-    /// or twice (retry on the current model + session harness). The
+    /// and await its terminal result. Final verification is single-spawn: a
+    /// failed configured verifier cannot be replayed under the same identity.
+    /// The
     /// subagent_type is always [`GOAL_CLASSIFIER_SUBAGENT_TYPE`];
     /// `harness_agent_type` selects the harness flavor (`None` ⇒ session
     /// harness).
@@ -644,11 +658,20 @@ impl ChannelSpawner {
         model: Option<String>,
         harness_agent_type: Option<String>,
         resume_from: Option<&str>,
+        details_path: &Path,
+        reviewed_root: &Path,
     ) -> Result<String, SpawnError> {
         use ds_tools::implementations::ds_build::task::types::{
             SubagentEvent, SubagentRequest, SubagentRuntimeOverrides,
         };
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let reviewed_root = reviewed_root.to_path_buf();
+        let scratch_root = details_path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| {
+                SpawnError::Transport("final verifier scratch root is missing".into())
+            })?;
         let request = SubagentRequest {
             id: id.to_string(),
             prompt,
@@ -661,6 +684,12 @@ impl ChannelSpawner {
             runtime_overrides: SubagentRuntimeOverrides {
                 model,
                 harness_agent_type,
+                verifier_sandbox: Some(
+                    ds_tools::implementations::ds_build::task::types::VerifierSandboxSpec {
+                        reviewed_root,
+                        scratch_root,
+                    },
+                ),
                 ..Default::default()
             },
             run_in_background: Some(false),
@@ -696,9 +725,10 @@ impl ChannelSpawner {
 
 // Fail-open helper (shared by verification stage)
 
-/// Record a fail-open outcome: emit telemetry, write a placeholder
-/// details file (when the path is resolved), and return the
-/// `FailOpenAchieved` value. Empty `details_raw` skips the write.
+/// Record an infrastructure-failure outcome: emit telemetry, write a
+/// placeholder details file (when the path is resolved), and return the legacy
+/// wire variant consumed by the always-fail-closed apply path. Empty
+/// `details_raw` skips the write.
 async fn record_fail_open(
     reason: GoalClassifierFailOpenReason,
     attempt: u32,
@@ -727,7 +757,7 @@ async fn record_fail_open(
 
 /// Write `body` to `path` atomically via tempfile + rename. The
 /// tempfile sits next to the target so `rename` stays on one FS.
-async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()> {
+pub(crate) async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()> {
     // Scratch-rooted paths always have a parent; a rootless path is a bug.
     let Some(dir) = path.parent() else {
         return Err(std::io::Error::other("patch path has no parent directory"));
@@ -754,14 +784,16 @@ async fn write_patch_file_atomic(path: &Path, body: &str) -> std::io::Result<()>
 /// the write was attempted and failed — so the caller never surfaces a
 /// path to a file that isn't there.
 async fn maybe_write_classifier_placeholder(path: &Path, headline: &str, body: &str) -> bool {
-    if let Ok(meta) = tokio::fs::metadata(path).await
-        && meta.is_file()
-        && meta.len() > 0
-    {
-        return true;
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.file_type().is_file() && meta.len() > 0 => return true,
+        // Never bless or write through a pre-existing symlink, directory, or
+        // other unexpected entry in the scratch namespace.
+        Ok(_) => return false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return false,
     }
     let content = format!("# {headline}\n\n{body}\n");
-    match tokio::fs::write(path, content).await {
+    match write_patch_file_atomic(path, &content).await {
         Ok(()) => true,
         Err(err) => {
             tracing::warn!(
@@ -783,13 +815,13 @@ async fn maybe_write_fail_open_placeholder(
     let reason_str = reason.as_const_str();
     let body = format!(
         "The verification stage did not produce a verdict (infra-class \
-         failure). The harness treated the goal as Achieved as a \
-         fail-open fallback. No skeptic analysis was captured.\n\n\
+         failure). The goal was not approved; the harness pauses until a fresh \
+         verification round can run. No skeptic analysis was captured.\n\n\
          ## Reason\n\n{reason_str}"
     );
     maybe_write_classifier_placeholder(
         path,
-        &format!("Verification fail-open: {reason_str}"),
+        &format!("Verification infrastructure failure: {reason_str}"),
         &body,
     )
     .await
@@ -801,7 +833,8 @@ async fn maybe_write_fail_open_placeholder(
 /// `high|medium|low`; any other (or missing) value normalises to
 /// `Unknown` so a verifier with a botched JSON field still produces an
 /// aggregable vote.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum SkepticConfidence {
     High,
     Medium,
@@ -846,7 +879,8 @@ impl SkepticConfidence {
 /// `Unverifiable` flags evidence that is infeasible to capture in the
 /// current environment. A rejection whose refuters are *all* non-`None`
 /// cannot progress by iterating and routes to the blocked outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum SkepticBlocking {
     #[default]
     None,
@@ -874,7 +908,8 @@ impl SkepticBlocking {
 /// One concise verifier finding (the implementer-facing gap list). Fields
 /// default to empty for weak-model robustness; an all-empty finding is
 /// dropped at parse time.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Finding {
     /// `bug` | `gap` | `todo` (rendered verbatim after trim).
     #[serde(default)]
@@ -895,19 +930,63 @@ impl Finding {
     }
 }
 
-/// One claim-bound row in a math skeptic's five-gate approval record. The
-/// field is optional on the generic verdict wire format, but a math approval
-/// is rejected unless all five canonical gates are present and valid.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-pub(crate) struct MathValidationCheck {
-    #[serde(default)]
+/// Correctness requirements compose: a hybrid task can activate several
+/// independent verifier lenses and every active facet must pass.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum VerificationFacet {
+    Code,
+    Analysis,
+    Research,
+    Math,
+    Empirical,
+    Sources,
+    Citations,
+    DocumentRender,
+    StateRegression,
+}
+
+impl VerificationFacet {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Analysis => "analysis",
+            Self::Research => "research",
+            Self::Math => "math",
+            Self::Empirical => "empirical",
+            Self::Sources => "sources",
+            Self::Citations => "citations",
+            Self::DocumentRender => "document-render",
+            Self::StateRegression => "state-regression",
+        }
+    }
+}
+
+/// One artifact-bound validation receipt. The compact schema deliberately
+/// records only evidence the harness can validate mechanically.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ValidationCheck {
     pub gate: String,
-    #[serde(default)]
+    pub facet: String,
     pub status: String,
-    #[serde(default)]
     pub target: String,
-    #[serde(default)]
     pub evidence: String,
+    pub artifact_path: String,
+    pub artifact_sha256: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_input_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_output_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applicability_basis: Option<String>,
 }
 
 fn canonical_math_gate(raw: &str) -> Option<&'static str> {
@@ -928,50 +1007,15 @@ fn canonical_math_gate(raw: &str) -> Option<&'static str> {
     }
 }
 
-/// An approving math verdict must prove that it covered every gate. `fail`
-/// cannot coexist with approval; `not_applicable` is accepted only when it is
-/// still bound to a non-empty target and concrete evidence/reason.
-fn validate_math_approval_checks(checks: &[MathValidationCheck]) -> Result<(), String> {
-    let mut seen = std::collections::BTreeSet::new();
-    for check in checks {
-        let Some(gate) = canonical_math_gate(&check.gate) else {
-            return Err(format!("unknown math gate `{}`", check.gate.trim()));
-        };
-        if !seen.insert(gate) {
-            return Err(format!("duplicate math gate `{gate}`"));
-        }
-        if check.target.trim().is_empty() {
-            return Err(format!("math gate `{gate}` has no target"));
-        }
-        if check.evidence.trim().is_empty() {
-            return Err(format!("math gate `{gate}` has no claim-bound evidence"));
-        }
-        let status = check
-            .status
-            .trim()
-            .to_ascii_lowercase()
-            .replace([' ', '-'], "_");
-        match status.as_str() {
-            "pass" | "not_applicable" | "n/a" => {}
-            "fail" => return Err(format!("math gate `{gate}` failed in an approval verdict")),
-            _ => {
-                return Err(format!(
-                    "math gate `{gate}` has invalid status `{}`",
-                    check.status.trim()
-                ));
-            }
-        }
-    }
-    for required in MATH_VALIDATION_GATES {
-        if !seen.contains(required) {
-            return Err(format!("missing math gate `{required}`"));
-        }
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SkepticVerdict {
+    pub verdict_schema_version: u32,
+    pub goal_id: String,
+    pub verification_round_id: String,
+    pub contract_digest: String,
+    pub reviewed_artifact_manifest_digest: String,
+    pub critic_id: String,
+    pub critic_assignment_id: String,
     pub refuted: bool,
     pub evidence: String,
     pub confidence: SkepticConfidence,
@@ -980,53 +1024,66 @@ pub(crate) struct SkepticVerdict {
     /// Structured findings (the implementer-facing gap list); empty when
     /// the verifier emitted none (then the `evidence` fallback is used).
     pub findings: Vec<Finding>,
-    /// Structured five-gate record. Required only to approve a math goal.
-    pub math_checks: Vec<MathValidationCheck>,
+    /// Complete structured coverage for every active facet.
+    pub checks: Vec<ValidationCheck>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SkepticVerdictRaw {
-    #[serde(default)]
-    refuted: Option<bool>,
-    #[serde(default)]
-    evidence: Option<String>,
-    #[serde(default)]
-    confidence: Option<String>,
+    verdict_schema_version: u32,
+    goal_id: String,
+    verification_round_id: String,
+    contract_digest: String,
+    reviewed_artifact_manifest_digest: String,
+    critic_id: String,
+    critic_assignment_id: String,
+    refuted: bool,
+    evidence: String,
+    confidence: String,
     #[serde(default)]
     blocking: Option<String>,
     #[serde(default)]
     details_md: Option<String>,
     #[serde(default)]
     findings: Option<Vec<Finding>>,
-    #[serde(default)]
-    math_checks: Option<Vec<MathValidationCheck>>,
+    checks: Vec<ValidationCheck>,
 }
 
 /// Parse the JSON body the skeptic wrote to its `{VERDICT_FILE}`.
 ///
-/// Matches the verdict schema `required: ["refuted", "evidence",
-/// "confidence"]`: all three are mandatory.
+/// Every identity, coverage, and verdict field is mandatory.
 /// A missing or empty `evidence` field rejects (`None`) — without
 /// evidence the rubber-stamp failure mode this contract explicitly
 /// closes is back open. `details_md` is optional (it's a harness-side
 /// extension to the schema; the aggregator prefers the on-disk
 /// per-skeptic report and uses this JSON field only as a fallback when
-/// that file is missing/empty). Extra fields are
-/// tolerated. The skeptic-level fallback (`run_one_skeptic`) maps any
+/// that file is missing/empty). Unknown fields and enum values are rejected.
+/// The skeptic-level fallback (`run_one_skeptic`) maps any
 /// `None` here to a synthetic `refuted: true` vote.
 pub(crate) fn parse_verdict_json(body: &str) -> Option<SkepticVerdict> {
     let raw: SkepticVerdictRaw = serde_json::from_str(body.trim()).ok()?;
-    let refuted = raw.refuted?;
-    let evidence = raw.evidence?;
-    if evidence.trim().is_empty() {
+    if raw.verdict_schema_version != 1
+        || raw.goal_id.trim().is_empty()
+        || raw.verification_round_id.trim().is_empty()
+        || raw.contract_digest.trim().is_empty()
+        || raw.reviewed_artifact_manifest_digest.trim().is_empty()
+        || raw.critic_id.trim().is_empty()
+        || raw.critic_assignment_id.trim().is_empty()
+        || raw.evidence.trim().is_empty()
+    {
         return None;
     }
-    let confidence = SkepticConfidence::parse(&raw.confidence?);
-    let blocking = raw
-        .blocking
-        .as_deref()
-        .map(SkepticBlocking::parse)
-        .unwrap_or_default();
+    let confidence = SkepticConfidence::parse(&raw.confidence);
+    if confidence == SkepticConfidence::Unknown {
+        return None;
+    }
+    let blocking = match raw.blocking.as_deref() {
+        None | Some("none") => SkepticBlocking::None,
+        Some("contradiction") => SkepticBlocking::Contradiction,
+        Some("unverifiable") => SkepticBlocking::Unverifiable,
+        Some(_) => return None,
+    };
     let findings = raw
         .findings
         .unwrap_or_default()
@@ -1034,20 +1091,298 @@ pub(crate) fn parse_verdict_json(body: &str) -> Option<SkepticVerdict> {
         .filter(|f| !f.is_empty())
         .collect();
     Some(SkepticVerdict {
-        refuted,
-        evidence,
+        verdict_schema_version: raw.verdict_schema_version,
+        goal_id: raw.goal_id,
+        verification_round_id: raw.verification_round_id,
+        contract_digest: raw.contract_digest,
+        reviewed_artifact_manifest_digest: raw.reviewed_artifact_manifest_digest,
+        critic_id: raw.critic_id,
+        critic_assignment_id: raw.critic_assignment_id,
+        refuted: raw.refuted,
+        evidence: raw.evidence,
         confidence,
         blocking,
         details_md: raw.details_md.unwrap_or_default(),
         findings,
-        math_checks: raw.math_checks.unwrap_or_default(),
+        checks: raw.checks,
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct VerdictIdentity {
+    goal_id: String,
+    verification_round_id: String,
+    contract_digest: String,
+    reviewed_artifact_manifest_digest: String,
+    critic_id: String,
+    critic_assignment_id: String,
+}
+
+fn gates_for_facet(facet: VerificationFacet) -> &'static [&'static str] {
+    match facet {
+        VerificationFacet::Code => &["code-correctness"],
+        VerificationFacet::Analysis => &["analysis-correctness"],
+        VerificationFacet::Research => &["research-validity"],
+        VerificationFacet::Math => &MATH_VALIDATION_GATES,
+        VerificationFacet::Empirical => &["empirical-validity"],
+        VerificationFacet::Sources => &["source-support"],
+        VerificationFacet::Citations => &["citation-integrity"],
+        VerificationFacet::DocumentRender => &["document-render"],
+        VerificationFacet::StateRegression => &["state-isolation"],
+    }
+}
+
+fn canonical_facet(raw: &str) -> Option<VerificationFacet> {
+    match raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '_'], "-")
+        .as_str()
+    {
+        "code" | "code-change" => Some(VerificationFacet::Code),
+        "analysis" => Some(VerificationFacet::Analysis),
+        "research" => Some(VerificationFacet::Research),
+        "math" | "mathematics" | "physics" => Some(VerificationFacet::Math),
+        "empirical" | "statistics" => Some(VerificationFacet::Empirical),
+        "sources" | "source" => Some(VerificationFacet::Sources),
+        "citations" | "citation" => Some(VerificationFacet::Citations),
+        "document-render" | "render" => Some(VerificationFacet::DocumentRender),
+        "state-regression" | "regression" => Some(VerificationFacet::StateRegression),
+        _ => None,
+    }
+}
+
+fn canonical_gate(facet: VerificationFacet, raw: &str) -> Option<&'static str> {
+    if facet == VerificationFacet::Math {
+        return canonical_math_gate(raw);
+    }
+    let normalized = raw.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+    gates_for_facet(facet)
+        .iter()
+        .copied()
+        .find(|gate| *gate == normalized)
+}
+
+fn validate_structured_verdict(
+    verdict: &SkepticVerdict,
+    expected: &VerdictIdentity,
+    facets: &std::collections::BTreeSet<VerificationFacet>,
+    reviewed_root: &Path,
+    manifest: &super::verification_snapshot::ArtifactManifest,
+    trace: &[super::verifier_runtime::VerificationToolEvent],
+) -> Result<(), String> {
+    for (label, actual, wanted) in [
+        (
+            "goal_id",
+            verdict.goal_id.as_str(),
+            expected.goal_id.as_str(),
+        ),
+        (
+            "verification_round_id",
+            verdict.verification_round_id.as_str(),
+            expected.verification_round_id.as_str(),
+        ),
+        (
+            "contract_digest",
+            verdict.contract_digest.as_str(),
+            expected.contract_digest.as_str(),
+        ),
+        (
+            "reviewed_artifact_manifest_digest",
+            verdict.reviewed_artifact_manifest_digest.as_str(),
+            expected.reviewed_artifact_manifest_digest.as_str(),
+        ),
+        (
+            "critic_id",
+            verdict.critic_id.as_str(),
+            expected.critic_id.as_str(),
+        ),
+        (
+            "critic_assignment_id",
+            verdict.critic_assignment_id.as_str(),
+            expected.critic_assignment_id.as_str(),
+        ),
+    ] {
+        if actual != wanted {
+            return Err(format!("structured verdict has wrong {label}"));
+        }
+    }
+    if verdict.verdict_schema_version != 1 {
+        return Err("structured verdict has an unsupported schema version".to_string());
+    }
+
+    let required: std::collections::BTreeSet<_> = facets
+        .iter()
+        .flat_map(|facet| {
+            gates_for_facet(*facet)
+                .iter()
+                .map(move |gate| (*facet, *gate))
+        })
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut facet_has_decision = std::collections::BTreeSet::new();
+    let mut failures = 0_usize;
+    for check in &verdict.checks {
+        let facet = canonical_facet(&check.facet)
+            .ok_or_else(|| format!("unknown correctness facet `{}`", check.facet.trim()))?;
+        let gate = canonical_gate(facet, &check.gate)
+            .ok_or_else(|| format!("unknown gate `{}` for facet {}", check.gate, check.facet))?;
+        if !required.contains(&(facet, gate)) {
+            return Err(format!("unassigned receipt {}/{gate}", facet.as_str()));
+        }
+        if !seen.insert((facet, gate)) {
+            return Err(format!("duplicate receipt {}/{gate}", facet.as_str()));
+        }
+        if check.target.trim().is_empty()
+            || check.evidence.trim().is_empty()
+            || check.method.trim().is_empty()
+        {
+            return Err(format!("receipt {}/{gate} is incomplete", facet.as_str()));
+        }
+        let status = check
+            .status
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_");
+        match status.as_str() {
+            "not_applicable" | "n/a" => {
+                if !check.artifact_path.trim().is_empty()
+                    || !check.artifact_sha256.trim().is_empty()
+                    || check.tool_event_id.is_some()
+                    || check.exact_input_digest.is_some()
+                    || check.observed_output_digest.is_some()
+                    || check
+                        .applicability_basis
+                        .as_deref()
+                        .is_none_or(|reason| reason.trim().len() < 12)
+                {
+                    return Err(format!(
+                        "receipt {}/{gate} has an invalid not-applicable basis",
+                        facet.as_str()
+                    ));
+                }
+            }
+            "pass" | "fail" => {
+                facet_has_decision.insert(facet);
+                if status == "fail" {
+                    failures += 1;
+                }
+                if !super::verification_snapshot::entry_matches(
+                    manifest,
+                    &check.artifact_path,
+                    &check.artifact_sha256,
+                ) {
+                    return Err(format!(
+                        "receipt {}/{gate} cites an unknown artifact revision",
+                        facet.as_str()
+                    ));
+                }
+                if !artifact_contains_target(reviewed_root, &check.artifact_path, &check.target)? {
+                    return Err(format!(
+                        "receipt {}/{gate} target is not present in its cited artifact",
+                        facet.as_str()
+                    ));
+                }
+                match (
+                    check.tool_event_id.as_deref(),
+                    check.exact_input_digest.as_deref(),
+                    check.observed_output_digest.as_deref(),
+                ) {
+                    (None, None, None) => {
+                        if facet == VerificationFacet::Math && gate == "evidence-provenance" {
+                            return Err(
+                                "math evidence-provenance requires a successful current-round tool event"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    (Some(event), Some(input), Some(output)) => {
+                        if !super::verifier_runtime::trace_contains(
+                            trace,
+                            event,
+                            input,
+                            output,
+                            &check.artifact_path,
+                            &check.target,
+                        ) {
+                            return Err(format!(
+                                "receipt {}/{gate} cites a missing, failed, or stale tool event",
+                                facet.as_str()
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(format!(
+                            "receipt {}/{gate} has a partial tool-event binding",
+                            facet.as_str()
+                        ));
+                    }
+                }
+                let method = check.method.to_ascii_lowercase();
+                if (method.contains("numerical") || method.contains("approx"))
+                    && check
+                        .tolerance
+                        .as_deref()
+                        .is_none_or(|value| value.trim().is_empty())
+                {
+                    return Err(format!(
+                        "receipt {}/{gate} uses a numerical method without tolerance",
+                        facet.as_str()
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "receipt {}/{gate} has invalid status",
+                    facet.as_str()
+                ));
+            }
+        }
+    }
+    if seen != required {
+        return Err(format!(
+            "structured verdict coverage is incomplete: covered={seen:?}, required={required:?}"
+        ));
+    }
+    if facets
+        .iter()
+        .any(|facet| !facet_has_decision.contains(facet))
+    {
+        return Err("a correctness facet cannot be entirely not-applicable".to_string());
+    }
+    if verdict.refuted {
+        if failures == 0 || verdict.findings.is_empty() {
+            return Err(
+                "refutation requires a failed receipt and a structured finding".to_string(),
+            );
+        }
+    } else {
+        if failures != 0 {
+            return Err("approval contains a failed receipt".to_string());
+        }
+        if verdict.blocking.is_blocking() {
+            return Err("approval declares a blocking condition".to_string());
+        }
+        if !verdict.findings.is_empty() {
+            return Err("approval contains unresolved findings".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn artifact_contains_target(root: &Path, relative: &str, target: &str) -> Result<bool, String> {
+    let path = root.join(relative);
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("cannot read cited artifact {}: {error}", path.display()))?;
+    Ok(bytes
+        .windows(target.as_bytes().len())
+        .any(|window| window == target.as_bytes()))
+}
+
 /// Result of one skeptic in the panel. The `refuted` flag is the
-/// aggregator's input; the rest is for the details-file render. A
-/// malformed / missing JSON file maps to `refuted: true` (fail-closed
-/// at the skeptic level) per the verifier prompt's bias.
+/// aggregator's input; the rest is for the details-file render. A malformed
+/// or missing JSON record is marked as an infrastructure fallback, which the
+/// aggregate cannot turn into approval.
 #[derive(Debug, Clone)]
 pub(crate) struct SkepticResult {
     pub skeptic_idx: u32,
@@ -1067,6 +1402,8 @@ pub(crate) struct SkepticResult {
     /// `None` on a clean parse; populated when the JSON file was
     /// missing/malformed or the spawn failed.
     pub fallback_note: Option<String>,
+    /// Round-unique report path produced by this critic.
+    pub details_path: String,
     /// Per-skeptic spawn-to-verdict wall clock in ms. Plumbed up so
     /// the panel-level event can surface slow outliers even though
     /// emissions are batched after `join_all`.
@@ -1101,68 +1438,38 @@ pub(crate) fn format_verifier_details_path(
     )
 }
 
-/// Aggregate the panel into a quorum result.
+fn round_critic_dir(verifier_id: &str, round_id: &str, skeptic_idx: u32) -> PathBuf {
+    super::goal_tracker::goal_scratch_root(verifier_id)
+        .join("verification-rounds")
+        .join(round_id)
+        .join(format!("critic-{skeptic_idx}"))
+}
+
+fn format_round_verdict_path(verifier_id: &str, round_id: &str, skeptic_idx: u32) -> String {
+    round_critic_dir(verifier_id, round_id, skeptic_idx)
+        .join("verdict.json")
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn format_round_details_path(verifier_id: &str, round_id: &str, skeptic_idx: u32) -> String {
+    round_critic_dir(verifier_id, round_id, skeptic_idx)
+        .join("details.md")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Aggregate the panel under unanimous approval semantics.
 ///
-/// **Variant-C** — for a fan-out panel (`total > 1`), skeptic 0's
-/// not-refuted vote does NOT count: approval needs a STRICT MAJORITY of
-/// the COLD panel (`skeptic_idx >= 1`), `needed = cold_count / 2 + 1`.
+/// Every accepted structured verdict represents assigned correctness
+/// coverage. A single refutation, missing verdict, or infrastructure fallback
+/// therefore prevents approval. The empty panel also fails closed.
 ///
-/// The required cold-approval COUNT is monotone non-decreasing in N
-/// (1, 2, 2, 3 for cold sizes 1..4), so more skeptics never let fewer
-/// independent cold judges carry approval. The tolerated-dissenter
-/// FRACTION still loosens with N (N=3 needs 2/2, N=4 needs 2/3) — that is
-/// majority voting's intended resilience to one flaky/biased skeptic, not
-/// a defect. A strict majority of the FULL panel (incl. skeptic 0) is
-/// rejected: it would force cold UNANIMITY on even N (N=4 → 3/3), making
-/// the panel brittle to a single bad skeptic.
-///
-/// The bar derives from the cold-panel SIZE, not `total`: for a
-/// contiguous panel `cold_count = total - 1` and `cold_count/2 + 1 ≡
-/// ⌈total/2⌉`, but the cold-size form stays a true majority if skeptic 0
-/// is ever absent from `results` (where `⌈total/2⌉` would slip to a
-/// plurality).
-///
-/// Skeptic 0 is the resumed reject-gatekeeper, so letting its not-refuted
-/// vote tip a borderline panel toward approval is the bias we explicitly
-/// avoid. Its REFUTE still counts (in `refuted_count`, the pause/gaps
-/// summaries, and the upstream high-confidence decisive-refute
-/// short-circuit). `total <= 1` — the N==1 sole judge, and the
-/// short-circuit case where `results` holds only skeptic 0 — keeps the
-/// simple all-votes rule (`needed = 1`).
-///
-/// The adversarial bias-to-FAIL is deliberately enforced at the
-/// per-skeptic level — transport / cancelled / runtime / malformed
-/// outputs all degrade to a synthetic `refuted: true` vote in
-/// [`run_one_skeptic`], NOT at the aggregator. The aggregator counts
-/// votes; the bias lives upstream where the missing evidence is.
-///
-/// Returns `(refuted_count, total, quorum_achieved)`. `quorum_achieved`
-/// is the quorum result only; the caller (`run_verification_stage`)
-/// AND-tightens it with `!decisive_refute` for the final outcome.
+/// Returns `(refuted_count, total, achieved)`.
 pub(crate) fn aggregate_skeptic_verdicts(results: &[SkepticResult]) -> (u32, u32, bool) {
     let total = results.len() as u32;
-    // Defensive empty-case: `run_verification_stage` clamps N >= 1
-    // before fan-out, but the function is `pub(crate)` and tests
-    // call it directly with `&[]`. Returning `(0, 0, false)` (not
-    // achieved) matches the "default to refuted=true if uncertain"
-    // bias if the clamp ever regresses.
-    if total == 0 {
-        return (0, 0, false);
-    }
     let refuted_count = results.iter().filter(|r| r.refuted).count() as u32;
-    let (needed, not_refuted) = if total <= 1 {
-        // Sole judge / single-result short-circuit: the lone vote decides.
-        (1, total - refuted_count)
-    } else {
-        // Variant-C: strict majority of the COLD panel; skeptic 0 excluded.
-        let cold_count = results.iter().filter(|r| r.skeptic_idx >= 1).count() as u32;
-        let cold_not_refuted = results
-            .iter()
-            .filter(|r| r.skeptic_idx >= 1 && !r.refuted)
-            .count() as u32;
-        (cold_count / 2 + 1, cold_not_refuted)
-    };
-    (refuted_count, total, not_refuted >= needed)
+    (refuted_count, total, total > 0 && refuted_count == 0)
 }
 
 /// Per-evidence-line char cap for the inlined gaps summary — bounds a
@@ -1458,14 +1765,52 @@ pub(crate) fn parse_goal_kind(plan: &str) -> Option<GoalKind> {
                 "code-change" => Some(GoalKind::CodeChange),
                 "analysis" => Some(GoalKind::Analysis),
                 "research" => Some(GoalKind::Research),
-                "math" | "math-derivation" | "derivation" | "quantitative" => {
-                    Some(GoalKind::Math)
-                }
+                "math" | "math-derivation" | "derivation" | "quantitative" => Some(GoalKind::Math),
                 _ => None,
             };
         }
     }
     None
+}
+
+/// Parse the planner's composable `## Goal facets` section. Legacy plans with
+/// only `## Goal kind` remain valid and contribute one facet.
+pub(crate) fn parse_goal_facets(plan: &str) -> std::collections::BTreeSet<VerificationFacet> {
+    let mut facets = std::collections::BTreeSet::new();
+    let mut in_section = false;
+    for raw in plan.lines() {
+        let line = raw.trim();
+        if line.eq_ignore_ascii_case("## Goal facets") {
+            in_section = true;
+            continue;
+        }
+        if in_section && line.starts_with("## ") {
+            break;
+        }
+        if !in_section || line.is_empty() {
+            continue;
+        }
+        for token in line
+            .trim_start_matches(['-', '*'])
+            .split([',', '+', ';'])
+            .map(str::trim)
+        {
+            if let Some(facet) = canonical_facet(token.trim_matches(['`', '*', '_'])) {
+                facets.insert(facet);
+            }
+        }
+    }
+    if facets.is_empty()
+        && let Some(kind) = parse_goal_kind(plan)
+    {
+        facets.insert(match kind {
+            GoalKind::CodeChange => VerificationFacet::Code,
+            GoalKind::Analysis => VerificationFacet::Analysis,
+            GoalKind::Research => VerificationFacet::Research,
+            GoalKind::Math => VerificationFacet::Math,
+        });
+    }
+    facets
 }
 
 /// `code-change` review lens — adversarial code review layered on the
@@ -1485,7 +1830,7 @@ Your PRIMARY mandate is to actively HUNT for real bugs, issues, and gaps in the 
 /// `research` fact-check lens — verify every claim against its cited source.
 const KIND_LENS_RESEARCH: &str = "\n## Research fact-check lens\n\n\
 This goal gathers external information; the deliverable's whole value is its factual accuracy, so do not accept claims on trust — verify them. Bias to `refuted: true` on any claim you cannot confirm.\n\n\
-- Source-back every claim — for each material factual assertion, OPEN the cited source (web_fetch) and confirm that source actually states it. A claim with no citation, a dead or invented citation, a citation that does not support (or outright contradicts) it, or one resting only on FINAL_RESPONSE prose is `refuted: true`.\n\
+- Source-back every claim — for each material factual assertion, OPEN the cited source with the available read tools or a sandboxed command and confirm that source actually states it. A claim with no citation, a dead or invented citation, a citation that does not support (or outright contradicts) it, or one resting only on FINAL_RESPONSE prose is `refuted: true`.\n\
 - No fabrication or staleness — flag invented APIs/figures/quotes/version numbers, statistics with no provenance, and information that is out of date for a time-sensitive objective.\n\
 - Balance & completeness — if the objective implies a comparison or survey, material alternatives and counter-evidence must be covered; a one-sided or cherry-picked answer is incomplete.\n\
 - Conflicts — where sources disagree, the deliverable must surface the disagreement rather than silently pick one side.\n";
@@ -1502,16 +1847,40 @@ This goal explains or diagnoses something; the failure mode to hunt is a fluent,
 const KIND_LENS_MATH: &str = "\n## Math / quantitative correctness lens\n\n\
 This goal produces mathematical derivations, physical formulations, proofs, simulations, or quantitative results. Structural completeness is supporting evidence, never a substitute for correctness.\n\n\
 Read the authoritative task sources and the actual final artifact. Independently challenge every requested result and the consequential reasoning whose failure could change a conclusion. For a short derivation, checking each step may be proportionate; for a long research artifact, prioritize governing equations, sensitive assumptions, primary conclusions, and high-risk numerical or physical links instead of mechanically testing every line.\n\n\
-Apply all five harness gates and record one claim-bound `math_checks` row for each before approving:\n\
+Apply all five harness gates and record one claim-bound `checks` receipt for each before approving:\n\
 - `contract-closure`: enumerate every requested result and test its domain, branches, BC/IC, boundary values, and critical equality cases against the original relation.\n\
 - `derivation-integrity`: check every consequential implication; reject a correct final formula reached through a false equality, illegal division, dropped branch, sign/factor error, or unmet hypothesis.\n\
 - `evidence-provenance`: bind each CAS/numerical/tool observation to the exact claim, current final-artifact location/version, input/command, output, and tolerance/error. An unbound successful run is not evidence.\n\
 - `invariant-ledger`: propagate symbols, units, dimensions, normalization, signs, coordinate/gauge/Fourier conventions, admissibility, and conservation from assumptions through the final answer.\n\
-- `state-isolation`: compare authoritative inputs and the frozen pre-edit/last-validated state to the current artifact; detect whole-artifact rewrite loss and recheck every changed dependency. Use `not_applicable` only with a concrete reason.\n\n\
+- `state-isolation`: compare authoritative inputs and the frozen goal-start state to the current artifact, then use prior-round gaps to detect repair regressions; detect whole-artifact rewrite loss and recheck every changed dependency. Use `not_applicable` only with a concrete reason.\n\n\
 Use re-derivation, residual/substitution, special and limiting regimes, or numerical convergence/error and sensitivity as appropriate. Numerical claims need reproducible inputs and enough tolerance/convergence evidence to support the stated precision. Tool-backed checks are preferred when they materially reduce uncertainty, but a fixed log or manifest is not evidence by itself.\n\n\
 Refute confirmed mathematical errors, missing requested results, unsupported material claims, inconsistent conventions, and contradictions between prose, equations, sources, or computed evidence. Accept valid alternative derivations and clearly defined equivalent notation. Do not add benchmark-specific forms, require ceremony the task did not request, or reject harmless presentation differences.\n";
 
-/// The review-lens block for `kind` (empty string for `None` — generic verifier).
+/// Compose every applicable review lens. A hybrid code+math task receives both
+/// instead of allowing one classifier label to suppress the other.
+fn facet_lenses(facets: &std::collections::BTreeSet<VerificationFacet>) -> String {
+    let mut out = String::new();
+    if facets.contains(&VerificationFacet::Code) {
+        out.push_str(KIND_LENS_CODE_CHANGE);
+    }
+    if facets.contains(&VerificationFacet::Analysis)
+        || facets.contains(&VerificationFacet::Empirical)
+    {
+        out.push_str(KIND_LENS_ANALYSIS);
+    }
+    if facets.contains(&VerificationFacet::Research)
+        || facets.contains(&VerificationFacet::Sources)
+        || facets.contains(&VerificationFacet::Citations)
+    {
+        out.push_str(KIND_LENS_RESEARCH);
+    }
+    if facets.contains(&VerificationFacet::Math) {
+        out.push_str(KIND_LENS_MATH);
+    }
+    out
+}
+
+#[cfg(test)]
 fn kind_lens(kind: Option<GoalKind>) -> &'static str {
     match kind {
         Some(GoalKind::CodeChange) => KIND_LENS_CODE_CHANGE,
@@ -1520,6 +1889,105 @@ fn kind_lens(kind: Option<GoalKind>) -> &'static str {
         Some(GoalKind::Math) => KIND_LENS_MATH,
         None => "",
     }
+}
+
+fn classify_facets(
+    objective: &str,
+    plan: &str,
+    workspace_root: &Path,
+) -> std::collections::BTreeSet<VerificationFacet> {
+    let mut facets = parse_goal_facets(plan);
+    let lower = objective.to_ascii_lowercase();
+    let named_sources = named_local_source_candidates(objective);
+    let named_extensions: Vec<String> = named_sources
+        .iter()
+        .filter_map(|candidate| {
+            Path::new(candidate)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_ascii_lowercase)
+        })
+        .collect();
+    if objective_suggests_code_change(objective) {
+        facets.insert(VerificationFacet::Code);
+    }
+    if objective_or_named_sources_suggests_math(objective, workspace_root)
+        || objective_suggests_math(plan)
+    {
+        facets.insert(VerificationFacet::Math);
+    }
+    if ["research", "literature", "paper", "manuscript"]
+        .iter()
+        .any(|signal| lower.contains(signal))
+    {
+        facets.insert(VerificationFacet::Research);
+    }
+    let empirical = [
+        "experimental data",
+        "statistical",
+        "regression analysis",
+        "confidence interval",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal));
+    if empirical {
+        facets.insert(VerificationFacet::Empirical);
+        facets.insert(VerificationFacet::Math);
+    }
+    let named_authoritative_source = named_extensions.iter().any(|extension| {
+        matches!(
+            extension.as_str(),
+            "pdf" | "docx" | "tex" | "bib" | "ipynb" | "csv" | "tsv" | "xlsx" | "parquet"
+        )
+    });
+    if named_authoritative_source
+        || ["authoritative source", "cited source", "source material"]
+            .iter()
+            .any(|signal| lower.contains(signal))
+    {
+        facets.insert(VerificationFacet::Sources);
+    }
+    let named_document_source = named_extensions
+        .iter()
+        .any(|extension| matches!(extension.as_str(), "pdf" | "docx" | "tex"));
+    if named_document_source
+        && [
+            "paper",
+            "manuscript",
+            "scientific",
+            "mathematical",
+            "physics",
+            "derive",
+            "formulate",
+        ]
+        .iter()
+        .any(|signal| lower.contains(signal))
+    {
+        facets.insert(VerificationFacet::Math);
+    }
+    if ["citation", "bibliography", "cited"]
+        .iter()
+        .any(|signal| lower.contains(signal))
+    {
+        facets.insert(VerificationFacet::Citations);
+    }
+    if [
+        "render",
+        "compile the paper",
+        "compiled pdf",
+        "paper",
+        "manuscript",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal))
+    {
+        facets.insert(VerificationFacet::DocumentRender);
+    }
+    if facets.is_empty() {
+        facets.insert(VerificationFacet::Analysis);
+    }
+    facets.insert(VerificationFacet::StateRegression);
+    facets
 }
 
 /// Strong objective signals that the deliverable is mathematical /
@@ -1560,6 +2028,8 @@ pub(crate) fn objective_suggests_math(objective: &str) -> bool {
         "evaluate the integral",
         "find the closed form",
         "independent recomputation",
+        "mathematical paper",
+        "physics paper",
     ];
     STRONG.iter().any(|s| o.contains(s))
 }
@@ -1585,10 +2055,30 @@ fn objective_suggests_code_change(objective: &str) -> bool {
 
 fn named_local_source_candidates(text: &str) -> Vec<String> {
     const EXTENSIONS: &[&str] = &[
-        "txt", "md", "rst", "tex", "json", "yaml", "yml", "toml", "csv", "tsv",
+        "txt", "md", "rst", "tex", "bib", "json", "yaml", "yml", "toml", "csv", "tsv", "pdf",
+        "docx", "ipynb", "xlsx", "parquet", "rs", "py", "jl", "m", "c", "cpp", "h", "hpp", "f90",
     ];
 
     let mut candidates = Vec::new();
+    for delimiter in ['"', '\'', '`'] {
+        let mut parts = text.split(delimiter);
+        while let Some(_outside) = parts.next() {
+            let Some(inside) = parts.next() else {
+                break;
+            };
+            let candidate = inside.trim();
+            let extension = Path::new(candidate)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_ascii_lowercase);
+            if extension
+                .as_deref()
+                .is_some_and(|ext| EXTENSIONS.contains(&ext))
+            {
+                candidates.push(candidate.to_string());
+            }
+        }
+    }
     let mut token = String::new();
     let mut finish_token = |token: &mut String| {
         let candidate = token
@@ -1614,14 +2104,12 @@ fn named_local_source_candidates(text: &str) -> Vec<String> {
             finish_token(&mut token);
         }
     }
+    candidates.sort();
+    candidates.dedup();
     candidates
 }
 
-fn resolve_named_source(
-    workspace_root: &Path,
-    base: &Path,
-    raw: &str,
-) -> Option<PathBuf> {
+fn resolve_named_source(workspace_root: &Path, base: &Path, raw: &str) -> Option<PathBuf> {
     let raw_path = Path::new(raw);
     let mut attempts = Vec::with_capacity(2);
     if raw_path.is_absolute() {
@@ -1714,26 +2202,21 @@ pub(crate) fn objective_or_named_sources_suggests_math(
 /// `code-change` (coding tasks with math-flavored words stay on the
 /// code-change path).
 pub(crate) fn plan_requires_math_adversarial(objective: &str, plan: &str) -> bool {
-    match parse_goal_kind(plan) {
-        Some(GoalKind::Math) => true,
-        Some(GoalKind::CodeChange) => false,
-        _ => objective_suggests_math(objective) || objective_suggests_math(plan),
-    }
+    parse_goal_facets(plan).contains(&VerificationFacet::Math)
+        || objective_suggests_math(objective)
+        || objective_suggests_math(plan)
 }
 
 /// Static check: a math-required plan must (1) tag kind `math`, (2) include a
 /// `gating` adversarial / independent recomputation, and (3) cover all five
 /// canonical math-correctness gates in gating (not evidence-only) steps.
-pub(crate) fn validate_math_plan_contract(
-    objective: &str,
-    plan: &str,
-) -> Result<(), &'static str> {
+pub(crate) fn validate_math_plan_contract(objective: &str, plan: &str) -> Result<(), &'static str> {
     if !plan_requires_math_adversarial(objective, plan) {
         return Ok(());
     }
-    if !matches!(parse_goal_kind(plan), Some(GoalKind::Math)) {
+    if !parse_goal_facets(plan).contains(&VerificationFacet::Math) {
         return Err(
-            "math/quantitative objective requires ## Goal kind `math` so the math \
+            "math/quantitative objective requires the `math` goal facet so the math \
              verifier lens applies",
         );
     }
@@ -1766,10 +2249,10 @@ pub(crate) fn validate_math_plan_contract_source_aware(
     if !plan_requires_math_adversarial_source_aware(objective, workspace_root, plan) {
         return Ok(());
     }
-    if !matches!(parse_goal_kind(plan), Some(GoalKind::Math)) {
+    if !parse_goal_facets(plan).contains(&VerificationFacet::Math) {
         return Err(
-            "math/quantitative objective (incl. named sources) requires ## Goal kind \
-             `math` so the math verifier lens applies",
+            "math/quantitative objective (incl. named sources) requires the `math` goal facet \
+             so the math verifier lens applies",
         );
     }
     if !plan_has_adversarial_math_gate(plan) {
@@ -1795,14 +2278,61 @@ pub(crate) fn plan_requires_math_adversarial_source_aware(
     workspace_root: &std::path::Path,
     plan: &str,
 ) -> bool {
-    match parse_goal_kind(plan) {
-        Some(GoalKind::Math) => true,
-        Some(GoalKind::CodeChange) => false,
-        _ => {
-            objective_or_named_sources_suggests_math(objective, workspace_root)
-                || objective_suggests_math(plan)
+    parse_goal_facets(plan).contains(&VerificationFacet::Math)
+        || objective_or_named_sources_suggests_math(objective, workspace_root)
+        || objective_suggests_math(plan)
+}
+
+/// Minimal typed-plan barrier shared by every deliverable. It rejects empty or
+/// prose-only plans before the model can enter the execution loop.
+pub(crate) fn validate_plan_contract(plan: &str) -> Result<(), &'static str> {
+    let first = plan.lines().find(|line| !line.trim().is_empty());
+    if first.is_none_or(|line| {
+        line.trim()
+            .strip_prefix("# Plan:")
+            .is_none_or(|headline| headline.trim().is_empty())
+    }) {
+        return Err("plan must begin with a non-empty `# Plan:` heading");
+    }
+    if parse_goal_facets(plan).is_empty() {
+        return Err("plan must declare at least one recognized goal facet");
+    }
+    for section in ["## Acceptance criteria", "## Verification plan"] {
+        let mut inside = false;
+        let mut items = Vec::new();
+        for raw in plan.lines() {
+            let line = raw.trim();
+            if line.eq_ignore_ascii_case(section) {
+                inside = true;
+                continue;
+            }
+            if inside && line.starts_with("## ") {
+                break;
+            }
+            if inside
+                && let Some(item) = numbered_item_body(line)
+            {
+                items.push(item.to_ascii_lowercase());
+            }
+        }
+        if items.is_empty() {
+            return Err(match section {
+                "## Acceptance criteria" => "plan must contain a numbered acceptance criterion",
+                _ => "plan must contain a numbered verification step",
+            });
+        }
+        if section == "## Verification plan"
+            && items.iter().any(|item| {
+                !item.starts_with("gating:")
+                    && !item.starts_with("gating ")
+                    && !item.starts_with("evidence:")
+                    && !item.starts_with("evidence ")
+            })
+        {
+            return Err("every verification step must be tagged `gating` or `evidence`");
         }
     }
+    Ok(())
 }
 
 /// Extract normalized numbered/bulleted items from `## Verification plan`.
@@ -1895,11 +2425,48 @@ fn plan_has_complete_math_gate_coverage(plan: &str) -> bool {
     let gating = verification_plan_items(plan)
         .into_iter()
         .filter(|item| is_gating_verification_item(item))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .collect::<Vec<_>>();
     MATH_VALIDATION_GATES
         .iter()
-        .all(|gate| gating.contains(gate))
+        .all(|gate| gating.iter().any(|item| affirmative_gate_mention(item, gate)))
+}
+
+fn affirmative_gate_mention(item: &str, gate: &str) -> bool {
+    item.match_indices(gate).any(|(index, _)| {
+        let clause_start = item[..index]
+            .rfind([';', '.', ','])
+            .map_or(0, |position| position + 1);
+        let prefix = item[clause_start..index].trim();
+        ![
+            "do not",
+            "don't",
+            "not check",
+            "not cover",
+            "without",
+            "skip",
+            "omit",
+            "ignore",
+            "n/a",
+            "not applicable",
+        ]
+        .iter()
+        .any(|negation| prefix.contains(negation))
+    })
+}
+
+fn numbered_item_body(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let digit_count = line.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let rest = &line[digit_count..];
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    if !rest.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let body = rest.trim();
+    (!body.is_empty()).then_some(body)
 }
 
 fn is_markdown_list_item(line: &str) -> bool {
@@ -1911,18 +2478,7 @@ fn is_markdown_list_item(line: &str) -> bool {
         return true;
     }
 
-    let digit_count = line.bytes().take_while(u8::is_ascii_digit).count();
-    if digit_count == 0 {
-        return false;
-    }
-    let rest = &line[digit_count..];
-    let Some(rest) = rest
-        .strip_prefix('.')
-        .or_else(|| rest.strip_prefix(')'))
-    else {
-        return false;
-    };
-    rest.chars().next().is_some_and(char::is_whitespace)
+    numbered_item_body(line).is_some()
 }
 
 /// Delta-focused resume prompt for skeptic 0 when it is RESUMED across
@@ -2164,7 +2720,12 @@ fn render_skeptic_resume_prompt(
 /// `refuted: true` (fail-closed at the skeptic level). The `note` is
 /// surfaced in the aggregated details file so the user can see why this
 /// skeptic produced a synthetic refute.
-fn skeptic_failure(skeptic_idx: u32, note: String, latency_ms: u64) -> SkepticResult {
+fn skeptic_failure(
+    skeptic_idx: u32,
+    details_path: String,
+    note: String,
+    latency_ms: u64,
+) -> SkepticResult {
     SkepticResult {
         skeptic_idx,
         refuted: true,
@@ -2173,126 +2734,121 @@ fn skeptic_failure(skeptic_idx: u32, note: String, latency_ms: u64) -> SkepticRe
         evidence: String::new(),
         findings: Vec::new(),
         fallback_note: Some(note),
+        details_path,
         latency_ms,
     }
 }
 
-/// Read skeptic `skeptic_idx`'s verdict after its terminal response.
-/// The JSON verdict file is authoritative; the terminal token is a
-/// secondary signal used only when the JSON is missing/malformed — and in
-/// strict mode even that cannot approve. Math approval also never falls back
-/// to a terminal token, regardless of strict mode, because the terminal signal
-/// cannot carry the mandatory five-gate record. In either case, the terminal
-/// token may only tighten to refute; no acceptance can ride on an unstructured
-/// signal with unknown confidence and zero evidence.
+/// Read and validate one current-round structured verdict. Terminal text can
+/// tighten an approval to refuted but can never synthesize an approval.
 async fn read_skeptic_verdict(
     skeptic_idx: u32,
-    details_raw: &str,
     verdict_raw: &str,
+    canonical_verdict_path: &Path,
+    canonical_details_path: &Path,
     terminal: &str,
     started: std::time::Instant,
-    strict: bool,
-    require_math_checks: bool,
+    identity: &VerdictIdentity,
+    facets: &std::collections::BTreeSet<VerificationFacet>,
+    reviewed_root: &Path,
+    manifest: &super::verification_snapshot::ArtifactManifest,
+    trace: &[super::verifier_runtime::VerificationToolEvent],
 ) -> SkepticResult {
-    let json_body = tokio::fs::read_to_string(verdict_raw).await.ok();
-    if let Some(body) = json_body.as_deref()
-        && let Some(SkepticVerdict {
-            refuted,
-            evidence,
-            confidence,
-            blocking,
-            details_md: parsed_md,
-            findings,
-            math_checks,
-        }) = parse_verdict_json(body)
-    {
-        if require_math_checks
-            && !refuted
-            && let Err(reason) = validate_math_approval_checks(&math_checks)
-        {
-            return skeptic_failure(
-                skeptic_idx,
-                format!(
-                    "math approval record invalid: {reason} — synthetic REFUTE \
-                     (verifier-side contract failure, not an implementer gap)"
-                ),
-                started.elapsed().as_millis() as u64,
-            );
-        }
-        // Keep the referenced per-skeptic file non-empty: if the skeptic
-        // produced a verdict but never wrote its report, persist the JSON
-        // `details_md` fallback to the path the aggregate references.
-        let file_empty = tokio::fs::read_to_string(details_raw)
-            .await
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true);
-        if file_empty && !parsed_md.trim().is_empty() {
-            let _ = tokio::fs::write(details_raw, &parsed_md).await;
-        }
-        return SkepticResult {
+    let fail = |reason: String| {
+        skeptic_failure(
             skeptic_idx,
-            refuted,
-            confidence,
-            blocking,
-            evidence,
-            findings,
-            fallback_note: None,
-            latency_ms: started.elapsed().as_millis() as u64,
-        };
+            canonical_details_path.to_string_lossy().into_owned(),
+            format!("structured verdict rejected: {reason}"),
+            started.elapsed().as_millis() as u64,
+        )
+    };
+    let body = match read_bounded_verdict(Path::new(verdict_raw)) {
+        Ok(body) => body,
+        Err(error) => return fail(error),
+    };
+    let Some(verdict) = parse_verdict_json(&body) else {
+        return fail("missing, malformed, or unknown-schema JSON".to_string());
+    };
+    if parse_skeptic_terminal_response(terminal) == Some(true) && !verdict.refuted {
+        return fail("terminal refutation conflicts with structured approval".to_string());
+    }
+    if let Err(error) =
+        validate_structured_verdict(&verdict, identity, facets, reviewed_root, manifest, trace)
+    {
+        return fail(error);
+    }
+    if let Err(error) = persist_validated_verdict(canonical_verdict_path, &verdict) {
+        return fail(error);
     }
 
-    // JSON missing / malformed — a non-strict generic verdict may fall back to
-    // the terminal token. A math terminal can only tighten to refute: it cannot
-    // supply the structured five-gate approval record.
-    let terminal_verdict = parse_skeptic_terminal_response(terminal);
-    match terminal_verdict {
-        Some(refuted) if !strict && (!require_math_checks || refuted) => SkepticResult {
-            skeptic_idx,
-            refuted,
-            confidence: SkepticConfidence::Unknown,
-            blocking: SkepticBlocking::None,
-            evidence: String::new(),
-            findings: Vec::new(),
-            fallback_note: Some(
-                "verifier produced no verdict JSON (missing/malformed); terminal token used as \
-                 fallback — verifier-side contract failure, not an implementer gap"
-                    .into(),
-            ),
-            latency_ms: started.elapsed().as_millis() as u64,
-        },
-        _ => {
-            // Structured approval is unavailable. Strict mode and the math
-            // five-gate policy both fail closed; the terminal token may only
-            // tighten to refute (the adversarial bias-to-fail, enforced at the
-            // per-skeptic level).
-            let note = if require_math_checks && terminal_verdict == Some(false) {
-                "math verdict policy: verdict JSON missing/malformed and the terminal \
-                 token cannot carry the five-gate approval record — synthetic REFUTE \
-                 (verifier-side contract failure, not an implementer gap)"
-                    .to_string()
-            } else if strict {
-                "strict verdict policy: verdict JSON missing/malformed — synthetic REFUTE \
-                 (unstructured signals cannot approve; verifier-side contract failure, \
-                 not an implementer gap)"
-                    .to_string()
-            } else {
-                format!(
-                    "verdict JSON missing/malformed AND terminal token unrecognised: {}",
-                    terminal.chars().take(120).collect::<String>()
-                )
-            };
-            SkepticResult {
-                skeptic_idx,
-                refuted: true,
-                confidence: SkepticConfidence::Unknown,
-                blocking: SkepticBlocking::None,
-                evidence: String::new(),
-                findings: Vec::new(),
-                fallback_note: Some(note),
-                latency_ms: started.elapsed().as_millis() as u64,
-            }
-        }
+    let report = if verdict.details_md.trim().is_empty() {
+        format!("# Verification receipt\n\n{}\n", verdict.evidence)
+    } else {
+        verdict.details_md.clone()
+    };
+    if std::fs::symlink_metadata(canonical_details_path).is_ok()
+        || crate::util::config::atomic_write_string(canonical_details_path, &report).is_err()
+    {
+        return fail("critic details could not be persisted safely".to_string());
     }
+    SkepticResult {
+        skeptic_idx,
+        refuted: verdict.refuted,
+        confidence: verdict.confidence,
+        blocking: verdict.blocking,
+        evidence: verdict.evidence,
+        findings: verdict.findings,
+        fallback_note: None,
+        details_path: canonical_details_path.to_string_lossy().into_owned(),
+        latency_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+fn read_bounded_verdict(path: &Path) -> Result<String, String> {
+    const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("verdict file is missing: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_BYTES {
+        return Err("verdict is not a bounded regular file".to_string());
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("verdict cannot be opened safely: {error}"))?
+    };
+    #[cfg(not(unix))]
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("verdict cannot be opened: {error}"))?;
+    use std::io::Read as _;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("verdict cannot be read: {error}"))?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err("verdict changed while being read".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "verdict is not UTF-8".to_string())
+}
+
+fn persist_validated_verdict(path: &Path, verdict: &SkepticVerdict) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err("validated verdict path already exists".to_string());
+    }
+    let body = serde_json::to_string_pretty(verdict)
+        .map_err(|error| format!("cannot serialize validated verdict: {error}"))?;
+    crate::util::config::atomic_write_string(path, &body)
+        .map_err(|error| format!("cannot persist validated verdict: {error}"))?;
+    let reread = read_bounded_verdict(path)?;
+    let reparsed = parse_verdict_json(&reread)
+        .ok_or_else(|| "persisted verdict cannot be parsed".to_string())?;
+    if &reparsed != verdict {
+        return Err("persisted verdict changed during write".to_string());
+    }
+    Ok(())
 }
 
 /// Spawn one skeptic under `spawn_id`, wait for its terminal response,
@@ -2300,22 +2856,20 @@ async fn read_skeptic_verdict(
 /// side-effects so the orchestrator owns event emission for both the
 /// happy and failure paths uniformly.
 ///
-/// `resume_from` (skeptic 0 on attempt > 1) renders the delta resume
-/// prompt and resumes the prior child session. If that spawn fails (e.g.
-/// the prior session no longer exists after a restart) it falls back to
-/// a cold spawn under the same `spawn_id` so verification still runs.
+/// Every invocation is cold and bound to one immutable round. Reusing a prior
+/// child would also reuse its old cwd and tool state, defeating freshness.
 async fn run_one_skeptic(
     spawner: &Arc<dyn GoalClassifierSpawner>,
     skeptic_idx: u32,
     inputs: &SkepticInputs<'_>,
     spawn_id: &str,
-    resume_from: Option<&str>,
     tool_names: &RoleToolNames,
     inherit_tool_names: &RoleToolNames,
-    strict: bool,
     backpressure: Option<&SpawnBackpressure>,
 ) -> SkepticResult {
     let started = std::time::Instant::now();
+    let details_raw = format_round_details_path(inputs.verifier_id, inputs.round_id, skeptic_idx);
+    let verdict_raw = format_round_verdict_path(inputs.verifier_id, inputs.round_id, skeptic_idx);
     // Soft backpressure: while live subagent token burn is over the
     // threshold, defer the spawn (bounded — never blocks the goal).
     if let Some(bp) = backpressure {
@@ -2326,95 +2880,58 @@ async fn run_one_skeptic(
     if let Err(err) = super::goal_tracker::ensure_goal_scratch_root(inputs.verifier_id) {
         return skeptic_failure(
             skeptic_idx,
+            details_raw,
             format!("internal: could not secure the goal scratch root: {err}"),
             started.elapsed().as_millis() as u64,
         );
     }
-    // This skeptic's own private scratch dir; created lazily here (the
-    // implementer dir is created at goal setup). `{SCRATCH}` in the
-    // re-run plan resolves to this so N skeptics never collide.
-    let skeptic_scratch = super::goal_tracker::skeptic_scratch_dir(inputs.verifier_id, skeptic_idx);
-    let skeptic_scratch_ready = tokio::fs::create_dir_all(&skeptic_scratch).await.is_ok();
+    let skeptic_scratch = round_critic_dir(inputs.verifier_id, inputs.round_id, skeptic_idx);
+    let skeptic_scratch_ready = tokio::fs::create_dir(&skeptic_scratch).await.is_ok();
     // Readiness for the verifier prompt = the implementer dir (from the
     // orchestration) AND this skeptic's own subdir both exist on disk.
     let scratch_ready = inputs.scratch_dir_ready && skeptic_scratch_ready;
     let skeptic_scratch = skeptic_scratch.to_string_lossy();
-    let details_raw = format_verifier_details_path(inputs.verifier_id, inputs.attempt, skeptic_idx);
-    let verdict_raw = format_verdict_path(inputs.verifier_id, inputs.attempt, skeptic_idx);
     if validate_details_path(Path::new(&details_raw)).is_err()
         || validate_details_path(Path::new(&verdict_raw)).is_err()
+        || std::fs::symlink_metadata(&verdict_raw).is_ok()
+        || std::fs::symlink_metadata(&details_raw).is_ok()
     {
         return skeptic_failure(
             skeptic_idx,
+            details_raw,
             "internal: unsafe per-skeptic file path".to_string(),
             started.elapsed().as_millis() as u64,
         );
     }
 
-    // Resume attempt: a delta re-check of the prior gaps. A spawn error
-    // here (stale/missing prior session) is non-fatal — fall through to
-    // the cold spawn below.
-    if let Some(prior) = resume_from {
-        // Render once per toolset: `primary` for the skeptic's resolved
-        // toolset, `fallback` for the default/parent toolset the explicit-pair
-        // retry falls back to (so the retried prompt names the right tools).
-        let render = |tn: &RoleToolNames| {
-            render_skeptic_resume_prompt(
-                inputs.objective,
-                inputs.changes_ref,
-                inputs.changed_files,
-                inputs.plan_file,
-                inputs.plan_changes,
-                inputs.final_response,
-                &details_raw,
-                &verdict_raw,
-                inputs.kind_lens,
-                &skeptic_scratch,
-                inputs.implementer_scratch,
-                inputs.prior_gaps,
-                tn,
-                scratch_ready,
-            )
-        };
-        let prompt = RoleRenderedPrompt {
-            primary: render(tool_names),
-            fallback: render(inherit_tool_names),
-        };
-        match spawner
-            .spawn_classifier(
-                spawn_id,
-                skeptic_idx,
-                prompt,
-                Path::new(&details_raw),
-                Some(prior),
-            )
-            .await
-        {
-            Ok(terminal) => {
-                return read_skeptic_verdict(
-                    skeptic_idx,
-                    &details_raw,
-                    &verdict_raw,
-                    &terminal,
-                    started,
-                    strict,
-                    inputs.require_math_validation,
-                )
-                .await;
-            }
-            Err(err) => {
-                tracing::info!(
-                    skeptic_idx,
-                    %err,
-                    "skeptic-0 resume spawn failed; falling back to a cold spawn",
-                );
-            }
-        }
-    }
-
-    // Cold spawn: attempt 1, every idx >= 1, or a resume fallback.
+    let identity = VerdictIdentity {
+        goal_id: inputs.goal_id.to_string(),
+        verification_round_id: inputs.round_id.to_string(),
+        contract_digest: inputs.contract_digest.to_string(),
+        reviewed_artifact_manifest_digest: inputs.artifact_manifest.manifest_digest.clone(),
+        critic_id: spawn_id.to_string(),
+        critic_assignment_id: format!("{}:critic-{skeptic_idx}", inputs.round_id),
+    };
+    let coverage: Vec<_> = inputs
+        .facets
+        .iter()
+        .flat_map(|facet| {
+            gates_for_facet(*facet)
+                .iter()
+                .map(move |gate| serde_json::json!({"facet": facet.as_str(), "gate": gate}))
+        })
+        .collect();
+    let mechanical = format!(
+        "\n\n## Harness-bound verification identity\n\nIDENTITY:\n{}\n\n\
+         REQUIRED_COVERAGE:\n{}\n\nARTIFACT_MANIFEST: {}\n\
+         STATE_CHANGED_PATHS_FROM_GOAL_START: {}\n",
+        serde_json::to_string_pretty(&identity).expect("identity serializes"),
+        serde_json::to_string_pretty(&coverage).expect("coverage serializes"),
+        inputs.artifact_manifest_path.display(),
+        serde_json::to_string(inputs.state_changed_paths).expect("paths serialize"),
+    );
     let render = |tn: &RoleToolNames| {
-        render_skeptic_prompt(
+        let mut prompt = render_skeptic_prompt(
             inputs.objective,
             inputs.changes_ref,
             inputs.changed_files,
@@ -2429,35 +2946,78 @@ async fn run_one_skeptic(
             inputs.prior_gaps,
             tn,
             scratch_ready,
-        )
+        );
+        prompt.push_str(&mechanical);
+        prompt
     };
     let prompt = RoleRenderedPrompt {
         primary: render(tool_names),
         fallback: render(inherit_tool_names),
     };
-    match spawner
-        .spawn_classifier(spawn_id, skeptic_idx, prompt, Path::new(&details_raw), None)
-        .await
-    {
+    let trace_guard = match super::verifier_runtime::begin_trace(spawn_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return skeptic_failure(
+                skeptic_idx,
+                details_raw,
+                error,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    let outcome = spawner
+        .spawn_classifier(
+            spawn_id,
+            skeptic_idx,
+            prompt,
+            Path::new(&details_raw),
+            inputs.reviewed_root,
+            None,
+        )
+        .await;
+    let trace = match trace_guard.finish() {
+        Ok(trace) => trace,
+        Err(error) => {
+            return skeptic_failure(
+                skeptic_idx,
+                details_raw,
+                error,
+                started.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    match outcome {
         Ok(terminal) => {
+            let canonical = inputs
+                .validated_verdict_root
+                .join(format!("critic-{skeptic_idx}.json"));
+            let canonical_details = inputs
+                .validated_verdict_root
+                .join(format!("critic-{skeptic_idx}.md"));
             read_skeptic_verdict(
                 skeptic_idx,
-                &details_raw,
                 &verdict_raw,
+                &canonical,
+                &canonical_details,
                 &terminal,
                 started,
-                strict,
-                inputs.require_math_validation,
+                &identity,
+                inputs.facets,
+                inputs.reviewed_root,
+                inputs.artifact_manifest,
+                &trace,
             )
             .await
         }
         Err(SpawnError::Transport(d)) => skeptic_failure(
             skeptic_idx,
+            details_raw,
             format!("transport error: {d}"),
             started.elapsed().as_millis() as u64,
         ),
         Err(SpawnError::Runtime { message, cancelled }) => skeptic_failure(
             skeptic_idx,
+            details_raw,
             format!("runtime error (cancelled={cancelled}): {message}"),
             started.elapsed().as_millis() as u64,
         ),
@@ -2477,10 +3037,18 @@ struct SkepticInputs<'a> {
     changes_ref: evidence::ChangesRef<'a>,
     changed_files: &'a [String],
     verifier_id: &'a str,
-    attempt: u32,
+    goal_id: &'a str,
+    round_id: &'a str,
     /// Kind-specific review lens (`kind_lens`), shared by every skeptic so the
     /// panel applies one consistent lens. Empty when the goal kind is absent.
     kind_lens: &'a str,
+    facets: &'a std::collections::BTreeSet<VerificationFacet>,
+    contract_digest: &'a str,
+    reviewed_root: &'a Path,
+    artifact_manifest: &'a super::verification_snapshot::ArtifactManifest,
+    artifact_manifest_path: &'a Path,
+    validated_verdict_root: &'a Path,
+    state_changed_paths: &'a [String],
     /// The goal-wide implementer scratch dir as a string. Computed ONCE in
     /// [`run_verification_stage`] and shared by every skeptic (no per-skeptic
     /// clone); each skeptic derives its OWN dir from `verifier_id` instead.
@@ -2491,14 +3059,13 @@ struct SkepticInputs<'a> {
     /// Previous round's gaps summary for the `{PRIOR_GAPS}` placeholder
     /// (see [`VerificationStageInputs::prior_gaps`]).
     prior_gaps: Option<&'a str>,
-    /// Math approvals require a complete, claim-bound five-gate record.
-    require_math_validation: bool,
 }
 
 /// Stage-level inputs threaded into [`run_verification_stage`]. Borrowed
 /// throughout so the orchestrator stays pure and the test driver can
 /// stamp fresh inputs per attempt without cloning.
 pub(crate) struct VerificationStageInputs<'a> {
+    pub goal_id: &'a str,
     pub objective: &'a str,
     pub final_response: &'a str,
     pub baseline_commit: Option<&'a str>,
@@ -2514,6 +3081,8 @@ pub(crate) struct VerificationStageInputs<'a> {
     /// skeptics; `None` when no baseline was captured (planner-off goals or a
     /// snapshot failure).
     pub plan_baseline_file: Option<&'a Path>,
+    /// Content-addressed state captured before the first worker round.
+    pub initial_workspace_manifest_file: Option<&'a Path>,
     /// The goal-wide implementer scratch dir
     /// ([`super::goal_tracker::implementer_scratch_dir`]). Threaded into
     /// every skeptic prompt so the panel knows where the implementer wrote
@@ -2579,17 +3148,16 @@ impl From<GoalClassifierOutcome> for VerificationStageResult {
     }
 }
 
-/// Run the verification stage: the adversarial skeptic panel of
-/// `skeptic_count` spawns. Skeptic 0 runs first (and is resumed across
-/// attempts when N > 1); approval needs the cold-panel quorum (see
-/// [`aggregate_skeptic_verdicts`]).
+/// Run the verification stage: a fresh adversarial panel of `skeptic_count`
+/// spawns. Approval requires every structured verdict to approve (see
+/// [`aggregate_skeptic_verdicts`]); critics are never resumed across rounds.
 ///
 /// Always emits a `GoalClassifierFired` for dashboard symmetry with the
 /// legacy single classifier, then `GoalVerifierSkepticVerdict` per skeptic
 /// plus an aggregate `GoalVerifierAggregateVerdict` and a final
 /// `GoalClassifierVerdict`. The terminal outcome is one of `Achieved`,
-/// `NotAchieved`, `Blocked`, `FailOpenAchieved` — same enum the drain
-/// path already consumes.
+/// `NotAchieved`, `Blocked`, or the legacy-named infrastructure outcome
+/// `FailOpenAchieved` — same enum the drain path already consumes.
 ///
 /// ## Cancellation
 ///
@@ -2628,16 +3196,15 @@ pub(crate) async fn run_verification_stage_with_backpressure(
         model_id: inputs.model_id.to_string(),
     });
 
-    let details_raw = format_details_path(inputs.verifier_id, inputs.attempt);
+    let round_id = uuid::Uuid::now_v7().to_string();
+    let details_raw = format_round_panel_details_path(inputs.verifier_id, &round_id);
     let details_path = PathBuf::from(&details_raw);
-    let changes_raw = format_changes_path(inputs.verifier_id, inputs.attempt);
-    let changes_path = PathBuf::from(&changes_raw);
 
     if let Err(err) = validate_details_path(&details_path) {
         tracing::warn!(
             details_path = %details_raw,
             error = %err,
-            "verification stage: rejecting unsafe details path; failing open",
+            "verification stage: rejecting unsafe details path",
         );
         return record_fail_open(
             GoalClassifierFailOpenReason::FileWriteFailed,
@@ -2669,73 +3236,42 @@ pub(crate) async fn run_verification_stage_with_backpressure(
         .await
         .into();
     }
-    if let Err(err) = validate_details_path(&changes_path) {
-        tracing::warn!(
-            changes_path = %changes_raw,
-            error = %err,
-            "verification stage: rejecting unsafe changes path; failing open",
-        );
-        return record_fail_open(
-            GoalClassifierFailOpenReason::FileWriteFailed,
-            inputs.attempt,
-            started,
-            emit_event,
-            Some(&details_path),
-            details_raw,
-        )
-        .await
-        .into();
-    }
-
-    // Capture the diff ONCE; all skeptics read the same patch file.
-    // `changed_files` comes from the FULL pre-truncation diff (plus
-    // untracked files) so the list stays complete even when the patch
-    // body is byte-capped.
-    let mut changed_files: Vec<String> = Vec::new();
-    let changes_written = match evidence::capture_changes_diff(
+    // Capture all verification inputs before spawning any critic. Missing
+    // evidence is an infrastructure failure and cannot approve the goal.
+    let captured = match evidence::capture_changes_diff(
         inputs.baseline_commit,
         inputs.workspace_root,
         inputs.goal_created_at,
     )
     .await
     {
-        Ok(captured) => {
-            changed_files = captured.changed_files;
-            match write_patch_file_atomic(&changes_path, &captured.diff).await {
-                Ok(()) => true,
-                Err(err) => {
-                    tracing::warn!(
-                        changes_path = %changes_raw,
-                        error = %err,
-                        "verification stage: failed to write patch file; failing open",
-                    );
-                    return record_fail_open(
-                        GoalClassifierFailOpenReason::FileWriteFailed,
-                        inputs.attempt,
-                        started,
-                        emit_event,
-                        Some(&details_path),
-                        details_raw,
-                    )
-                    .await
-                    .into();
-                }
-            }
-        }
+        Ok(captured) => captured,
+        // An analysis-only goal or an empty non-git workspace can
+        // legitimately have no changed files. The immutable objective and
+        // final-response artifacts still give the verifier a complete review
+        // target; only an actual capture failure is infrastructural.
+        Err(evidence::ChangesCaptureError::WalkdirEmpty) => evidence::CapturedChanges {
+            diff: String::new(),
+            changed_files: Vec::new(),
+        },
         Err(err) => {
-            tracing::info!(
+            tracing::warn!(
                 error = %err,
-                "verification stage: changes-capture failed; rendering CHANGES_FILE as (unavailable)",
+                "verification stage: changes capture failed",
             );
-            false
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
         }
     };
     let sanitized = evidence::sanitize_final_response(inputs.final_response);
-    let changes_ref = if changes_written {
-        evidence::ChangesRef::File(&changes_raw)
-    } else {
-        evidence::ChangesRef::Unavailable
-    };
 
     // Compute the plan baseline→current diff ONCE; every skeptic shares the
     // same borrowed `&str` (no per-skeptic clone). The plan is agent-authored
@@ -2752,26 +3288,285 @@ pub(crate) async fn run_verification_stage_with_backpressure(
     // source-aware defence in depth. A wrapper objective can name a local
     // requirements file which names the actual quantitative source.
     let plan_body = match inputs.plan_file {
-        Some(path) => tokio::fs::read_to_string(path)
-            .await
-            .ok(),
+        Some(path) => match tokio::fs::read_to_string(path).await {
+            Ok(body) => Some(body),
+            Err(error) => {
+                tracing::warn!(%error, path = %path.display(), "verification plan is unreadable");
+                return record_fail_open(
+                    GoalClassifierFailOpenReason::FileWriteFailed,
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                    Some(&details_path),
+                    details_raw,
+                )
+                .await
+                .into();
+            }
+        },
         None => None,
     };
-    let planned_kind = plan_body.as_deref().and_then(parse_goal_kind);
-    let direct_math = objective_suggests_math(inputs.objective);
-    let source_math = objective_or_named_sources_suggests_math(
+    let facets = classify_facets(
         inputs.objective,
+        plan_body.as_deref().unwrap_or_default(),
         inputs.workspace_root,
     );
-    let goal_kind = if matches!(planned_kind, Some(GoalKind::Math))
-        || direct_math
-        || (source_math && !objective_suggests_code_change(inputs.objective))
-    {
-        Some(GoalKind::Math)
-    } else {
-        planned_kind
+    let kind_lens = facet_lenses(&facets);
+
+    let Some(initial_manifest_path) = inputs.initial_workspace_manifest_file else {
+        tracing::warn!("verification stage: goal-start workspace manifest is missing");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
     };
-    let kind_lens = kind_lens(goal_kind);
+    let initial_manifest = match super::verification_snapshot::read_manifest(initial_manifest_path)
+    {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: goal-start manifest is invalid");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+
+    let facet_names: Vec<_> = facets.iter().map(|facet| facet.as_str()).collect();
+    let contract_bytes = match serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1,
+        "goal_id": inputs.goal_id,
+        "objective": inputs.objective,
+        "plan": plan_body.as_deref().unwrap_or_default(),
+        "applicable_facets": facet_names,
+        "initial_workspace_manifest_digest": initial_manifest.manifest_digest,
+    })) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: contract serialization failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+    let contract_digest = super::verification_snapshot::digest_bytes(&contract_bytes);
+    let initial_manifest_bytes = match serde_json::to_vec_pretty(&initial_manifest) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: initial manifest serialization failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+    let virtual_artifacts = vec![
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/objective.txt".to_string(),
+            bytes: inputs.objective.as_bytes().to_vec(),
+        },
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/final-response.md".to_string(),
+            bytes: sanitized.as_bytes().to_vec(),
+        },
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/plan.md".to_string(),
+            bytes: plan_body.as_deref().unwrap_or_default().as_bytes().to_vec(),
+        },
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/changes.patch".to_string(),
+            bytes: captured.diff.as_bytes().to_vec(),
+        },
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/initial-workspace-manifest.json".to_string(),
+            bytes: initial_manifest_bytes,
+        },
+        super::verification_snapshot::VirtualArtifact {
+            path: ".ds-verification/contract.json".to_string(),
+            bytes: contract_bytes.clone(),
+        },
+    ];
+    let workspace_root = inputs.workspace_root.to_path_buf();
+    let scratch_root = super::goal_tracker::goal_scratch_root(inputs.verifier_id);
+    let snapshot_round_id = round_id.clone();
+    let snapshot = match tokio::task::spawn_blocking(move || {
+        super::verification_snapshot::create_reviewed_snapshot(
+            &workspace_root,
+            &scratch_root,
+            &snapshot_round_id,
+            &virtual_artifacts,
+        )
+    })
+    .await
+    {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "verification stage: reviewed snapshot creation failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: snapshot task failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+    let state_changed_paths =
+        match super::verification_snapshot::changed_paths(&initial_manifest, &snapshot.manifest) {
+            Ok(paths) => paths,
+            Err(error) => {
+                tracing::warn!(%error, "verification stage: state comparison failed");
+                return record_fail_open(
+                    GoalClassifierFailOpenReason::FileWriteFailed,
+                    inputs.attempt,
+                    started,
+                    emit_event,
+                    Some(&details_path),
+                    details_raw,
+                )
+                .await
+                .into();
+            }
+        };
+    // Validated receipts live in the durable session goal directory, not the
+    // temporary critic scratch tree that terminal goal transitions remove.
+    let goal_audit_root = match initial_manifest_path.parent() {
+        Some(path) => path.join("verification-rounds"),
+        None => {
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+    if let Err(error) = tokio::fs::create_dir_all(&goal_audit_root).await {
+        tracing::warn!(%error, "verification stage: durable audit root failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    let durable_round_root = goal_audit_root.join(&round_id);
+    if let Err(error) = tokio::fs::create_dir(&durable_round_root).await {
+        tracing::warn!(%error, "verification stage: durable round directory failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    let validated_verdict_root = durable_round_root.join("validated-verdicts");
+    if let Err(error) = tokio::fs::create_dir(&validated_verdict_root).await {
+        tracing::warn!(%error, "verification stage: validated verdict directory failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    if let Err(error) = super::verification_snapshot::persist_manifest(
+        &durable_round_root.join("artifact-manifest.json"),
+        &snapshot.manifest,
+    ) {
+        tracing::warn!(%error, "verification stage: durable artifact manifest failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    let contract_body = String::from_utf8(contract_bytes.clone())
+        .expect("serialized verification contract is UTF-8 JSON");
+    if let Err(error) = crate::util::config::atomic_write_string(
+        &durable_round_root.join("contract.json"),
+        &contract_body,
+    ) {
+        tracing::warn!(%error, "verification stage: durable contract persistence failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    let changes_path = snapshot.root.join(".ds-verification/changes.patch");
+    let changes_raw = changes_path.to_string_lossy().into_owned();
+    let snapshot_plan_path = plan_body
+        .as_ref()
+        .map(|_| snapshot.root.join(".ds-verification/plan.md"));
+    let changes_ref = evidence::ChangesRef::File(&changes_raw);
 
     let implementer_scratch = inputs.implementer_scratch_dir.to_string_lossy();
 
@@ -2791,100 +3586,41 @@ pub(crate) async fn run_verification_stage_with_backpressure(
     let skeptic_inputs = SkepticInputs {
         objective: inputs.objective,
         final_response: sanitized.as_ref(),
-        plan_file: inputs.plan_file,
+        plan_file: snapshot_plan_path.as_deref(),
         plan_changes: plan_changes_sanitized.as_deref(),
         changes_ref,
-        changed_files: &changed_files,
+        changed_files: &state_changed_paths,
         verifier_id: inputs.verifier_id,
-        attempt: inputs.attempt,
-        kind_lens,
+        goal_id: inputs.goal_id,
+        round_id: &round_id,
+        kind_lens: &kind_lens,
+        facets: &facets,
+        contract_digest: &contract_digest,
+        reviewed_root: &snapshot.root,
+        artifact_manifest: &snapshot.manifest,
+        artifact_manifest_path: &snapshot.manifest_path,
+        validated_verdict_root: &validated_verdict_root,
+        state_changed_paths: &state_changed_paths,
         implementer_scratch: implementer_scratch.as_ref(),
         scratch_dir_ready: inputs.scratch_dir_ready,
         prior_gaps: inputs.prior_gaps,
-        require_math_validation: matches!(goal_kind, Some(GoalKind::Math)),
     };
 
-    // Escalating panel: when N > 1, run skeptic 0 alone first. A
-    // refuted+high skeptic 0 is DECISIVE — it can never yield Achieved.
-    // An ordinary (NON-blocking) decisive refute short-circuits, skipping
-    // the remaining N-1 spawns. A blocking (contradiction / unverifiable)
-    // decisive refute instead fans out the full panel so the panel can
-    // corroborate whether it is truly all-blocking (`Blocked`, needs-user)
-    // or there is also a fixable gap (`NotAchieved`) — but skeptic 0's
-    // refute still binds the outcome away from Achieved (see
-    // `decisive_refute`). Any other skeptic-0 outcome (not-refuted, or
-    // refuted with medium/low confidence) also fans out, and approval
-    // then requires the full-panel quorum in `aggregate_skeptic_verdicts`.
-    // Skeptic 0 is the persistent reject-gatekeeper: for N > 1 it follows
-    // the goal across attempts and is resumed (delta re-check) whenever
-    // the prior child id survives — including the first attempt after a
-    // user pause/resume reset the attempt counter. The fresh `skeptic0_id` is
-    // returned out of the stage so the apply path persists it for the next
-    // attempt. N == 1 keeps skeptic 0 cold each attempt (a resumed sole
-    // judge would be the biased approver we avoid), so it never resumes
-    // and returns `None`.
-    let (results, decisive_refute, skeptic0_session_id): (
-        Vec<SkepticResult>,
-        bool,
-        Option<String>,
-    ) = if n > 1 {
-        let skeptic0_id = uuid::Uuid::now_v7().to_string();
-        // Gate purely on a surviving prior id: a user pause/resume resets
-        // `classifier_runs_attempted` (so attempt restarts at 1) while
-        // preserving `skeptic0_session_id`, and the gatekeeper must still
-        // resume in that case.
-        let resume_from = inputs.prior_skeptic0_session_id;
-        let first = run_one_skeptic(
+    // Every critic is cold, sees the same immutable snapshot, and receives a
+    // round-unique identity. Resume never reuses a verdict namespace.
+    let critic_ids: Vec<String> = (0..n).map(|_| uuid::Uuid::now_v7().to_string()).collect();
+    let spawns = (0..n).zip(&critic_ids).map(|(idx, id)| {
+        run_one_skeptic(
             &spawner,
-            0,
+            idx,
             &skeptic_inputs,
-            &skeptic0_id,
-            resume_from,
-            tool_names_for(0),
+            id.as_str(),
+            tool_names_for(idx),
             inputs.inherit_tool_names,
-            inputs.strict_skeptic_verdicts, backpressure,
+            backpressure,
         )
-        .await;
-        let high_refute = first.refuted && first.confidence == SkepticConfidence::High;
-        if high_refute && !first.blocking.is_blocking() {
-            (vec![first], true, Some(skeptic0_id))
-        } else {
-            // `high_refute` here ⇒ skeptic 0 was blocking (the non-blocking
-            // case short-circuited above), so its refute remains binding.
-            let cold_ids: Vec<String> = (1..n).map(|_| uuid::Uuid::now_v7().to_string()).collect();
-            let rest = (1..n).zip(&cold_ids).map(|(idx, id)| {
-                run_one_skeptic(
-                    &spawner,
-                    idx,
-                    &skeptic_inputs,
-                    id.as_str(),
-                    None,
-                    tool_names_for(idx),
-                    inputs.inherit_tool_names,
-                    inputs.strict_skeptic_verdicts, backpressure,
-                )
-            });
-            let mut all = Vec::with_capacity(n as usize);
-            all.push(first);
-            all.extend(futures::future::join_all(rest).await);
-            (all, high_refute, Some(skeptic0_id))
-        }
-    } else {
-        let cold_ids: Vec<String> = (0..n).map(|_| uuid::Uuid::now_v7().to_string()).collect();
-        let spawns = (0..n).zip(&cold_ids).map(|(idx, id)| {
-            run_one_skeptic(
-                &spawner,
-                idx,
-                &skeptic_inputs,
-                id.as_str(),
-                None,
-                tool_names_for(idx),
-                inputs.inherit_tool_names,
-                inputs.strict_skeptic_verdicts, backpressure,
-            )
-        });
-        (futures::future::join_all(spawns).await, false, None)
-    };
+    });
+    let results = futures::future::join_all(spawns).await;
 
     for r in &results {
         emit_event(Event::GoalVerifierSkepticVerdict {
@@ -2895,11 +3631,9 @@ pub(crate) async fn run_verification_stage_with_backpressure(
             latency_ms: r.latency_ms,
         });
     }
-    let (refuted_count, total, quorum_achieved) = aggregate_skeptic_verdicts(&results);
-    // A decisive skeptic-0 refute overrides the quorum: a refuted+high
-    // skeptic 0 can never approve, even when the blocking fan-out ran the
-    // full panel (the fan-out only chooses Blocked vs NotAchieved).
-    let achieved = quorum_achieved && !decisive_refute;
+    let (refuted_count, total, all_approved) = aggregate_skeptic_verdicts(&results);
+    let achieved =
+        total == n && all_approved && results.iter().all(|result| result.fallback_note.is_none());
     emit_event(Event::GoalVerifierAggregateVerdict {
         attempt: inputs.attempt,
         refuted_count,
@@ -2915,7 +3649,157 @@ pub(crate) async fn run_verification_stage_with_backpressure(
         inputs.verifier_id,
         inputs.attempt,
     );
-    write_details_file(&details_path, &body).await;
+    if let Err(error) = write_details_file(&details_path, &body).await {
+        tracing::warn!(%error, "verification stage: aggregate details persistence failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+    let review_root = snapshot.root.clone();
+    let review_manifest = snapshot.manifest.clone();
+    match tokio::task::spawn_blocking(move || {
+        super::verification_snapshot::verify_reviewed_snapshot(&review_root, &review_manifest)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "verification stage: reviewed snapshot changed during audit");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: snapshot recheck task failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    }
+    let post_workspace_root = inputs.workspace_root.to_path_buf();
+    let post_manifest = match tokio::task::spawn_blocking(move || {
+        super::verification_snapshot::capture_workspace_manifest(&post_workspace_root)
+    })
+    .await
+    {
+        Ok(Ok(manifest)) => manifest,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "verification stage: post-audit workspace capture failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: post-audit capture task failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    };
+    match super::verification_snapshot::changed_paths(&post_manifest, &snapshot.manifest) {
+        Ok(paths) if paths.is_empty() => {}
+        Ok(paths) => {
+            tracing::warn!(?paths, "verification stage: workspace changed during audit");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+        Err(error) => {
+            tracing::warn!(%error, "verification stage: post-audit state comparison failed");
+            return record_fail_open(
+                GoalClassifierFailOpenReason::FileWriteFailed,
+                inputs.attempt,
+                started,
+                emit_event,
+                Some(&details_path),
+                details_raw,
+            )
+            .await
+            .into();
+        }
+    }
+    let aggregate_path = durable_round_root.join("aggregate-verdict.json");
+    if let Err(error) = persist_aggregate_receipt(
+        &aggregate_path,
+        inputs.goal_id,
+        &round_id,
+        &contract_digest,
+        &snapshot.manifest.manifest_digest,
+        &facets,
+        &results,
+        achieved,
+    ) {
+        tracing::warn!(%error, "verification stage: aggregate receipt persistence failed");
+        return record_fail_open(
+            GoalClassifierFailOpenReason::FileWriteFailed,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await
+        .into();
+    }
+
+    if results.iter().any(|result| result.fallback_note.is_some()) {
+        let outcome = record_fail_open(
+            GoalClassifierFailOpenReason::SamplerError,
+            inputs.attempt,
+            started,
+            emit_event,
+            Some(&details_path),
+            details_raw,
+        )
+        .await;
+        return VerificationStageResult {
+            outcome,
+            skeptic0_session_id: None,
+            panel_ran: true,
+        };
+    }
 
     let latency_ms = started.elapsed().as_millis() as u64;
     let verdict = if achieved {
@@ -2934,7 +3818,7 @@ pub(crate) async fn run_verification_stage_with_backpressure(
             outcome: GoalClassifierOutcome::Achieved {
                 details_path: details_raw,
             },
-            skeptic0_session_id,
+            skeptic0_session_id: None,
             panel_ran: true,
         };
     }
@@ -2977,7 +3861,7 @@ pub(crate) async fn run_verification_stage_with_backpressure(
     };
     VerificationStageResult {
         outcome,
-        skeptic0_session_id,
+        skeptic0_session_id: None,
         panel_ran: true,
     }
 }
@@ -2992,13 +3876,13 @@ fn render_skeptic_panel_details(
     refuted_count: u32,
     total: u32,
     achieved: bool,
-    verifier_id: &str,
-    attempt: u32,
+    _verifier_id: &str,
+    _attempt: u32,
 ) -> String {
     let headline = if achieved {
         format!(
             "# Goal verification — Achieved\n\n\
-             {refuted_count} of {total} skeptics refuted; survives the panel.\n\n"
+             {refuted_count} of {total} skeptics refuted; every structured verdict approved.\n\n"
         )
     } else {
         format!(
@@ -3007,14 +3891,12 @@ fn render_skeptic_panel_details(
         )
     };
 
-    // Per-skeptic report paths (full reasoning lives in these files, each
-    // written by its skeptic). Deterministic from (verifier_id, attempt,
-    // idx); sorted by idx for a stable listing.
+    // Per-skeptic report paths are round-unique and sorted for a stable listing.
     let mut by_idx: Vec<&SkepticResult> = results.iter().collect();
     by_idx.sort_by_key(|r| r.skeptic_idx);
     let paths: Vec<String> = by_idx
         .iter()
-        .map(|r| format_verifier_details_path(verifier_id, attempt, r.skeptic_idx))
+        .map(|result| result.details_path.clone())
         .collect();
 
     let mut out = String::with_capacity(headline.len() + 1024);
@@ -3064,14 +3946,50 @@ fn cap_panel_details(body: String) -> String {
     out
 }
 
-async fn write_details_file(path: &Path, body: &str) {
-    if let Err(err) = tokio::fs::write(path, body).await {
-        tracing::warn!(
-            path = %path.display(),
-            error = %err,
-            "verification stage: failed to write details file",
-        );
+async fn write_details_file(path: &Path, body: &str) -> std::io::Result<()> {
+    write_patch_file_atomic(path, body).await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_aggregate_receipt(
+    path: &Path,
+    goal_id: &str,
+    round_id: &str,
+    contract_digest: &str,
+    manifest_digest: &str,
+    facets: &std::collections::BTreeSet<VerificationFacet>,
+    results: &[SkepticResult],
+    achieved: bool,
+) -> Result<(), String> {
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err("aggregate receipt path already exists".to_string());
     }
+    let receipt = serde_json::json!({
+        "schema_version": 1,
+        "goal_id": goal_id,
+        "verification_round_id": round_id,
+        "contract_digest": contract_digest,
+        "reviewed_artifact_manifest_digest": manifest_digest,
+        "applicable_facets": facets.iter().map(|facet| facet.as_str()).collect::<Vec<_>>(),
+        "achieved": achieved,
+        "critics": results.iter().map(|result| serde_json::json!({
+            "critic_index": result.skeptic_idx,
+            "refuted": result.refuted,
+            "structured_verdict_accepted": result.fallback_note.is_none(),
+            "details_path": result.details_path,
+        })).collect::<Vec<_>>(),
+    });
+    let body = serde_json::to_string_pretty(&receipt)
+        .map_err(|error| format!("cannot serialize aggregate receipt: {error}"))?;
+    crate::util::config::atomic_write_string(path, &body)
+        .map_err(|error| format!("cannot persist aggregate receipt: {error}"))?;
+    let reread = read_bounded_verdict(path)?;
+    let reparsed: serde_json::Value = serde_json::from_str(&reread)
+        .map_err(|error| format!("persisted aggregate receipt is malformed: {error}"))?;
+    if reparsed != receipt {
+        return Err("persisted aggregate receipt changed during write".to_string());
+    }
+    Ok(())
 }
 
 // Test helpers (shared between this module's tests and acp_session's
@@ -3084,7 +4002,8 @@ async fn write_details_file(path: &Path, body: &str) {
 /// and `acp_session::goal_classifier_e2e_tests::MockCoordinator`.
 #[cfg(test)]
 pub(crate) fn parse_verdict_path_from_prompt(prompt: &str) -> Option<String> {
-    parse_prompt_path(prompt, "goal-verdict-", ".json")
+    parse_backticked_path(prompt, "### 1. JSON verdict → `")
+        .or_else(|| parse_prompt_path(prompt, "goal-verdict-", ".json"))
 }
 
 /// Pull the per-skeptic `{DETAILS_FILE}` path out of a rendered verifier
@@ -3092,7 +4011,15 @@ pub(crate) fn parse_verdict_path_from_prompt(prompt: &str) -> Option<String> {
 /// classifier and strategist e2e suites.
 #[cfg(test)]
 pub(crate) fn parse_skeptic_details_path_from_prompt(prompt: &str) -> Option<String> {
-    parse_prompt_path(prompt, "-skeptic-", ".md")
+    parse_backticked_path(prompt, "### 2. Details → `")
+        .or_else(|| parse_prompt_path(prompt, "-skeptic-", ".md"))
+}
+
+#[cfg(test)]
+fn parse_backticked_path(prompt: &str, heading: &str) -> Option<String> {
+    let (_, tail) = prompt.split_once(heading)?;
+    let (path, _) = tail.split_once('`')?;
+    (!path.trim().is_empty()).then(|| path.to_string())
 }
 
 /// Extract an absolute artifact path from a rendered prompt: the files
@@ -3108,6 +4035,119 @@ fn parse_prompt_path(prompt: &str, marker: &str, suffix: &str) -> Option<String>
     let tail = &prompt[start..];
     let end = tail.find(suffix)?;
     Some(tail[..end + suffix.len()].to_string())
+}
+
+/// Upgrade a concise legacy canned verdict into a fully round-bound receipt.
+/// Test coordinators use this to exercise production validation without
+/// hard-coding UUIDs or artifact digests that the stage owns.
+#[cfg(test)]
+pub(crate) fn bind_test_verdict(prompt: &str, reviewed_root: &Path, raw: &str) -> String {
+    fn prompt_json_between(prompt: &str, start: &str, end: &str) -> serde_json::Value {
+        let body = prompt
+            .split_once(start)
+            .and_then(|(_, tail)| tail.split_once(end).map(|(body, _)| body))
+            .expect("mock prompt contains harness identity block");
+        serde_json::from_str(body.trim()).expect("mock prompt identity JSON parses")
+    }
+
+    let Ok(legacy) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    if legacy.get("verdict_schema_version").is_some() {
+        return raw.to_string();
+    }
+    let identity = prompt_json_between(prompt, "IDENTITY:\n", "\n\nREQUIRED_COVERAGE:");
+    let coverage = prompt_json_between(prompt, "REQUIRED_COVERAGE:\n", "\n\nARTIFACT_MANIFEST:");
+    let coverage = coverage.as_array().expect("coverage is an array");
+    let math_required = coverage.iter().any(|row| row["facet"] == "math");
+    if math_required && legacy.get("math_checks").is_none() {
+        // Preserve the deliberately incomplete response used by the
+        // missing-coverage regression test.
+        return raw.to_string();
+    }
+
+    let manifest = super::verification_snapshot::read_manifest(
+        &reviewed_root.join(super::verification_snapshot::SNAPSHOT_MANIFEST_PATH),
+    )
+    .expect("mock reviewed manifest parses");
+    let artifact = [
+        ".ds-verification/final-response.md",
+        ".ds-verification/objective.txt",
+    ]
+    .into_iter()
+    .find_map(|path| {
+        let entry = manifest.entries.iter().find(|entry| entry.path == path)?;
+        let text = std::fs::read_to_string(reviewed_root.join(path)).ok()?;
+        let target = text
+            .lines()
+            .find(|line| !line.trim().is_empty())?
+            .to_string();
+        Some((path.to_string(), entry.sha256.clone()?, target))
+    })
+    .expect("mock snapshot has a non-empty virtual artifact");
+    let refuted = legacy["refuted"].as_bool().unwrap_or(true);
+    let mut failed_one = false;
+    let checks: Vec<_> = coverage
+        .iter()
+        .map(|row| {
+            let facet = row["facet"].as_str().unwrap();
+            let gate = row["gate"].as_str().unwrap();
+            if facet == "math" && gate == "evidence-provenance" {
+                return serde_json::json!({
+                    "gate": gate,
+                    "facet": facet,
+                    "status": "not_applicable",
+                    "target": "No tool-backed claim was submitted in this mock",
+                    "evidence": "The remaining mathematical gates inspect the artifact directly",
+                    "artifact_path": "",
+                    "artifact_sha256": "",
+                    "method": "manual derivation review",
+                    "applicability_basis": "No symbolic or numerical tool evidence is asserted"
+                });
+            }
+            let status = if refuted && !failed_one {
+                failed_one = true;
+                "fail"
+            } else {
+                "pass"
+            };
+            serde_json::json!({
+                "gate": gate,
+                "facet": facet,
+                "status": status,
+                "target": artifact.2.as_str(),
+                "evidence": legacy["evidence"].as_str().unwrap_or("mock receipt"),
+                "artifact_path": artifact.0.as_str(),
+                "artifact_sha256": artifact.1.as_str(),
+                "method": "manual artifact review"
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "verdict_schema_version": 1,
+        "goal_id": identity["goal_id"],
+        "verification_round_id": identity["verification_round_id"],
+        "contract_digest": identity["contract_digest"],
+        "reviewed_artifact_manifest_digest": identity["reviewed_artifact_manifest_digest"],
+        "critic_id": identity["critic_id"],
+        "critic_assignment_id": identity["critic_assignment_id"],
+        "refuted": refuted,
+        "evidence": legacy["evidence"].as_str().unwrap_or("mock receipt"),
+        "confidence": legacy["confidence"].as_str().unwrap_or("unknown"),
+        "blocking": legacy.get("blocking").and_then(serde_json::Value::as_str).unwrap_or("none"),
+        "details_md": legacy.get("details_md").and_then(serde_json::Value::as_str).unwrap_or(""),
+        "findings": if refuted {
+            serde_json::json!([{
+                "kind": "bug",
+                "location": artifact.0.as_str(),
+                "detail": legacy["evidence"].as_str().unwrap_or("mock refutation")
+            }])
+        } else {
+            serde_json::json!([])
+        },
+        "checks": checks
+    })
+    .to_string()
 }
 
 // Tests
@@ -3134,9 +4174,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_spawner_request_is_harness_internal() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
@@ -3146,7 +4184,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: Vec::new(),
-            events: None,
             goal_phase: Some("verify"),
             goal_attempt: Some(1),
         };
@@ -3157,7 +4194,8 @@ mod tests {
                     0,
                     role_prompt("prompt"),
                     Path::new("/tmp/details.md"),
-                    Some("prior-child"),
+                    Path::new("/tmp/reviewed"),
+                    None,
                 )
                 .await;
         });
@@ -3169,11 +4207,9 @@ mod tests {
             !request.surface_completion,
             "verifier subagent must not surface to the idle reminder"
         );
-        assert_eq!(
-            request.resume_from.as_deref(),
-            Some("prior-child"),
-            "resume_from must propagate to the SubagentRequest",
-        );
+        assert!(request.resume_from.is_none());
+        assert!(!request.fork_context);
+        assert!(request.runtime_overrides.verifier_sandbox.is_some());
         let _ = request.result_tx.send(SubagentResult::default());
         handle.await.unwrap();
     }
@@ -3181,14 +4217,10 @@ mod tests {
     /// The per-index override (`skeptic_overrides[idx]` — e.g.
     /// `pool[0]` for skeptic 0) reaches the actual `SubagentRequest`'s
     /// `runtime_overrides.model` + `subagent_type`. The override is keyed by
-    /// `skeptic_idx`, so the resume and cold-fallback paths of
-    /// `run_one_skeptic` (both call `spawn_classifier(.., idx, ..)`) apply the
-    /// SAME model — i.e. skeptic-0 keeps `pool[0]` on the cold fallback.
+    /// `skeptic_idx`, so each fresh verifier applies the intended pool model.
     #[tokio::test]
     async fn channel_spawner_applies_per_index_model_to_request() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
@@ -3204,20 +4236,19 @@ mod tests {
                 },
                 RoleSpawnOverride::default(),
             ],
-            events: None,
             goal_phase: Some("verify"),
             goal_attempt: Some(1),
         };
         let handle = tokio::spawn(async move {
-            // Skeptic 0 with a resume id: even on the cold path it carries
-            // skeptic_overrides[0].
+            // Skeptic 0 is always fresh and carries skeptic_overrides[0].
             let _ = spawner
                 .spawn_classifier(
                     "clf-0",
                     0,
                     role_prompt("prompt"),
                     Path::new("/tmp/details.md"),
-                    Some("prior-child"),
+                    Path::new("/tmp/reviewed"),
+                    None,
                 )
                 .await;
         });
@@ -3232,21 +4263,15 @@ mod tests {
         );
         assert_eq!(
             request.subagent_type, GOAL_CLASSIFIER_SUBAGENT_TYPE,
-            "skeptic always spawns general-purpose; the configured agent_type is the HARNESS",
+            "skeptic always uses the harness-owned final-verifier type",
         );
         assert_eq!(
             request.runtime_overrides.harness_agent_type.as_deref(),
             Some("cursor"),
             "skeptic 0 must carry pool[0]'s agent_type as the harness override",
         );
-        assert_eq!(
-            request.resume_from.as_deref(),
-            Some("prior-child"),
-            "resume_from still propagates alongside the per-index override",
-        );
-        // Reply SUCCESS so the explicit override does NOT trigger a retry
-        // (a failed explicit spawn would fail-open-retry, sending a second
-        // Spawn this test does not service).
+        assert!(request.resume_from.is_none());
+        // A final verifier is exactly one fresh spawn, regardless of override.
         let _ = request.result_tx.send(SubagentResult {
             success: true,
             output: std::sync::Arc::from("ok"),
@@ -3255,13 +4280,60 @@ mod tests {
         handle.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn channel_spawner_never_retries_a_failed_final_verifier_identity() {
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let spawner = ChannelSpawner {
+            event_tx: tx,
+            parent_session_id: "parent".into(),
+            parent_prompt_id: None,
+            cwd: None,
+            trace_sink: None,
+            skeptic_overrides: vec![RoleSpawnOverride {
+                model: Some("configured-model".into()),
+                agent_type: Some("configured-harness".into()),
+            }],
+            goal_phase: Some("verify"),
+            goal_attempt: Some(1),
+        };
+        let handle = tokio::spawn(async move {
+            spawner
+                .spawn_classifier(
+                    "fresh-id",
+                    0,
+                    role_prompt("prompt"),
+                    Path::new("/tmp/critic/verdict.json"),
+                    Path::new("/tmp/reviewed"),
+                    None,
+                )
+                .await
+        });
+        let SubagentEvent::Spawn(request) = rx.recv().await.expect("spawn event") else {
+            panic!("expected Spawn");
+        };
+        let _ = request.result_tx.send(SubagentResult {
+            success: false,
+            error: Some("failed".into()),
+            ..Default::default()
+        });
+        assert!(handle.await.unwrap().is_err());
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ),
+            "a failed final-verifier spawn must not reuse its identity"
+        );
+    }
+
     /// An inherit index (no configured pair) leaves `runtime_overrides.model`
     /// `None` — the historic default-spawn behavior.
     #[tokio::test]
     async fn channel_spawner_inherit_index_leaves_model_none() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let spawner = ChannelSpawner {
             event_tx: tx,
@@ -3270,7 +4342,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: vec![RoleSpawnOverride::default()],
-            events: None,
             goal_phase: Some("verify"),
             goal_attempt: Some(1),
         };
@@ -3281,6 +4352,7 @@ mod tests {
                     0,
                     role_prompt("prompt"),
                     Path::new("/tmp/d.md"),
+                    Path::new("/tmp/reviewed"),
                     None,
                 )
                 .await;
@@ -3454,6 +4526,15 @@ mod tests {
     }
 
     #[test]
+    fn verification_rounds_have_distinct_aggregate_details_paths() {
+        let first = format_round_panel_details_path("abcdef012345", "round-1");
+        let second = format_round_panel_details_path("abcdef012345", "round-2");
+        assert_ne!(first, second);
+        assert!(validate_details_path(Path::new(&first)).is_ok());
+        assert!(validate_details_path(Path::new(&second)).is_ok());
+    }
+
+    #[test]
     fn parse_skeptic_terminal_accepts_refuted() {
         assert_eq!(parse_skeptic_terminal_response("Refuted"), Some(true));
     }
@@ -3520,17 +4601,29 @@ mod tests {
         assert_eq!(parse_skeptic_terminal_response("Not Refuted!"), Some(false),);
     }
 
+    fn structured_verdict_value(refuted: bool) -> serde_json::Value {
+        serde_json::json!({
+            "verdict_schema_version": 1,
+            "goal_id": "goal-1",
+            "verification_round_id": "round-1",
+            "contract_digest": "sha256:contract",
+            "reviewed_artifact_manifest_digest": "sha256:manifest",
+            "critic_id": "critic-1",
+            "critic_assignment_id": "assignment-1",
+            "refuted": refuted,
+            "evidence": "artifact-bound verification completed",
+            "confidence": "high",
+            "checks": []
+        })
+    }
+
     #[test]
     fn parse_verdict_json_happy_path() {
-        let body = r##"{
-            "refuted": true,
-            "evidence": "src/foo.rs:12 — no test added",
-            "confidence": "high",
-            "details_md": "# Skeptic\n\nbody"
-        }"##;
-        let v = parse_verdict_json(body).expect("parses");
+        let mut value = structured_verdict_value(true);
+        value["details_md"] = serde_json::json!("# Skeptic\n\nbody");
+        let v = parse_verdict_json(&value.to_string()).expect("parses");
         assert!(v.refuted);
-        assert_eq!(v.evidence, "src/foo.rs:12 — no test added");
+        assert_eq!(v.evidence, "artifact-bound verification completed");
         assert_eq!(v.confidence, SkepticConfidence::High);
         assert_eq!(v.details_md, "# Skeptic\n\nbody");
         assert!(v.findings.is_empty());
@@ -3571,71 +4664,15 @@ mod tests {
         ])
     }
 
-    fn complete_math_checks() -> Vec<MathValidationCheck> {
-        serde_json::from_value(complete_math_checks_value()).unwrap()
-    }
-
-    #[test]
-    fn math_approval_requires_exactly_one_claim_bound_row_per_gate() {
-        let checks = complete_math_checks();
-        assert!(validate_math_approval_checks(&checks).is_ok());
-
-        let mut missing = checks.clone();
-        missing.pop();
-        assert_eq!(
-            validate_math_approval_checks(&missing).unwrap_err(),
-            "missing math gate `state-isolation`"
-        );
-
-        let mut duplicate = checks.clone();
-        duplicate.push(checks[0].clone());
-        assert_eq!(
-            validate_math_approval_checks(&duplicate).unwrap_err(),
-            "duplicate math gate `contract-closure`"
-        );
-
-        let mut unbound = checks.clone();
-        unbound[2].evidence.clear();
-        assert_eq!(
-            validate_math_approval_checks(&unbound).unwrap_err(),
-            "math gate `evidence-provenance` has no claim-bound evidence"
-        );
-
-        let mut failed = checks;
-        failed[1].status = "fail".into();
-        assert_eq!(
-            validate_math_approval_checks(&failed).unwrap_err(),
-            "math gate `derivation-integrity` failed in an approval verdict"
-        );
-    }
-
-    #[test]
-    fn parse_verdict_json_preserves_math_checks_for_policy_gate() {
-        let body = serde_json::json!({
-            "refuted": false,
-            "evidence": "five claim-bound checks recorded",
-            "confidence": "high",
-            "math_checks": complete_math_checks_value()
-        })
-        .to_string();
-        let verdict = parse_verdict_json(&body).expect("verdict parses");
-        assert_eq!(verdict.math_checks.len(), MATH_VALIDATION_GATES.len());
-        assert!(validate_math_approval_checks(&verdict.math_checks).is_ok());
-    }
-
     #[test]
     fn parse_verdict_json_parses_findings_and_drops_empty() {
-        let body = r##"{
-            "refuted": true,
-            "evidence": "summary",
-            "confidence": "high",
-            "findings": [
-                {"kind": "bug", "location": "src/foo.rs:42", "detail": "off-by-one"},
-                {"kind": "", "location": "", "detail": ""},
-                {"kind": "gap", "location": "", "detail": "criterion 3 undriven"}
-            ]
-        }"##;
-        let v = parse_verdict_json(body).expect("parses");
+        let mut value = structured_verdict_value(true);
+        value["findings"] = serde_json::json!([
+            {"kind": "bug", "location": "src/foo.rs:42", "detail": "off-by-one"},
+            {"kind": "", "location": "", "detail": ""},
+            {"kind": "gap", "location": "", "detail": "criterion 3 undriven"}
+        ]);
+        let v = parse_verdict_json(&value.to_string()).expect("parses");
         assert_eq!(v.findings.len(), 2, "the all-empty finding is dropped");
         assert_eq!(v.findings[0].kind, "bug");
         assert_eq!(v.findings[0].location, "src/foo.rs:42");
@@ -3644,92 +4681,74 @@ mod tests {
 
     #[test]
     fn parse_verdict_json_omits_details_md_optional_field() {
-        // `details_md` is a harness extension to the literal
-        // VERDICT_SCHEMA — only `refuted`, `evidence`, `confidence`
-        // are required. A clean parse without `details_md` succeeds;
-        // the aggregator then falls back to the on-disk per-skeptic
-        // details file.
-        let body = r#"{"refuted":false,"evidence":"src/x.rs:1","confidence":"high"}"#;
-        let v = parse_verdict_json(body).expect("parses");
+        let value = structured_verdict_value(false);
+        let v = parse_verdict_json(&value.to_string()).expect("parses");
         assert!(!v.refuted);
-        assert_eq!(v.evidence, "src/x.rs:1");
         assert_eq!(v.confidence, SkepticConfidence::High);
         assert_eq!(v.details_md, "");
     }
 
     #[test]
-    fn parse_verdict_json_tolerates_extra_fields() {
-        let body = r##"{
-            "refuted": true,
-            "evidence": "x",
-            "confidence": "low",
-            "details_md": "y",
-            "extra_field": 42
-        }"##;
-        let v = parse_verdict_json(body).expect("parses");
-        assert!(v.refuted);
-        assert_eq!(v.confidence, SkepticConfidence::Low);
+    fn parse_verdict_json_rejects_unknown_fields() {
+        let mut value = structured_verdict_value(true);
+        value["extra_field"] = serde_json::json!(42);
+        assert!(parse_verdict_json(&value.to_string()).is_none());
     }
 
     #[test]
     fn parse_verdict_json_blocking_defaults_to_none_when_absent() {
-        // Back-compat: historical verdicts have no `blocking` key; the
-        // `serde(default)` must deserialize them to the model-fixable class.
-        let body = r#"{"refuted":true,"evidence":"src/x.rs:1","confidence":"high"}"#;
-        let v = parse_verdict_json(body).expect("parses");
+        let value = structured_verdict_value(true);
+        let v = parse_verdict_json(&value.to_string()).expect("parses");
         assert_eq!(v.blocking, SkepticBlocking::None);
     }
 
     #[test]
-    fn parse_verdict_json_parses_blocking_classes_and_normalises_unknowns() {
+    fn parse_verdict_json_accepts_only_known_blocking_classes() {
         for (raw, want) in [
             ("contradiction", SkepticBlocking::Contradiction),
-            ("Unverifiable", SkepticBlocking::Unverifiable),
+            ("unverifiable", SkepticBlocking::Unverifiable),
             ("none", SkepticBlocking::None),
-            ("bogus", SkepticBlocking::None),
         ] {
-            let body = format!(
-                r#"{{"refuted":true,"evidence":"src/x.rs:1","confidence":"high","blocking":"{raw}"}}"#
-            );
-            let v = parse_verdict_json(&body).expect("parses");
+            let mut value = structured_verdict_value(true);
+            value["blocking"] = serde_json::json!(raw);
+            let v = parse_verdict_json(&value.to_string()).expect("parses");
             assert_eq!(v.blocking, want, "blocking={raw}");
+        }
+        for raw in ["Unverifiable", "bogus"] {
+            let mut value = structured_verdict_value(true);
+            value["blocking"] = serde_json::json!(raw);
+            assert!(parse_verdict_json(&value.to_string()).is_none());
         }
     }
 
     #[test]
     fn parse_verdict_json_rejects_missing_refuted_field() {
-        // `refuted` is mandatory; missing it ⇒ None so the runner
-        // falls back to a synthetic refute vote at the skeptic level.
-        assert!(parse_verdict_json(r#"{"evidence":"x","confidence":"high"}"#).is_none());
+        let mut value = structured_verdict_value(false);
+        value.as_object_mut().unwrap().remove("refuted");
+        assert!(parse_verdict_json(&value.to_string()).is_none());
     }
 
     #[test]
     fn parse_verdict_json_rejects_missing_evidence_per_design() {
-        // The schema closes the rubber-stamping failure mode by making
-        // `evidence` mandatory.
-        // A `{"refuted": false}` body with no evidence MUST reject —
-        // otherwise a skeptic can rubber-stamp Achieved without
-        // citing a diff hunk.
-        assert!(parse_verdict_json(r#"{"refuted":false,"confidence":"high"}"#).is_none());
+        let mut value = structured_verdict_value(false);
+        value.as_object_mut().unwrap().remove("evidence");
+        assert!(parse_verdict_json(&value.to_string()).is_none());
     }
 
     #[test]
     fn parse_verdict_json_rejects_empty_evidence() {
-        // Stronger than "missing evidence": whitespace-only / empty
-        // string is the same rubber-stamp failure mode.
-        assert!(
-            parse_verdict_json(r#"{"refuted":false,"evidence":"","confidence":"high"}"#).is_none()
-        );
-        assert!(
-            parse_verdict_json(r#"{"refuted":false,"evidence":"   \n  ","confidence":"high"}"#)
-                .is_none()
-        );
+        for evidence in ["", "   \n  "] {
+            let mut value = structured_verdict_value(false);
+            value["evidence"] = serde_json::json!(evidence);
+            assert!(parse_verdict_json(&value.to_string()).is_none());
+        }
     }
 
     #[test]
     fn parse_verdict_json_rejects_missing_confidence() {
-        // Matches the verdict schema `required: ["refuted","evidence","confidence"]`.
-        assert!(parse_verdict_json(r#"{"refuted":true,"evidence":"x"}"#).is_none());
+        let mut value = structured_verdict_value(true);
+        value.as_object_mut().unwrap().remove("confidence");
+        assert!(parse_verdict_json(&value.to_string()).is_none());
     }
 
     #[test]
@@ -3737,11 +4756,31 @@ mod tests {
         assert!(parse_verdict_json("not json").is_none());
         assert!(parse_verdict_json("").is_none());
         assert!(parse_verdict_json("   \n  ").is_none());
-        assert!(
-            parse_verdict_json(r#"{"refuted":"true","evidence":"x","confidence":"high"}"#)
-                .is_none(),
-            "wrong type on `refuted` must reject",
-        );
+        let mut value = structured_verdict_value(true);
+        value["refuted"] = serde_json::json!("true");
+        assert!(parse_verdict_json(&value.to_string()).is_none());
+    }
+
+    #[test]
+    fn parse_verdict_json_rejects_wrong_or_missing_identity() {
+        for field in [
+            "goal_id",
+            "verification_round_id",
+            "contract_digest",
+            "reviewed_artifact_manifest_digest",
+            "critic_id",
+            "critic_assignment_id",
+        ] {
+            let mut value = structured_verdict_value(false);
+            value[field] = serde_json::json!("");
+            assert!(
+                parse_verdict_json(&value.to_string()).is_none(),
+                "empty {field} must reject"
+            );
+        }
+        let mut value = structured_verdict_value(false);
+        value["verdict_schema_version"] = serde_json::json!(2);
+        assert!(parse_verdict_json(&value.to_string()).is_none());
     }
 
     #[test]
@@ -3768,6 +4807,7 @@ mod tests {
             evidence: String::new(),
             findings: Vec::new(),
             fallback_note: None,
+            details_path: format!("/tmp/skeptic-{idx}.md"),
             latency_ms: 0,
         }
     }
@@ -3819,14 +4859,11 @@ mod tests {
 
     #[test]
     fn aggregate_n2_table_driven() {
-        // N=2 (variant-C): strict majority of the 1-member cold panel
-        // (skeptic 1 only) → needed = cold_count/2 + 1 = 1/2 + 1 = 1.
-        // Index 0 is `votes[0]`.
         for (rs, expected) in [
-            (vec![false, false], true), // cold s1 not-refuted → 1 ≥ 1
-            (vec![false, true], false), // s0 clears but cold s1 refuted → 0
-            (vec![true, false], true),  // s0 refuted (excluded), cold s1 clears
-            (vec![true, true], false),  // cold s1 refuted → 0
+            (vec![false, false], true),
+            (vec![false, true], false),
+            (vec![true, false], false),
+            (vec![true, true], false),
         ] {
             assert_aggregate(&rs, expected, "N=2");
         }
@@ -3834,12 +4871,10 @@ mod tests {
 
     #[test]
     fn aggregate_n3_table_driven() {
-        // N=3 (variant-C): strict majority of the 2-member cold panel
-        // (skeptics 1, 2) → needed = 2/2 + 1 = 2. Skeptic 0 never counts.
         for (rs, expected) in [
-            (vec![false, false, false], true), // cold s1,s2 not-refuted → 2 ≥ 2
-            (vec![false, false, true], false), // cold not-refuted = 1 (only s1) < 2
-            (vec![false, true, true], false),  // cold not-refuted = 0
+            (vec![false, false, false], true),
+            (vec![false, false, true], false),
+            (vec![false, true, true], false),
             (vec![true, true, true], false),
         ] {
             assert_aggregate(&rs, expected, "N=3");
@@ -3848,13 +4883,11 @@ mod tests {
 
     #[test]
     fn aggregate_n4_table_driven() {
-        // N=4 (variant-C): strict majority of the 3-member cold panel
-        // (skeptics 1, 2, 3) → needed = 3/2 + 1 = 2. Skeptic 0 excluded.
         for (rs, expected) in [
-            (vec![false, false, false, false], true), // cold not-refuted = 3 ≥ 2
-            (vec![false, false, false, true], true),  // cold not-refuted = 2 (s1,s2)
-            (vec![false, false, true, true], false),  // cold not-refuted = 1 (s1) < 2
-            (vec![false, true, true, true], false),   // cold not-refuted = 0
+            (vec![false, false, false, false], true),
+            (vec![false, false, false, true], false),
+            (vec![false, false, true, true], false),
+            (vec![false, true, true, true], false),
             (vec![true, true, true, true], false),
         ] {
             assert_aggregate(&rs, expected, "N=4");
@@ -3863,9 +4896,6 @@ mod tests {
 
     #[test]
     fn aggregate_n5_table_driven() {
-        // N=5: refuters are always the low indices (incl. skeptic 0), so
-        // excluding skeptic 0 from the not-refuted tally can't change the
-        // verdict here — variant-C matches the all-votes count for this shape.
         for refuted_count in 0..=5_u32 {
             let votes: Vec<_> = (0..5_u32).map(|i| skeptic(i, i < refuted_count)).collect();
             let (count, total, achieved) = aggregate_skeptic_verdicts(&votes);
@@ -3873,29 +4903,23 @@ mod tests {
             assert_eq!(total, 5);
             assert_eq!(
                 achieved,
-                refuted_count < 3,
+                refuted_count == 0,
                 "N=5 refuted_count={refuted_count}"
             );
         }
     }
 
     #[test]
-    fn aggregate_excludes_skeptic0_not_refuted_vote_when_panel_fans_out() {
-        // Variant-C: skeptic 0 not-refuted, skeptic 1 refuted. needed=1,
-        // but skeptic 0's not-refuted vote does not count → cold
-        // not-refuted = 0 → NOT achieved. The all-votes rule would
-        // wrongly achieve here (1 not-refuted ≥ 1).
+    fn aggregate_requires_every_verifier_to_approve() {
         let votes = [skeptic(0, false), skeptic(1, true)];
         let (refuted, total, achieved) = aggregate_skeptic_verdicts(&votes);
         assert_eq!((refuted, total), (1, 2));
-        assert!(!achieved, "skeptic-0 not-refuted must not carry the quorum");
+        assert!(!achieved);
 
-        // Skeptic 0's REFUTE still counts in refuted_count, and the cold
-        // skeptic carries approval.
         let votes = [skeptic(0, true), skeptic(1, false)];
         let (refuted, total, achieved) = aggregate_skeptic_verdicts(&votes);
         assert_eq!((refuted, total), (1, 2));
-        assert!(achieved, "cold skeptic 1 not-refuted meets needed(1)");
+        assert!(!achieved);
     }
 
     #[test]
@@ -3913,27 +4937,17 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_cold_panel_bar_derives_from_cold_count_not_total() {
-        // The bar is a strict majority of the COLD panel by SIZE, so it holds
-        // with skeptic 0 absent: a 2-member cold panel needs 2/2 (a
-        // `total`-based ⌈2/2⌉=1 would slip to a plurality).
-        let votes = [skeptic(1, false), skeptic(2, true)]; // s0 absent; 1 of 2 cold refuted
+    fn aggregate_requires_unanimity_even_when_indices_are_sparse() {
+        let votes = [skeptic(1, false), skeptic(2, true)];
         let (refuted, total, achieved) = aggregate_skeptic_verdicts(&votes);
         assert_eq!((refuted, total), (1, 2));
-        assert!(
-            !achieved,
-            "cold-panel majority needs 2/2 with skeptic 0 absent; 1 not-refuted must fail",
-        );
-        // Both cold not-refuted clears the 2/2 bar.
+        assert!(!achieved);
         assert!(aggregate_skeptic_verdicts(&[skeptic(1, false), skeptic(2, false)]).2);
     }
 
     #[test]
-    fn aggregate_required_cold_approvals_monotone_in_n() {
-        // Pins the contract: the required cold-approval COUNT is non-decreasing
-        // in N (1,2,2,3 for N=2..5). `min_cold_approvals` finds the fewest
-        // top-index not-refuters that flip a contiguous N-panel to achieved.
-        fn min_cold_approvals(n: u32) -> u32 {
+    fn aggregate_required_approvals_equal_panel_size() {
+        fn min_approvals(n: u32) -> u32 {
             (0..=n - 1)
                 .find(|k| {
                     let votes: Vec<_> = (0..n).map(|i| skeptic(i, i < n - k)).collect();
@@ -3941,12 +4955,8 @@ mod tests {
                 })
                 .unwrap_or(n)
         }
-        let req: Vec<u32> = (2..=5).map(min_cold_approvals).collect();
-        assert_eq!(req, vec![1, 2, 2, 3], "required cold approvals per N=2..5");
-        assert!(
-            req.windows(2).all(|w| w[1] >= w[0]),
-            "required cold approvals must be monotone non-decreasing: {req:?}",
-        );
+        let req: Vec<u32> = (2..=5).map(min_approvals).collect();
+        assert_eq!(req, vec![2, 3, 4, 5]);
     }
 
     /// Build a refuting skeptic with explicit evidence/confidence/note
@@ -3965,6 +4975,7 @@ mod tests {
             evidence: evidence.to_string(),
             findings: Vec::new(),
             fallback_note: fallback_note.map(str::to_string),
+            details_path: format!("/tmp/skeptic-{idx}.md"),
             latency_ms: 0,
         }
     }
@@ -4221,8 +5232,7 @@ mod tests {
             "{body}"
         );
         assert!(
-            body.contains(&format_verifier_details_path("vid123", 2, 0))
-                && body.contains(&format_verifier_details_path("vid123", 2, 1)),
+            body.contains(&results[0].details_path) && body.contains(&results[1].details_path),
             "must reference every per-skeptic path: {body}",
         );
         assert!(
@@ -4302,205 +5312,384 @@ mod tests {
         );
     }
 
-    /// A skeptic's own on-disk report (referenced by path in the aggregate)
-    /// must be left intact — the harness must NOT overwrite it with the
-    /// short JSON `details_md`.
-    #[tokio::test]
-    async fn read_skeptic_verdict_preserves_on_disk_report() {
+    fn receipt_fixture(
+        requested_facets: &[VerificationFacet],
+    ) -> (
+        tempfile::TempDir,
+        super::super::verification_snapshot::ArtifactManifest,
+        VerdictIdentity,
+        std::collections::BTreeSet<VerificationFacet>,
+        SkepticVerdict,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-0.md");
-        let verdict = dir.path().join("verdict-0.json");
-        let rich = "# Full report\n\nAC1: gap at src/foo.rs:10\nAC2: missing test\n";
-        tokio::fs::write(&details, rich).await.unwrap();
-        tokio::fs::write(
-            &verdict,
-            r#"{"refuted":true,"evidence":"src/foo.rs:10","confidence":"high","details_md":"short json blob"}"#,
-        )
-        .await
-        .unwrap();
-
-        let r = read_skeptic_verdict(
-            0,
-            details.to_str().unwrap(),
-            verdict.to_str().unwrap(),
-            "Refuted",
-            std::time::Instant::now(),
-            false,
-            false,
-        )
-        .await;
-
-        assert!(r.refuted);
-        assert!(r.fallback_note.is_none());
-        let on_disk = tokio::fs::read_to_string(&details).await.unwrap();
-        assert_eq!(on_disk, rich);
+        std::fs::write(dir.path().join("answer.txt"), "claim: x + y = z\n").unwrap();
+        let manifest =
+            super::super::verification_snapshot::capture_workspace_manifest(dir.path()).unwrap();
+        let artifact_sha = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "answer.txt")
+            .and_then(|entry| entry.sha256.clone())
+            .unwrap();
+        let facets: std::collections::BTreeSet<_> = requested_facets.iter().copied().collect();
+        let identity = VerdictIdentity {
+            goal_id: "goal-1".to_string(),
+            verification_round_id: "round-1".to_string(),
+            contract_digest: "sha256:contract".to_string(),
+            reviewed_artifact_manifest_digest: manifest.manifest_digest.clone(),
+            critic_id: "critic-1".to_string(),
+            critic_assignment_id: "assignment-1".to_string(),
+        };
+        let checks = facets
+            .iter()
+            .flat_map(|facet| {
+                let artifact_sha = artifact_sha.clone();
+                gates_for_facet(*facet).iter().map(move |gate| {
+                    if *facet == VerificationFacet::Math && *gate == "evidence-provenance" {
+                        ValidationCheck {
+                            gate: (*gate).to_string(),
+                            facet: facet.as_str().to_string(),
+                            status: "not_applicable".to_string(),
+                            target: "No symbolic or numerical tool claim was submitted".to_string(),
+                            evidence: "The proof was checked directly from the artifact"
+                                .to_string(),
+                            artifact_path: String::new(),
+                            artifact_sha256: String::new(),
+                            method: "manual derivation review".to_string(),
+                            applicability_basis: Some(
+                                "No tool-backed evidence is asserted for this claim".to_string(),
+                            ),
+                            ..Default::default()
+                        }
+                    } else {
+                        ValidationCheck {
+                            gate: (*gate).to_string(),
+                            facet: facet.as_str().to_string(),
+                            status: "pass".to_string(),
+                            target: "x + y = z".to_string(),
+                            evidence: "The cited current artifact supports the assigned gate"
+                                .to_string(),
+                            artifact_path: "answer.txt".to_string(),
+                            artifact_sha256: artifact_sha.clone(),
+                            method: "manual artifact review".to_string(),
+                            ..Default::default()
+                        }
+                    }
+                })
+            })
+            .collect();
+        let verdict = SkepticVerdict {
+            verdict_schema_version: 1,
+            goal_id: identity.goal_id.clone(),
+            verification_round_id: identity.verification_round_id.clone(),
+            contract_digest: identity.contract_digest.clone(),
+            reviewed_artifact_manifest_digest: identity.reviewed_artifact_manifest_digest.clone(),
+            critic_id: identity.critic_id.clone(),
+            critic_assignment_id: identity.critic_assignment_id.clone(),
+            refuted: false,
+            evidence: "complete assigned-scope coverage".to_string(),
+            confidence: SkepticConfidence::High,
+            blocking: SkepticBlocking::None,
+            details_md: "# Verified\n\nAll assigned gates passed.".to_string(),
+            findings: Vec::new(),
+            checks,
+        };
+        (dir, manifest, identity, facets, verdict)
     }
 
-    /// A skeptic that produced a verdict but never wrote its report file
-    /// must NOT 404-strand the referenced path — the harness persists the
-    /// JSON `details_md` fallback to that path.
-    #[tokio::test]
-    async fn read_skeptic_verdict_writes_json_fallback_when_file_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-0.md"); // never created.
-        let verdict = dir.path().join("verdict-0.json");
-        tokio::fs::write(
-            &verdict,
-            r#"{"refuted":true,"evidence":"src/x.rs:1","confidence":"medium","details_md":"json fallback body"}"#,
-        )
-        .await
-        .unwrap();
-
-        let r = read_skeptic_verdict(
-            0,
-            details.to_str().unwrap(),
-            verdict.to_str().unwrap(),
-            "Refuted",
-            std::time::Instant::now(),
-            false,
-            false,
-        )
-        .await;
-
-        assert!(r.refuted);
-        let on_disk = tokio::fs::read_to_string(&details).await.unwrap();
-        assert_eq!(on_disk, "json fallback body");
-    }
-
-    /// A present-but-empty (whitespace-only) report file is backfilled with
-    /// the JSON `details_md` so the referenced path is never blank.
-    #[tokio::test]
-    async fn read_skeptic_verdict_writes_json_fallback_when_file_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-0.md");
-        let verdict = dir.path().join("verdict-0.json");
-        tokio::fs::write(&details, "   \n  ").await.unwrap();
-        tokio::fs::write(
-            &verdict,
-            r#"{"refuted":false,"evidence":"src/x.rs:1","confidence":"low","details_md":"json fallback"}"#,
-        )
-        .await
-        .unwrap();
-
-        let r = read_skeptic_verdict(
-            0,
-            details.to_str().unwrap(),
-            verdict.to_str().unwrap(),
-            "Not Refuted",
-            std::time::Instant::now(),
-            false,
-            false,
-        )
-        .await;
-
-        assert!(!r.refuted);
-        let on_disk = tokio::fs::read_to_string(&details).await.unwrap();
-        assert_eq!(on_disk, "json fallback");
-    }
-
-    /// A generic-looking approval is insufficient for a math goal: without
-    /// the five claim-bound rows it becomes a synthetic refute even when the
-    /// terminal token and ordinary verdict fields say Not Refuted.
-    #[tokio::test]
-    async fn read_skeptic_verdict_rejects_unbound_math_approval() {
-        let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-math.md");
-        let verdict = dir.path().join("verdict-math.json");
-        tokio::fs::write(
-            &verdict,
-            r#"{"refuted":false,"evidence":"looks correct","confidence":"high"}"#,
-        )
-        .await
-        .unwrap();
-
-        let result = read_skeptic_verdict(
-            0,
-            details.to_str().unwrap(),
-            verdict.to_str().unwrap(),
-            "Not Refuted",
-            std::time::Instant::now(),
-            true,
-            true,
-        )
-        .await;
-
-        assert!(result.refuted, "unbound math approval must fail closed");
-        assert_eq!(result.confidence, SkepticConfidence::Unknown);
+    #[test]
+    fn structured_verdict_binds_every_identity_field_and_complete_coverage() {
+        let (dir, manifest, identity, facets, verdict) = receipt_fixture(&[
+            VerificationFacet::Analysis,
+            VerificationFacet::StateRegression,
+        ]);
         assert!(
-            result
-                .fallback_note
-                .as_deref()
-                .is_some_and(|note| note.contains("missing math gate `contract-closure`")),
-            "missing-gate reason must remain observable: {:?}",
-            result.fallback_note
+            validate_structured_verdict(&verdict, &identity, &facets, dir.path(), &manifest, &[],)
+                .is_ok()
+        );
+
+        for field in [
+            "goal",
+            "round",
+            "contract",
+            "manifest",
+            "critic",
+            "assignment",
+        ] {
+            let mut stale = verdict.clone();
+            match field {
+                "goal" => stale.goal_id.push_str("-wrong"),
+                "round" => stale.verification_round_id.push_str("-wrong"),
+                "contract" => stale.contract_digest.push_str("-wrong"),
+                "manifest" => stale.reviewed_artifact_manifest_digest.push_str("-wrong"),
+                "critic" => stale.critic_id.push_str("-wrong"),
+                "assignment" => stale.critic_assignment_id.push_str("-wrong"),
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_structured_verdict(
+                    &stale,
+                    &identity,
+                    &facets,
+                    dir.path(),
+                    &manifest,
+                    &[],
+                )
+                .is_err(),
+                "wrong {field} must reject"
+            );
+        }
+
+        let mut missing = verdict.clone();
+        missing.checks.pop();
+        assert!(
+            validate_structured_verdict(&missing, &identity, &facets, dir.path(), &manifest, &[],)
+                .is_err()
+        );
+        let mut duplicate = verdict.clone();
+        duplicate.checks.push(duplicate.checks[0].clone());
+        assert!(validate_structured_verdict(
+            &duplicate, &identity, &facets, dir.path(), &manifest, &[],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn structured_verdict_rejects_unknown_artifact_and_all_not_applicable() {
+        let (dir, manifest, identity, facets, verdict) =
+            receipt_fixture(&[VerificationFacet::Analysis]);
+        let mut unknown = verdict.clone();
+        unknown.checks[0].artifact_sha256 = "sha256:wrong".to_string();
+        assert!(
+            validate_structured_verdict(&unknown, &identity, &facets, dir.path(), &manifest, &[],)
+                .is_err()
+        );
+
+        let mut all_na = verdict;
+        for check in &mut all_na.checks {
+            check.status = "not_applicable".to_string();
+            check.artifact_path.clear();
+            check.artifact_sha256.clear();
+            check.applicability_basis = Some("This gate has no applicable submitted claim".into());
+        }
+        assert!(
+            validate_structured_verdict(&all_na, &identity, &facets, dir.path(), &manifest, &[],)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn structured_approval_rejects_blockers_and_unresolved_findings() {
+        let (dir, manifest, identity, facets, verdict) =
+            receipt_fixture(&[VerificationFacet::Analysis]);
+
+        let mut blocked = verdict.clone();
+        blocked.blocking = SkepticBlocking::Unverifiable;
+        let error =
+            validate_structured_verdict(&blocked, &identity, &facets, dir.path(), &manifest, &[])
+                .expect_err("approval with a blocker must fail closed");
+        assert!(error.contains("blocking condition"));
+
+        let mut unresolved = verdict;
+        unresolved.findings.push(Finding {
+            kind: "gap".to_string(),
+            location: "answer.txt:1".to_string(),
+            detail: "unresolved claim".to_string(),
+        });
+        let error = validate_structured_verdict(
+            &unresolved,
+            &identity,
+            &facets,
+            dir.path(),
+            &manifest,
+            &[],
+        )
+        .expect_err("approval with unresolved findings must fail closed");
+        assert!(error.contains("unresolved findings"));
+    }
+
+    #[test]
+    fn math_tool_evidence_binds_exact_current_input_and_output() {
+        let (dir, manifest, identity, facets, mut verdict) =
+            receipt_fixture(&[VerificationFacet::Math, VerificationFacet::StateRegression]);
+        let check = verdict
+            .checks
+            .iter_mut()
+            .find(|check| check.gate == "evidence-provenance")
+            .unwrap();
+        check.status = "pass".to_string();
+        check.target = "x + y = z".to_string();
+        check.artifact_path = "answer.txt".to_string();
+        check.artifact_sha256 = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "answer.txt")
+            .and_then(|entry| entry.sha256.clone())
+            .unwrap();
+        check.applicability_basis = None;
+        check.method = "symbolic substitution".to_string();
+        let exact_input = "verify answer.txt expression: x + y = z".to_string();
+        let output = "residual = 0";
+        let event = super::super::verifier_runtime::VerificationToolEvent {
+            tool_event_id: "event-1".to_string(),
+            exact_input_digest: super::super::verification_snapshot::digest_bytes(
+                exact_input.as_bytes(),
+            ),
+            observed_output_digest: super::super::verification_snapshot::digest_bytes(
+                output.as_bytes(),
+            ),
+            success: true,
+            exact_input,
+        };
+        check.tool_event_id = Some(event.tool_event_id.clone());
+        check.exact_input_digest = Some(event.exact_input_digest.clone());
+        check.observed_output_digest = Some(event.observed_output_digest.clone());
+        assert!(
+            validate_structured_verdict(
+                &verdict,
+                &identity,
+                &facets,
+                dir.path(),
+                &manifest,
+                std::slice::from_ref(&event),
+            )
+            .is_ok()
+        );
+
+        let mut stale = event.clone();
+        stale.success = false;
+        assert!(
+            validate_structured_verdict(
+                &verdict,
+                &identity,
+                &facets,
+                dir.path(),
+                &manifest,
+                &[stale],
+            )
+            .is_err()
+        );
+        let mut surrogate = event;
+        surrogate.exact_input = "verify a different expression".to_string();
+        assert!(
+            validate_structured_verdict(
+                &verdict,
+                &identity,
+                &facets,
+                dir.path(),
+                &manifest,
+                &[surrogate],
+            )
+            .is_err()
         );
     }
 
     #[tokio::test]
-    async fn read_skeptic_verdict_rejects_terminal_only_math_approval() {
-        let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-math.md");
-        let missing_verdict = dir.path().join("missing-verdict-math.json");
-
+    async fn read_skeptic_verdict_requires_structured_current_round_approval() {
+        let (dir, manifest, identity, facets, verdict) = receipt_fixture(&[
+            VerificationFacet::Analysis,
+            VerificationFacet::StateRegression,
+        ]);
+        let raw = dir.path().join("raw.json");
+        let canonical = dir.path().join("validated.json");
+        let details = dir.path().join("validated.md");
+        tokio::fs::write(&raw, serde_json::to_vec(&verdict).unwrap())
+            .await
+            .unwrap();
         let result = read_skeptic_verdict(
             0,
-            details.to_str().unwrap(),
-            missing_verdict.to_str().unwrap(),
+            raw.to_str().unwrap(),
+            &canonical,
+            &details,
             "Not Refuted",
             std::time::Instant::now(),
-            false,
-            true,
+            &identity,
+            &facets,
+            dir.path(),
+            &manifest,
+            &[],
         )
         .await;
-
-        assert!(
-            result.refuted,
-            "terminal-only math approval must fail closed even in non-strict mode"
-        );
-        assert_eq!(result.confidence, SkepticConfidence::Unknown);
-        assert!(
-            result
-                .fallback_note
-                .as_deref()
-                .is_some_and(|note| note.contains("cannot carry the five-gate approval record")),
-            "terminal-fallback reason must remain observable: {:?}",
-            result.fallback_note
-        );
-    }
-
-    #[tokio::test]
-    async fn read_skeptic_verdict_accepts_complete_math_approval() {
-        let dir = tempfile::tempdir().unwrap();
-        let details = dir.path().join("skeptic-math.md");
-        let verdict = dir.path().join("verdict-math.json");
-        let body = serde_json::json!({
-            "refuted": false,
-            "evidence": "five claim-bound checks recorded",
-            "confidence": "high",
-            "math_checks": complete_math_checks_value(),
-            "details_md": "# Math validation\n\nall gates passed"
-        })
-        .to_string();
-        tokio::fs::write(&verdict, body).await.unwrap();
-
-        let result = read_skeptic_verdict(
-            0,
-            details.to_str().unwrap(),
-            verdict.to_str().unwrap(),
-            "Not Refuted",
-            std::time::Instant::now(),
-            true,
-            true,
-        )
-        .await;
-
         assert!(!result.refuted);
-        assert_eq!(result.confidence, SkepticConfidence::High);
         assert!(result.fallback_note.is_none());
+        assert!(canonical.is_file());
+        assert!(
+            persist_validated_verdict(&canonical, &verdict).is_err(),
+            "a validated verdict cannot be submitted twice"
+        );
         assert_eq!(
             tokio::fs::read_to_string(details).await.unwrap(),
-            "# Math validation\n\nall gates passed"
+            verdict.details_md
         );
+    }
+
+    #[test]
+    fn aggregate_receipt_is_persisted_once_with_round_bindings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("aggregate.json");
+        let facets = [
+            VerificationFacet::Analysis,
+            VerificationFacet::StateRegression,
+        ]
+        .into_iter()
+        .collect();
+        let results = [skeptic(0, false), skeptic(1, false)];
+        persist_aggregate_receipt(
+            &path,
+            "goal-1",
+            "round-1",
+            "sha256:contract",
+            "sha256:manifest",
+            &facets,
+            &results,
+            true,
+        )
+        .unwrap();
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted["goal_id"], "goal-1");
+        assert_eq!(persisted["verification_round_id"], "round-1");
+        assert_eq!(persisted["contract_digest"], "sha256:contract");
+        assert_eq!(
+            persisted["reviewed_artifact_manifest_digest"],
+            "sha256:manifest"
+        );
+        assert_eq!(persisted["achieved"], true);
+        assert!(
+            persist_aggregate_receipt(
+                &path,
+                "goal-1",
+                "round-1",
+                "sha256:contract",
+                "sha256:manifest",
+                &facets,
+                &results,
+                true,
+            )
+            .is_err(),
+            "an aggregate receipt cannot overwrite an existing round result"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_only_not_refuted_never_approves() {
+        let (dir, manifest, identity, facets, _) = receipt_fixture(&[VerificationFacet::Analysis]);
+        let result = read_skeptic_verdict(
+            0,
+            dir.path().join("missing.json").to_str().unwrap(),
+            &dir.path().join("validated.json"),
+            &dir.path().join("validated.md"),
+            "Not Refuted",
+            std::time::Instant::now(),
+            &identity,
+            &facets,
+            dir.path(),
+            &manifest,
+            &[],
+        )
+        .await;
+        assert!(result.refuted);
+        assert!(result.fallback_note.is_some());
     }
 
     /// Per-attempt scratch paths must not change the fingerprint, or the
@@ -4652,11 +5841,11 @@ mod tests {
     }
 
     #[test]
-    fn verifier_prompt_pins_live_workspace_reframing() {
-        // Workspace + captured evidence are primary; running the code is only a
+    fn verifier_prompt_pins_immutable_snapshot_reframing() {
+        // Snapshot + captured evidence are primary; running the code is only a
         // spot-check. Pin all three against a diff-only or run-code-primary revert.
         assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("CHANGED_FILES"));
-        assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("current workspace"));
+        assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("immutable reviewed snapshot"));
         assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("running the code"));
         assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("only as a cheap spot-check"));
     }
@@ -4696,19 +5885,14 @@ mod tests {
 
     #[test]
     fn verifier_prompts_pin_claim_bound_math_approval_schema() {
-        for tmpl in [
-            GOAL_VERIFIER_PROMPT_TEMPLATE,
-            GOAL_VERIFIER_RESUME_PROMPT_TEMPLATE,
-        ] {
-            assert!(tmpl.contains("\"math_checks\""));
-            assert!(tmpl.contains("\"status\": \"pass|fail|not_applicable\""));
-            assert!(tmpl.contains("\"target\""));
-            for gate in MATH_VALIDATION_GATES {
-                assert!(
-                    tmpl.contains(&format!("\"gate\": \"{gate}\"")),
-                    "verifier prompt missing explicit row for {gate}"
-                );
-            }
+        assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("\"checks\""));
+        assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("\"status\": \"pass|fail|not_applicable\""));
+        assert!(GOAL_VERIFIER_PROMPT_TEMPLATE.contains("\"target\""));
+        for gate in MATH_VALIDATION_GATES {
+            assert!(
+                KIND_LENS_MATH.contains(&format!("`{gate}`")),
+                "math lens missing gate {gate}"
+            );
         }
     }
 
@@ -5163,13 +6347,120 @@ mod tests {
     }
 
     #[test]
+    fn composable_facets_preserve_hybrid_math_and_code() {
+        let plan = "# Plan: solver\n\n## Goal facets\ncode, math, state-regression\n\n\
+                    ## Acceptance criteria\n1. correct solver\n\n## Verification plan\n1. gating: verify\n";
+        let facets = parse_goal_facets(plan);
+        assert!(facets.contains(&VerificationFacet::Code));
+        assert!(facets.contains(&VerificationFacet::Math));
+        assert!(facets.contains(&VerificationFacet::StateRegression));
+
+        let workspace = tempfile::tempdir().unwrap();
+        let classified = classify_facets(
+            "Implement a solver and derive its governing equation from the mathematical specification.",
+            plan,
+            workspace.path(),
+        );
+        assert!(classified.contains(&VerificationFacet::Code));
+        assert!(classified.contains(&VerificationFacet::Math));
+    }
+
+    #[test]
+    fn paper_and_empirical_sources_activate_all_applicable_facets() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("source paper.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(workspace.path().join("measurements.csv"), b"x,y\n1,2\n").unwrap();
+
+        let paper = classify_facets(
+            "Formulate a mathematical paper from cited \"source paper.pdf\".",
+            "",
+            workspace.path(),
+        );
+        for facet in [
+            VerificationFacet::Math,
+            VerificationFacet::Sources,
+            VerificationFacet::Citations,
+            VerificationFacet::DocumentRender,
+            VerificationFacet::StateRegression,
+        ] {
+            assert!(paper.contains(&facet), "paper missing {facet:?}");
+        }
+
+        let empirical = classify_facets(
+            "Analyze experimental data in \"measurements.csv\" and write a Results paper.",
+            "",
+            workspace.path(),
+        );
+        for facet in [
+            VerificationFacet::Empirical,
+            VerificationFacet::Math,
+            VerificationFacet::Sources,
+            VerificationFacet::DocumentRender,
+            VerificationFacet::StateRegression,
+        ] {
+            assert!(
+                empirical.contains(&facet),
+                "empirical paper missing {facet:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_math_document_task_is_not_spuriously_math() {
+        let workspace = tempfile::tempdir().unwrap();
+        let facets = classify_facets("Correct a documentation typo.", "", workspace.path());
+        assert!(!facets.contains(&VerificationFacet::Math));
+        assert!(facets.contains(&VerificationFacet::Analysis));
+        assert!(facets.contains(&VerificationFacet::StateRegression));
+    }
+
+    #[test]
+    fn typed_plan_validation_rejects_empty_bulleted_and_untagged_plans() {
+        assert!(validate_plan_contract("").is_err());
+        assert!(
+            validate_plan_contract(
+                "# Plan: x\n\n## Goal facets\ncode\n\n## Acceptance criteria\n- works\n\n\
+                 ## Verification plan\n1. gating: test it\n"
+            )
+            .is_err(),
+            "acceptance criteria must be numbered"
+        );
+        assert!(
+            validate_plan_contract(
+                "# Plan: x\n\n## Goal facets\ncode\n\n## Acceptance criteria\n1. works\n\n\
+                 ## Verification plan\n1. run tests\n"
+            )
+            .is_err(),
+            "verification steps must carry a typed gating/evidence tag"
+        );
+        assert!(
+            validate_plan_contract(
+                "# Plan: x\n\n## Goal facets\ncode, state-regression\n\n\
+                 ## Acceptance criteria\n1. works\n\n## Verification plan\n1. gating: run tests\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn negated_math_gate_language_cannot_satisfy_coverage() {
+        let plan = "# Plan: proof\n\n## Goal facets\nmath, state-regression\n\n\
+                    ## Acceptance criteria\n1. result is correct\n\n## Verification plan\n\
+                    1. gating: independently recompute, but do not check contract-closure; \
+                    check derivation-integrity, evidence-provenance, invariant-ledger, and \
+                    state-isolation\n";
+        assert!(validate_plan_contract(plan).is_ok());
+        assert!(validate_math_plan_contract("derive the result", plan).is_err());
+    }
+
+    #[test]
     fn kind_lens_selects_per_kind_block_and_empty_for_none() {
         assert!(kind_lens(Some(GoalKind::CodeChange)).contains("Code-change review lens"));
         // Browser-load defect rule: Node-only scripts (blank page) are
         // headlessly provable and must stay part of the fallback bar.
         assert!(kind_lens(Some(GoalKind::CodeChange)).contains("unguarded `module.exports`"));
         assert!(kind_lens(Some(GoalKind::Research)).contains("Research fact-check lens"));
-        assert!(kind_lens(Some(GoalKind::Research)).contains("web_fetch"));
+        assert!(kind_lens(Some(GoalKind::Research)).contains("available read tools"));
         assert!(kind_lens(Some(GoalKind::Analysis)).contains("Analysis soundness lens"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("Math / quantitative correctness lens"));
         assert!(kind_lens(Some(GoalKind::Math)).contains("actual final artifact"));
@@ -5206,7 +6497,8 @@ mod tests {
             .is_ok()
         );
 
-        let bad_kind = "## Goal kind\nanalysis\n## Verification plan\n1. gating: adversarial recompute\n";
+        let bad_kind =
+            "## Goal kind\nanalysis\n## Verification plan\n1. gating: adversarial recompute\n";
         assert!(validate_math_plan_contract(obj, bad_kind).is_err());
 
         let no_gate = "## Goal kind\nmath\n## Verification plan\n1. evidence: file exists\n";
@@ -5761,6 +7053,10 @@ mod tests {
         }
     }
 
+    fn bind_mock_verdict(prompt: &str, reviewed_root: &Path, raw: &str) -> String {
+        super::bind_test_verdict(prompt, reviewed_root, raw)
+    }
+
     #[async_trait::async_trait]
     impl GoalClassifierSpawner for MockSpawner {
         async fn spawn_classifier(
@@ -5769,6 +7065,7 @@ mod tests {
             skeptic_idx: u32,
             prompt: RoleRenderedPrompt,
             details_path: &Path,
+            reviewed_root: &Path,
             resume_from: Option<&str>,
         ) -> Result<String, SpawnError> {
             self.spawn_count
@@ -5778,23 +7075,26 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(resume_from.map(str::to_string));
+            let prompt = prompt.primary;
+            // Record the prompt in the same pre-await critical section as its
+            // skeptic index so parallel mock completions cannot mispair the
+            // two observation vectors.
+            self.prompts.lock().unwrap().push(prompt.clone());
             let response = self
                 .responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .expect("mock spawner exhausted");
-            let prompt = prompt.primary;
             let verdict_path = parse_verdict_path_from_prompt(&prompt);
-            self.prompts.lock().unwrap().push(prompt);
 
             if !response.details_md.is_empty() {
                 let _ = tokio::fs::write(details_path, &response.details_md).await;
             }
             if let (Some(p), Some(json)) = (verdict_path, response.verdict_json.as_deref()) {
-                let _ = tokio::fs::write(&p, json).await;
+                let bound = bind_mock_verdict(&prompt, reviewed_root, json);
+                let _ = tokio::fs::write(&p, bound).await;
             }
-
             if let Some(hold) = response.hold {
                 hold.notified().await;
             }
@@ -5871,7 +7171,27 @@ mod tests {
         skeptic_count: u32,
         prior_skeptic0_session_id: Option<&'a str>,
     ) -> VerificationStageInputs<'a> {
+        let initial_manifest_path =
+            if super::super::goal_tracker::ensure_goal_scratch_root(verifier_id).is_ok() {
+                let initial_manifest =
+                    super::super::verification_snapshot::capture_workspace_manifest(workspace_root)
+                        .unwrap();
+                // Mirror production: start-state and round receipts are durable
+                // session artifacts outside the temporary critic scratch root.
+                let goal_dir = workspace_root.join(".ds/test-goal");
+                std::fs::create_dir_all(&goal_dir).unwrap();
+                let path = goal_dir.join("initial-workspace-manifest.json");
+                super::super::verification_snapshot::persist_manifest(&path, &initial_manifest)
+                    .unwrap();
+                path
+            } else {
+                // Unsafe/squatted verifier-id tests exit before reading this path.
+                std::env::temp_dir().join("ds-goal-test-unavailable-manifest.json")
+            };
+        let initial_manifest_file: &'static Path =
+            Box::leak(initial_manifest_path.into_boxed_path());
         VerificationStageInputs {
+            goal_id: verifier_id,
             objective,
             final_response,
             baseline_commit: None,
@@ -5882,6 +7202,7 @@ mod tests {
             goal_created_at: 0,
             plan_file: None,
             plan_baseline_file: None,
+            initial_workspace_manifest_file: Some(initial_manifest_file),
             implementer_scratch_dir: Path::new("/tmp/ds-goal-test/implementer"),
             scratch_dir_ready: true,
             skeptic_count,
@@ -5892,7 +7213,7 @@ mod tests {
             // literal fallback tool names), matching the earlier rendered prompts.
             tool_names: &[],
             inherit_tool_names: default_inherit_tool_names(),
-            strict_skeptic_verdicts: false,
+            strict_skeptic_verdicts: true,
         }
     }
 
@@ -5910,8 +7231,8 @@ mod tests {
     /// once it clears — the spawn is delayed, never dropped.
     #[tokio::test]
     async fn spawn_backpressure_defers_until_pressure_clears() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let over = StdArc::new(AtomicBool::new(true));
         let over_clone = over.clone();
         // Clear the pressure shortly after the first poll.
@@ -5919,9 +7240,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
             over_clone.store(false, Ordering::SeqCst);
         });
-        let mut bp = SpawnBackpressure::new(StdArc::new(move || {
-            over.load(Ordering::SeqCst)
-        }));
+        let mut bp = SpawnBackpressure::new(StdArc::new(move || over.load(Ordering::SeqCst)));
         bp.poll = std::time::Duration::from_millis(20);
         let started = std::time::Instant::now();
         bp.wait_soft().await;
@@ -5952,8 +7271,8 @@ mod tests {
     /// spawn is delayed, not dropped, and the outcome is unchanged.
     #[tokio::test]
     async fn verification_stage_with_backpressure_defers_spawn_not_drops() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         let spawner = Arc::new(MockSpawner::new([MockResponse::not_refuted()]));
         let over = StdArc::new(AtomicBool::new(true));
         let over_clone = over.clone();
@@ -5961,9 +7280,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(60)).await;
             over_clone.store(false, Ordering::SeqCst);
         });
-        let mut bp = SpawnBackpressure::new(StdArc::new(move || {
-            over.load(Ordering::SeqCst)
-        }));
+        let mut bp = SpawnBackpressure::new(StdArc::new(move || over.load(Ordering::SeqCst)));
         bp.poll = std::time::Duration::from_millis(20);
         let (log, emit) = collect_events();
         let _wsp = tempfile::tempdir().unwrap();
@@ -5981,7 +7298,9 @@ mod tests {
             GoalClassifierOutcome::Achieved { .. }
         ));
         assert_eq!(
-            spawner.spawn_count.load(std::sync::atomic::Ordering::SeqCst),
+            spawner
+                .spawn_count
+                .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "backpressure must defer, never drop, the skeptic spawn"
         );
@@ -6045,14 +7364,12 @@ mod tests {
         // resolved and the adversarial framing must be present.
         let prompts = observed.prompts.lock().unwrap();
         let p = &prompts[0];
-        assert!(
-            p.contains(&format_verdict_path(&vid, 1, 0)),
-            "VERDICT_FILE missing in prompt"
-        );
-        assert!(
-            p.contains(&format_verifier_details_path(&vid, 1, 0)),
-            "DETAILS_FILE missing in prompt",
-        );
+        let verdict_path = parse_verdict_path_from_prompt(p).expect("VERDICT_FILE in prompt");
+        let skeptic_details =
+            parse_skeptic_details_path_from_prompt(p).expect("DETAILS_FILE in prompt");
+        assert!(verdict_path.contains("/verification-rounds/"));
+        assert!(skeptic_details.contains("/verification-rounds/"));
+        assert_ne!(verdict_path, format_verdict_path(&vid, 1, 0));
         assert!(
             !p.contains("{DETAILS_FILE}") && !p.contains("{VERDICT_FILE}"),
             "literal placeholder marker leaked into rendered prompt",
@@ -6100,16 +7417,11 @@ mod tests {
         )
         .await;
 
-        let GoalClassifierOutcome::NotAchieved {
-            details_path,
-            gaps_summary,
-            ..
-        } = result.outcome
-        else {
+        let GoalClassifierOutcome::FailOpenAchieved { details_path, .. } = result.outcome else {
             panic!("math approval without five gate rows must not achieve");
         };
-        assert!(gaps_summary.contains("math approval record invalid"));
-        assert!(gaps_summary.contains("missing math gate `contract-closure`"));
+        let details = tokio::fs::read_to_string(&details_path).await.unwrap();
+        assert!(details.contains("structured verdict rejected"));
         assert!(
             observed.prompts.lock().unwrap()[0].contains("Math / quantitative correctness lens"),
             "math objective must receive the math verifier lens"
@@ -6150,10 +7462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verification_stage_n2_skeptic0_high_refute_short_circuits() {
-        // Escalating panel: skeptic 0 refutes with high confidence, so
-        // the remaining skeptic is NOT spawned. The aggregate reflects a
-        // single-skeptic refute (1/1) and the gaps summary has one bullet.
+    async fn verification_stage_n2_refuters_cover_the_full_panel() {
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::refuted(),
             MockResponse::refuted(),
@@ -6169,10 +7478,7 @@ mod tests {
             &emit,
         )
         .await;
-        assert!(
-            result.skeptic0_session_id.is_some(),
-            "short-circuit (N>1) must still return skeptic 0's id so the next attempt resumes it",
-        );
+        assert!(result.skeptic0_session_id.is_none());
         let GoalClassifierOutcome::NotAchieved {
             details_path,
             gaps_summary,
@@ -6185,23 +7491,18 @@ mod tests {
             observed
                 .spawn_count
                 .load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "a high-confidence refute by skeptic 0 must short-circuit the remaining spawns",
+            2,
+            "every critic receives a fresh current-round assignment",
         );
-        assert_eq!(
-            gaps_summary, "- [skeptic 0, high] diff hunk shows nothing",
-            "short-circuit gaps_summary inlines only skeptic 0",
-        );
+        assert!(gaps_summary.contains("[skeptic 0, high]"));
+        assert!(gaps_summary.contains("[skeptic 1, high]"));
         let body = tokio::fs::read_to_string(&details_path).await.unwrap();
         let _ = tokio::fs::remove_file(&details_path).await;
         assert!(body.contains("Goal verification — Not Achieved"));
         assert!(body.contains("## Gaps to fix"));
-        assert!(
-            !body.contains("skeptic-1"),
-            "short-circuit must not reference skeptic 1: {body}"
-        );
+        assert!(body.contains("critic-1.md"));
         let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:1/1:false"));
+        assert!(log.iter().any(|t| t == "agg:2/2:false"));
     }
 
     #[tokio::test]
@@ -6322,8 +7623,7 @@ mod tests {
 
     #[tokio::test]
     async fn verification_stage_skeptic_transport_failure_counts_as_refute() {
-        // Three skeptics: one transport-fails (fail-closed refute),
-        // two return Not Refuted. Aggregate is 1-of-3 refute → Achieved.
+        // A partial panel is an infrastructure failure and cannot approve.
         let spawner: Arc<dyn GoalClassifierSpawner> = Arc::new(MockSpawner::new([
             MockResponse::transport_error(),
             MockResponse::not_refuted(),
@@ -6339,10 +7639,13 @@ mod tests {
         )
         .await
         .outcome;
-        let GoalClassifierOutcome::Achieved { details_path } = outcome else {
-            panic!("expected Achieved (1 transport-fail + 2 not-refuted)");
-        };
-        let _ = tokio::fs::remove_file(&details_path).await;
+        assert!(matches!(
+            outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
         let log = log.lock().unwrap();
         assert!(
             log.iter().any(|t| t == "skeptic:0:true:unknown"),
@@ -6366,10 +7669,13 @@ mod tests {
         )
         .await
         .outcome;
-        // N=2: skeptic 0 synthetic-refutes (cancel), cold skeptic 1
-        // clears. Approval rests on the cold panel (skeptic 1), which
-        // meets needed(1) → Achieved.
-        assert!(matches!(outcome, GoalClassifierOutcome::Achieved { .. }));
+        assert!(matches!(
+            outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -6390,7 +7696,13 @@ mod tests {
         )
         .await
         .outcome;
-        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
+        assert!(matches!(
+            outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
         let log = log.lock().unwrap();
         assert!(log.iter().any(|t| t == "skeptic:0:true:unknown"));
         assert!(log.iter().any(|t| t == "skeptic:1:true:high"));
@@ -6415,10 +7727,13 @@ mod tests {
         )
         .await
         .outcome;
-        let GoalClassifierOutcome::Achieved { details_path } = outcome else {
-            panic!("expected Achieved (N=2 tie: 1 synthetic refute + 1 not-refute)");
-        };
-        let _ = tokio::fs::remove_file(&details_path).await;
+        assert!(matches!(
+            outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
         let log = log.lock().unwrap();
         assert!(
             log.iter().any(|t| t == "skeptic:0:true:unknown"),
@@ -6428,12 +7743,7 @@ mod tests {
 
     #[tokio::test]
     async fn verification_stage_skeptic_terminal_only_fallback_counts() {
-        // Dual-channel fallback — skeptic returns a clean terminal
-        // token but never writes a JSON verdict file. The harness must
-        // pick up the vote from the terminal token with
-        // `confidence: Unknown`, `evidence: ""`, and the fallback note.
-        // Variant-C outcome: skeptic 0 not-refuted, cold skeptic 1
-        // refuted → the cold quorum (skeptic 1 only) fails → NotAchieved.
+        // Terminal text may tighten to refuted but can never synthesize approval.
         let spawner: Arc<dyn GoalClassifierSpawner> = Arc::new(MockSpawner::new([
             MockResponse::terminal_only("Not Refuted"),
             MockResponse::terminal_only("Refuted"),
@@ -6448,27 +7758,22 @@ mod tests {
         )
         .await
         .outcome;
-        let GoalClassifierOutcome::NotAchieved { details_path, .. } = outcome else {
-            panic!("expected NotAchieved: cold skeptic 1 refuted via terminal fallback");
+        let GoalClassifierOutcome::FailOpenAchieved { details_path, .. } = outcome else {
+            panic!("missing structured verdicts must fail as infrastructure");
         };
         let body = tokio::fs::read_to_string(&details_path).await.unwrap();
         let _ = tokio::fs::remove_file(&details_path).await;
         let log = log.lock().unwrap();
         assert!(
-            log.iter().any(|t| t == "skeptic:0:false:unknown"),
-            "terminal-only skeptic must surface as confidence=unknown",
+            log.iter().any(|t| t == "skeptic:0:true:unknown"),
+            "terminal-only approval must become a synthetic refute",
         );
         assert!(log.iter().any(|t| t == "skeptic:1:true:unknown"));
-        assert!(
-            body.contains("verifier produced no verdict JSON (missing/malformed); terminal token used as fallback")
-        );
+        assert!(body.contains("structured verdict rejected"));
     }
 
     #[tokio::test]
-    async fn verification_stage_json_with_empty_details_md_reads_disk_fallback() {
-        // When the JSON parses cleanly but its `details_md` field is
-        // empty, the orchestrator must read the per-skeptic on-disk
-        // details file and render that instead.
+    async fn verification_stage_json_with_empty_details_md_gets_canonical_fallback() {
         let spawner: Arc<dyn GoalClassifierSpawner> =
             Arc::new(MockSpawner::new([MockResponse::json_empty_details_md()]));
         let (_log, emit) = collect_events();
@@ -6485,15 +7790,7 @@ mod tests {
             panic!("expected Achieved");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
-        // The skeptic's on-disk report is preserved, not overwritten by the empty JSON.
-        let skeptic_file = format_verifier_details_path(&vid, 1, 0);
-        let disk = tokio::fs::read_to_string(&skeptic_file)
-            .await
-            .unwrap_or_default();
-        assert!(
-            disk.contains("rendered from disk"),
-            "the on-disk per-skeptic report must be preserved: {disk}",
-        );
+        assert!(details_path.contains("goal-classifier-"));
     }
 
     /// End-to-end coverage of the headline flow: two `not_refuted`
@@ -6521,6 +7818,32 @@ mod tests {
             panic!("expected Achieved on 2 not-refuted skeptics");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
+        let audit_root = wsp.path().join(".ds/test-goal/verification-rounds");
+        let rounds: Vec<_> = std::fs::read_dir(&audit_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(rounds.len(), 1);
+        let round = &rounds[0];
+        for relative in [
+            "aggregate-verdict.json",
+            "artifact-manifest.json",
+            "contract.json",
+            "validated-verdicts/critic-0.json",
+            "validated-verdicts/critic-0.md",
+            "validated-verdicts/critic-1.json",
+            "validated-verdicts/critic-1.md",
+        ] {
+            assert!(round.join(relative).is_file(), "missing durable {relative}");
+        }
+        let aggregate: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(round.join("aggregate-verdict.json")).unwrap())
+                .unwrap();
+        assert_eq!(aggregate["achieved"], true);
+        assert_eq!(
+            aggregate["verification_round_id"].as_str(),
+            round.file_name().and_then(|name| name.to_str())
+        );
         let log = log.lock().unwrap();
         let pos = |needle: &str| log.iter().position(|t| t.starts_with(needle));
         let i_fired = pos("fired").expect("fired emitted");
@@ -6556,16 +7879,12 @@ mod tests {
         };
         let _ = tokio::fs::remove_file(&details_path).await;
         let log = log.lock().unwrap();
-        // Skeptic 0's high-confidence refute short-circuits the panel.
-        assert!(log.iter().any(|t| t == "agg:1/1:false"));
+        assert!(log.iter().any(|t| t == "agg:2/2:false"));
         assert!(log.iter().any(|t| t == "verdict:NotAchieved"));
     }
 
     #[tokio::test]
-    async fn verification_stage_skeptic0_medium_refute_does_not_short_circuit() {
-        // A medium-confidence refute is NOT decisive: the full panel
-        // runs and the 1-of-3 minority refute is overruled — approval
-        // still requires the not-refuted quorum, never one skeptic.
+    async fn verification_stage_one_medium_refute_blocks_approval() {
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::refuted_with("medium", None),
             MockResponse::not_refuted(),
@@ -6583,8 +7902,8 @@ mod tests {
         )
         .await
         .outcome;
-        let GoalClassifierOutcome::Achieved { details_path } = outcome else {
-            panic!("expected Achieved on 1-of-3 minority refute after full panel");
+        let GoalClassifierOutcome::NotAchieved { details_path, .. } = outcome else {
+            panic!("every accepted refutation blocks approval");
         };
         let _ = tokio::fs::remove_file(&details_path).await;
         assert_eq!(
@@ -6592,10 +7911,10 @@ mod tests {
                 .spawn_count
                 .load(std::sync::atomic::Ordering::SeqCst),
             3,
-            "medium-confidence refute must NOT short-circuit the panel",
+            "the full panel must complete its assigned coverage",
         );
         let log = log.lock().unwrap();
-        assert!(log.iter().any(|t| t == "agg:1/3:true"));
+        assert!(log.iter().any(|t| t == "agg:1/3:false"));
     }
 
     #[tokio::test]
@@ -6750,10 +8069,7 @@ mod tests {
             2,
             "medium skeptic 0 must fan out the full panel",
         );
-        assert!(
-            result.skeptic0_session_id.is_some(),
-            "a Blocked (N>1) outcome must still return skeptic 0's id so a resumed goal can reuse it",
-        );
+        assert!(result.skeptic0_session_id.is_none());
         let GoalClassifierOutcome::Blocked {
             details_path,
             pause_summary,
@@ -6771,9 +8087,8 @@ mod tests {
 
     #[tokio::test]
     async fn verification_stage_skeptic0_failure_does_not_short_circuit() {
-        // A synthetic refute (transport failure, confidence Unknown) is NOT a
-        // high-confidence refute, so it must fan out the full panel rather
-        // than short-circuit. 1-of-3 refute → Achieved.
+        // A synthetic refute fans out for complete diagnostics, then the
+        // partial panel fails closed as infrastructure.
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::transport_error(),
             MockResponse::not_refuted(),
@@ -6798,10 +8113,13 @@ mod tests {
             3,
             "a skeptic-0 spawn failure must NOT short-circuit the panel",
         );
-        let GoalClassifierOutcome::Achieved { details_path } = outcome else {
-            panic!("expected Achieved (1-of-3 refute minority)");
-        };
-        let _ = tokio::fs::remove_file(&details_path).await;
+        assert!(matches!(
+            outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -6830,16 +8148,12 @@ mod tests {
             2,
             "a low-confidence refute must NOT short-circuit the panel",
         );
-        assert!(matches!(outcome, GoalClassifierOutcome::Achieved { .. }));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
     }
 
     #[tokio::test]
-    async fn verification_stage_fans_out_remaining_skeptics_in_parallel() {
-        // Escalating panel: skeptic 0 runs ALONE first; once it clears
-        // (not-refuted, so no short-circuit), skeptics 1..n fan out in
-        // parallel. Each skeptic is held by a per-spawn Notify so the
-        // watcher can assert the two-phase dispatch: exactly 1 in-flight,
-        // then exactly 3 once the fan-out fires.
+    async fn verification_stage_fans_out_all_skeptics_in_parallel() {
+        // Every critic sees the same frozen snapshot and runs concurrently.
         let hold0 = Arc::new(Notify::new());
         let hold1 = Arc::new(Notify::new());
         let hold2 = Arc::new(Notify::new());
@@ -6869,13 +8183,8 @@ mod tests {
             }
         };
         let watcher = async {
-            // Phase 1: skeptic 0 alone.
-            wait_for(1).await;
-            hold0.notify_one();
-            // Phase 2: skeptics 1 and 2 fan out together — neither can
-            // complete until both are in-flight (sequential dispatch
-            // would deadlock here).
             wait_for(3).await;
+            hold0.notify_one();
             hold1.notify_one();
             hold2.notify_one();
         };
@@ -6919,11 +8228,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verification_stage_resumes_skeptic0_on_later_attempt() {
-        // N=2, attempt 2 with a persisted prior skeptic-0 id: skeptic 0
-        // resumes (resume_from = Some(prior), delta prompt) while the cold
-        // skeptic 1 stays fresh (resume_from = None). The returned id is a
-        // fresh child id (not the prior one) for the next attempt to chain.
+    async fn verification_stage_ignores_prior_session_on_later_attempt() {
+        // A new round always uses fresh critics, even if legacy state still
+        // carries an old skeptic session id.
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::not_refuted(),
             MockResponse::not_refuted(),
@@ -6943,28 +8250,18 @@ mod tests {
             let _ = tokio::fs::remove_file(details_path).await;
         }
         let resume_froms = observed.resume_froms.lock().unwrap();
-        assert_eq!(
-            resume_froms.as_slice(),
-            [Some("prior-skeptic0".to_string()), None],
-            "skeptic 0 resumes the prior child; cold skeptic 1 stays fresh",
-        );
-        // Skeptic 0's prompt is the delta resume prompt, not the cold one.
+        assert_eq!(resume_froms.as_slice(), [None, None]);
         let prompts = observed.prompts.lock().unwrap();
         assert!(
-            prompts[0].contains(RESUME_DELTA_FRAMING) && prompts[0].contains("Delta re-check"),
-            "skeptic 0 must receive the delta resume prompt",
+            !prompts
+                .iter()
+                .any(|prompt| prompt.contains("Delta re-check"))
         );
-        let new_id = result.skeptic0_session_id.expect("N>1 returns skeptic0 id");
-        assert_ne!(
-            new_id, "prior-skeptic0",
-            "a fresh child id chains the next attempt"
-        );
+        assert!(result.skeptic0_session_id.is_none());
     }
 
     #[tokio::test]
-    async fn verification_stage_resumes_skeptic0_on_attempt_one_with_prior_id() {
-        // A user pause/resume restarts attempts at 1 while preserving the
-        // gatekeeper id; an `attempt > 1` gate would drop the chain here.
+    async fn verification_stage_resume_at_attempt_one_still_uses_fresh_critics() {
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::not_refuted(),
             MockResponse::not_refuted(),
@@ -6985,24 +8282,17 @@ mod tests {
         }
         assert!(result.panel_ran, "a real panel run must set panel_ran");
         let resume_froms = observed.resume_froms.lock().unwrap();
-        assert_eq!(
-            resume_froms.as_slice(),
-            [Some("prior-skeptic0".to_string()), None],
-            "attempt 1 with a surviving prior id must still resume skeptic 0",
-        );
+        assert_eq!(resume_froms.as_slice(), [None, None]);
         let prompts = observed.prompts.lock().unwrap();
         assert!(
-            prompts[0].contains(RESUME_DELTA_FRAMING),
-            "resumed skeptic 0 must receive the delta resume prompt",
+            !prompts
+                .iter()
+                .any(|prompt| prompt.contains(RESUME_DELTA_FRAMING))
         );
     }
 
     #[tokio::test]
-    async fn verification_stage_resume_spawn_failure_falls_back_to_cold() {
-        // Skeptic 0's resume spawn errors (stale prior session). The stage
-        // must fall back to a cold skeptic-0 spawn (resume_from = None) and
-        // still produce a verdict. Responses, in spawn order: [resume-fail,
-        // cold skeptic 0, cold skeptic 1].
+    async fn verification_stage_never_attempts_stale_resume() {
         let spawner = Arc::new(MockSpawner::new([
             MockResponse::transport_error(),
             MockResponse::not_refuted(),
@@ -7019,31 +8309,22 @@ mod tests {
             &emit,
         )
         .await;
-        let GoalClassifierOutcome::Achieved { details_path } = &result.outcome else {
-            panic!("cold fallback skeptic 0 + cold skeptic 1 not-refuted → Achieved");
-        };
-        let _ = tokio::fs::remove_file(details_path).await;
+        assert!(matches!(
+            result.outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
         let resume_froms = observed.resume_froms.lock().unwrap();
-        assert_eq!(
-            resume_froms.as_slice(),
-            [Some("stale-prior".to_string()), None, None],
-            "resume attempt then cold skeptic-0 fallback, then cold skeptic 1",
-        );
+        assert_eq!(resume_froms.as_slice(), [None, None]);
     }
 
-    /// On the resume-FAILURE → cold-downgrade path, skeptic-0's
-    /// configured `skeptic_model_assignment[0]` model must land on the actual
-    /// COLD `SubagentRequest`. Drives the real `ChannelSpawner` (which applies
-    /// per-index overrides) through `run_verification_stage` with a raw
-    /// coordinator that FAILS every resume spawn (`resume_from = Some`) and
-    /// succeeds the cold spawns (`resume_from = None`), capturing each spawn's
-    /// `runtime_overrides.model`.
+    /// A fresh skeptic still receives its frozen per-index model override.
     #[tokio::test]
-    async fn cold_fallback_after_resume_failure_carries_pool0_model_on_request() {
+    async fn fresh_round_carries_pool0_model_on_request() {
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
         use std::sync::Mutex as StdMutex;
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
 
         // (model, resume_from) per spawn, in spawn order.
         type SpawnCapture = Arc<StdMutex<Vec<(Option<String>, Option<String>)>>>;
@@ -7058,30 +8339,18 @@ mod tests {
                 let model = req.runtime_overrides.model.clone();
                 let resume = req.resume_from.clone();
                 cap.lock().unwrap().push((model, resume.clone()));
-                if resume.is_some() {
-                    // Resume attempt (and its inherit retry) both fail →
-                    // run_one_skeptic downgrades to a cold spawn.
-                    let _ = req.result_tx.send(SubagentResult {
-                        success: false,
-                        error: Some("stale prior session".into()),
-                        ..Default::default()
-                    });
-                } else {
-                    // Cold spawn: write a not-refuted verdict so the stage
-                    // computes a verdict, then succeed.
-                    if let Some(p) = parse_verdict_path_from_prompt(&req.prompt) {
-                        let _ = tokio::fs::write(
-                            &p,
-                            b"{\"refuted\":false,\"evidence\":\"src/x.rs:1\",\"confidence\":\"high\"}",
-                        )
-                        .await;
-                    }
-                    let _ = req.result_tx.send(SubagentResult {
-                        success: true,
-                        output: Arc::from("Not Refuted"),
-                        ..Default::default()
-                    });
+                if let Some(p) = parse_verdict_path_from_prompt(&req.prompt) {
+                    let _ = tokio::fs::write(
+                        &p,
+                        b"{\"refuted\":false,\"evidence\":\"legacy\",\"confidence\":\"high\"}",
+                    )
+                    .await;
                 }
+                let _ = req.result_tx.send(SubagentResult {
+                    success: true,
+                    output: Arc::from("Not Refuted"),
+                    ..Default::default()
+                });
             }
         });
 
@@ -7099,7 +8368,6 @@ mod tests {
                 },
                 RoleSpawnOverride::default(),
             ],
-            events: None,
             goal_phase: Some("verify"),
             goal_attempt: Some(1),
         });
@@ -7113,31 +8381,23 @@ mod tests {
             &emit,
         )
         .await;
-        if let GoalClassifierOutcome::Achieved { details_path }
-        | GoalClassifierOutcome::NotAchieved { details_path, .. } = &result.outcome
-        {
-            let _ = tokio::fs::remove_file(details_path).await;
-        }
+        assert!(matches!(
+            result.outcome,
+            GoalClassifierOutcome::FailOpenAchieved {
+                reason: GoalClassifierFailOpenReason::SamplerError,
+                ..
+            }
+        ));
 
         let spawns = captured.lock().unwrap().clone();
-        // The resume attempt (skeptic 0) was made with pool[0]'s model.
-        assert!(
-            spawns
-                .iter()
-                .any(|(m, r)| r.as_deref() == Some("stale-prior")
-                    && m.as_deref() == Some("pool-0-model")),
-            "resume attempt must carry pool[0]'s model: {spawns:?}",
-        );
-        // The COLD downgrade spawn (resume_from = None) ALSO carries pool[0]'s
-        // model — the load-bearing assertion (model reaches the real request
-        // on the cold path, not just structurally).
+        assert!(spawns.iter().all(|(_, resume)| resume.is_none()));
         assert!(
             spawns
                 .iter()
                 .any(|(m, r)| r.is_none() && m.as_deref() == Some("pool-0-model")),
-            "cold-fallback skeptic 0 must carry pool[0]'s model on the request: {spawns:?}",
+            "fresh skeptic 0 must carry pool[0]'s model on the request: {spawns:?}",
         );
-        coord.abort();
+        coord.await.unwrap();
     }
 
     #[tokio::test]
@@ -7437,9 +8697,7 @@ mod tests {
 
     #[tokio::test]
     async fn channel_spawner_blocks_until_subagent_result() {
-        use ds_tools::implementations::ds_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+        use ds_tools::implementations::ds_build::task::types::{SubagentEvent, SubagentResult};
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let release = Arc::new(Notify::new());
@@ -7467,7 +8725,6 @@ mod tests {
             cwd: None,
             trace_sink: None,
             skeptic_overrides: Vec::new(),
-            events: None,
             goal_phase: Some("verify"),
             goal_attempt: Some(1),
         };
@@ -7478,6 +8735,7 @@ mod tests {
                     0,
                     role_prompt("prompt"),
                     Path::new("/tmp/goal-classifier-test-1.md"),
+                    Path::new("/tmp/reviewed"),
                     None,
                 )
                 .await
@@ -7550,8 +8808,8 @@ mod tests {
             other => panic!("expected FailOpenAchieved{{Timeout}}; got {other:?}"),
         }
         let body = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(body.contains("Verification fail-open: timeout"));
-        assert!(body.contains("treated the goal as Achieved as a fail-open"));
+        assert!(body.contains("Verification infrastructure failure: timeout"));
+        assert!(body.contains("The goal was not approved"));
     }
 
     #[tokio::test]
@@ -7573,6 +8831,42 @@ mod tests {
         .await;
         let body = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(body, "# Real subagent analysis\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn record_fail_open_rejects_symlink_at_resolved_details_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim.md");
+        tokio::fs::write(&victim, "precious").await.unwrap();
+        let path = tmp.path().join("goal-classifier-foo-1.md");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        let (_log, emit) = collect_events();
+        let outcome = record_fail_open(
+            GoalClassifierFailOpenReason::Timeout,
+            1,
+            std::time::Instant::now(),
+            &emit,
+            Some(&path),
+            path.display().to_string(),
+        )
+        .await;
+
+        let GoalClassifierOutcome::FailOpenAchieved { details_path, .. } = outcome else {
+            panic!("expected infrastructure outcome");
+        };
+        assert!(details_path.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(&victim).await.unwrap(),
+            "precious"
+        );
+        assert!(
+            tokio::fs::symlink_metadata(&path)
+                .await
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[tokio::test]
@@ -7683,59 +8977,6 @@ mod tests {
         );
     }
 
-    /// A squatted root fails the skeptic CLOSED: synthetic refute, no
-    /// spawn.
-    #[tokio::test]
-    async fn run_one_skeptic_fails_closed_when_scratch_root_squatted() {
-        let vid = unique_verifier_id();
-        let _squat = RootSquat::plant(&vid);
-        let mock = Arc::new(MockSpawner::new([]));
-        let spawner: Arc<dyn GoalClassifierSpawner> = mock.clone();
-        let tool_names = RoleToolNames::inherit_defaults();
-        let inputs = SkepticInputs {
-            objective: "obj",
-            final_response: "done",
-            plan_file: None,
-            plan_changes: None,
-            changes_ref: evidence::ChangesRef::Unavailable,
-            changed_files: &[],
-            verifier_id: &vid,
-            attempt: 1,
-            kind_lens: "",
-            implementer_scratch: "/tmp/ds-goal-test/implementer",
-            scratch_dir_ready: true,
-            prior_gaps: None,
-            require_math_validation: false,
-        };
-
-        let result = run_one_skeptic(
-            &spawner,
-            0,
-            &inputs,
-            "clf-squat",
-            None,
-            &tool_names,
-            &tool_names,
-            false, None
-        )
-        .await;
-
-        assert!(result.refuted, "skeptic level fails closed");
-        assert!(
-            result
-                .fallback_note
-                .as_deref()
-                .is_some_and(|n| n.contains("could not secure")),
-            "note must name the root failure: {:?}",
-            result.fallback_note,
-        );
-        assert_eq!(
-            mock.spawn_count.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "no spawn may happen under a squatted root",
-        );
-    }
-
     /// A symlink pre-planted at the predictable bare-`/tmp` artifact
     /// name is never followed: artifacts resolve into the scratch root,
     /// and the symlink's victim file stays untouched.
@@ -7786,7 +9027,10 @@ mod tests {
 
         // The placeholder landed in the scratch root, not through the symlink.
         let body = tokio::fs::read_to_string(&resolved).await.unwrap();
-        assert!(body.contains("fail-open"), "placeholder written: {body}");
+        assert!(
+            body.contains("infrastructure failure"),
+            "placeholder written: {body}"
+        );
         assert_eq!(
             tokio::fs::read_to_string(&victim).await.unwrap(),
             "precious",

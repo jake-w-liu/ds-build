@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
-use ds_tools::implementations::ds_build::task::types::SubagentRuntimeOverrides;
 use ds_tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
+use ds_tools::implementations::ds_build::task::types::SubagentRuntimeOverrides;
+use serde::de::DeserializeOwned;
 
 use crate::config::{SubagentPersona, SubagentRole};
 use crate::types::EffectiveRuntimeConfig;
@@ -225,6 +225,7 @@ mod tests {
             // Harness override is a /goal-only concern; these resolution tests
             // exercise model/persona/capability precedence, not the harness.
             harness_agent_type: None,
+            verifier_sandbox: None,
         }
     }
 
@@ -625,7 +626,8 @@ mod tests {
     fn persona_not_found_error_is_non_fatal() {
         // "not found" is a config-level error: persona_error is set but
         // other fields still resolve from role/overrides.
-        let overrides = make_overrides(Some("deepseek-v4-flash"), Some("missing"), None, None, None);
+        let overrides =
+            make_overrides(Some("deepseek-v4-flash"), Some("missing"), None, None, None);
         let role = SubagentRole {
             model: Some("ds-light".into()),
             default_isolation: Some("worktree".into()),

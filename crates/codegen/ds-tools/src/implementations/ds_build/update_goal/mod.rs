@@ -49,9 +49,9 @@ pub enum UpdateGoalAck {
     Accepted { summary: String },
     /// Classifier judged the goal achieved.
     ClassifierAchieved { details_path: String },
-    /// Classifier could not produce a verdict (infra failure); the
-    /// harness fails open and treats the goal as achieved.
-    ClassifierFailOpenAchieved { reason: &'static str },
+    /// Classifier could not produce a verdict (infrastructure failure);
+    /// the goal was paused without approval.
+    ClassifierInfrastructureFailure { reason: &'static str },
     /// Classifier rejected the completion; `attempt < max_runs` so
     /// another attempt is still available.
     ClassifierNotAchieved {
@@ -322,13 +322,16 @@ pub fn render_ack_into_output(
                 "Goal classifier verdict: Achieved. Goal complete. See {details_path}"
             ),
         }),
-        UpdateGoalAck::ClassifierFailOpenAchieved { reason } => Ok(UpdateGoalOutput {
-            success: true,
-            summary: format!(
-                "Goal marked complete via fail-open (reason: {reason}). No classifier verdict \
-                 was produced."
-            ),
-        }),
+        UpdateGoalAck::ClassifierInfrastructureFailure { reason } => {
+            Err(ds_tool_runtime::ToolError::custom(
+                "goal_verification_infrastructure_failure",
+                format!(
+                    "Goal verification infrastructure failed ({reason}). The goal was paused \
+                     and was not marked complete. Fix the verification environment and resume \
+                     the goal."
+                ),
+            ))
+        }
         UpdateGoalAck::ClassifierNotAchieved {
             details_path,
             attempt,

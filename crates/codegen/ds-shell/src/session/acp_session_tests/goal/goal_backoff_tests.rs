@@ -2872,6 +2872,36 @@ async fn reserve_classifier_attempt_slot_returns_none_without_orchestration() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn verification_round_counter_is_monotonic_across_resume() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = make_test_actor_with_active_goal().await;
+            let policy = actor.resolve_goal_classifier_policy();
+            assert_eq!(actor.reserve_classifier_attempt_slot(&policy), Some(1));
+            {
+                let mut tracker = actor.goal_tracker.lock();
+                assert_eq!(tracker.snapshot().unwrap().total_verify_rounds, 1);
+                assert!(tracker.pause(crate::session::goal_tracker::GoalPauseReason::User));
+                assert!(tracker.resume());
+                assert_eq!(tracker.snapshot().unwrap().classifier_runs_attempted, 0);
+                assert_eq!(tracker.snapshot().unwrap().total_verify_rounds, 1);
+            }
+            assert_eq!(actor.reserve_classifier_attempt_slot(&policy), Some(1));
+            assert_eq!(
+                actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .total_verify_rounds,
+                2
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn drain_mid_turn_then_turn_end_processes_deferred_completion() {
     // Sibling positive case for the deferred-FIFO contract: a
     // mid-turn drain defers; a follow-up turn-end drain processes

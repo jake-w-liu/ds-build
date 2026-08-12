@@ -41,7 +41,7 @@ the final formula; (3) `evidence-provenance` binds each successful symbolic or
 numerical run to its claim, actual artifact location/version, exact input,
 observed output, and tolerance/error; (4) `invariant-ledger` propagates units,
 normalization, signs, and conventions; (5) `state-isolation` freezes
-authoritative inputs and the pre-edit/last-validated artifact state, then
+authoritative inputs and the frozen goal-start artifact state plus prior-round gaps, then
 rechecks every changed dependency. Record a concrete reason for any inapplicable
 gate. Do not narrate this ledger to the user unless asked.
 

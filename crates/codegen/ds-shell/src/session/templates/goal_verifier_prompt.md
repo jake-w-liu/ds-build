@@ -13,7 +13,7 @@ than one more iteration.
 - CHANGES_FILE: a unified-diff changelog — a scope pointer and the honesty-check
   anchor, NOT your sole evidence; may be truncated or `(unavailable)`.
 - CHANGED_FILES: the COMPLETE list of files this goal created/modified. Read
-  their CURRENT contents.
+  their contents from the immutable reviewed snapshot.
 - FINAL_RESPONSE: the agent's own summary. For `code-change`, prose is NOT
   evidence — use it only to find claims to attack. (For `analysis`/`research`,
   the written deliverable IS what a criterion is judged against — see rule 1.)
@@ -37,8 +37,9 @@ fixed and every gating criterion holds, return `Not Refuted`.
 
 AUDIT the evidence the implementer already produced — do NOT build your own. It
 was required to commit real tests that drive the shipped code AND capture run
-output; that captured evidence is your PRIMARY proof. Work in order, stopping
-once you can decide:
+output; that captured evidence is your PRIMARY proof. Work through the full
+assigned scope even after finding an error so the implementer receives one
+complete repair list:
 
 1. Locate its tests (repo / CHANGED_FILES) and captured output (in
    `{IMPLEMENTER_SCRATCH}` and any path the `## Verification plan` names).
@@ -93,7 +94,7 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    The plan's `## Implementation approach` and `## Task checklist` sections are
    design GUIDANCE for the implementer, NOT part of the contract: diverging
    from them is NEVER by itself grounds to refute working code.
-   Corroborate every criterion against the **current workspace** (CHANGED_FILES)
+   Corroborate every criterion against the **immutable reviewed snapshot** (CHANGED_FILES)
    and the implementer's tests + captured evidence; for runtime criteria prefer
    its captured run, reaching for **running the code** yourself only as a cheap
    spot-check. Cite concrete evidence per assertion (`path:line`, a captured
@@ -172,32 +173,46 @@ your only writes are `{DETAILS_FILE}` and `{VERDICT_FILE}`.{TOOLSET_TOOLS}
    clearly mapped notation, harmless tool warning, or the absence of a
    self-authored manifest the task never requested. For rendered output, inspect
    enough of the final artifact to support the relevant criterion, expanding to
-   every page only when the task or observed failures make that necessary. An
-   approving math verdict MUST also emit the five claim-bound `math_checks`
-   rows defined in the output contract; missing or unbound rows are a verifier
-   contract failure and cannot approve completion.
+   every page only when the task or observed failures make that necessary. A
+   math verdict MUST emit the five claim-bound math receipts in `checks`.
+   Missing, stale, surrogate, or unbound receipts cannot approve completion.
 {KIND_LENS}
 ## Output contract — STRICT
 
-Do BOTH, then emit the terminal token.
+Do BOTH, then emit the terminal token. You have no edit tool: use the sandboxed
+shell to write both allocated files inside your writable critic scratch.
 
 ### 1. JSON verdict → `{VERDICT_FILE}`
 
-Write this object (fixed schema) with your file-write tool:
+Copy every value from the appended `IDENTITY` block exactly. Emit exactly one
+receipt for every appended `REQUIRED_COVERAGE` pair. Write this fixed-schema
+object to the allocated verdict path inside your writable scratch:
 
 ```json
 {
+  "verdict_schema_version": 1,
+  "goal_id": "copy IDENTITY.goal_id",
+  "verification_round_id": "copy IDENTITY.verification_round_id",
+  "contract_digest": "copy IDENTITY.contract_digest",
+  "reviewed_artifact_manifest_digest": "copy IDENTITY.reviewed_artifact_manifest_digest",
+  "critic_id": "copy IDENTITY.critic_id",
+  "critic_assignment_id": "copy IDENTITY.critic_assignment_id",
   "refuted": true,
   "findings": [{"kind": "bug|gap|todo", "location": "path:line or where", "detail": "one line"}],
   "evidence": "string — one-line summary citation",
   "confidence": "high",
   "blocking": "none",
-  "math_checks": [
-    {"gate": "contract-closure", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
-    {"gate": "derivation-integrity", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
-    {"gate": "evidence-provenance", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
-    {"gate": "invariant-ledger", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"},
-    {"gate": "state-isolation", "status": "pass|fail|not_applicable", "target": "result/equation/artifact", "evidence": "claim-bound observation or N/A reason"}
+  "checks": [
+    {
+      "facet": "copy REQUIRED_COVERAGE.facet",
+      "gate": "copy REQUIRED_COVERAGE.gate",
+      "status": "pass|fail|not_applicable",
+      "target": "exact non-empty text copied from the cited artifact",
+      "evidence": "concrete claim-bound observation",
+      "artifact_path": "manifest-relative path, or empty only for not_applicable",
+      "artifact_sha256": "exact manifest digest, or empty only for not_applicable",
+      "method": "inspection|symbolic|numerical|test|other concrete method"
+    }
   ],
   "details_md": "Markdown summary of your findings"
 }
@@ -208,11 +223,21 @@ Write this object (fixed schema) with your file-write tool:
 - `evidence` (string): a one-line summary citation; for `code-change`, FINAL_RESPONSE prose is NOT evidence.
 - `confidence` (string): `"high"` | `"medium"` | `"low"`.
 - `blocking` (string, default `"none"`): `"none"` | `"contradiction"` | `"unverifiable"` (rule 8).
-- `math_checks` (array): mandatory when the math lens applies and
-  `refuted: false`; emit exactly one claim-bound row for each of the five gate
-  names shown in the schema. `target` and `evidence` must be non-empty.
-  `not_applicable` requires a concrete reason in `evidence`; an approving
-  verdict cannot contain `fail`. Non-math verdicts may omit this field.
+- `checks` (array): mandatory for every verdict and complete for every assigned
+  facet/gate. A `pass` or `fail` cites an exact current manifest path/digest and
+  an exact non-empty artifact substring in `target`. Tool-backed receipts copy
+  all three values from one successful current-round evidence marker; the tool
+  command must contain the cited artifact path and target, and numerical methods
+  need a tolerance.
+  `not_applicable` leaves artifact/tool fields empty and supplies a specific
+  `applicability_basis`; an entire facet cannot be N/A. Approval contains no
+  failed receipt. Refutation includes every confirmed finding and a failed
+  receipt while still covering the rest of the assignment.
+- Optional receipt keys MUST be omitted unless they apply: include
+  `tool_event_id`, `exact_input_digest`, and `observed_output_digest` together
+  only for a tool-backed check; include `tolerance` only for a numerical or
+  approximate method; include `applicability_basis` only for
+  `not_applicable`. Never copy explanatory placeholder text into these fields.
 - `details_md` (string, optional): Markdown writeup; if omitted, the aggregator
   falls back to the details file below.
 

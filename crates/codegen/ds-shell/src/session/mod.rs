@@ -20,9 +20,7 @@ pub use self::persistence::{
 };
 pub use self::result::{Empty, ExtMethodResult};
 pub use self::share::{ShareSessionRequest, ShareSessionResponse};
-pub use ds_cli_proxy_types::feedback_types::{
-    ClientType, FeedbackTerminalInfo, RatingType,
-};
+pub use ds_cli_proxy_types::feedback_types::{ClientType, FeedbackTerminalInfo, RatingType};
 pub use ds_fsnotify::{FsConfig, FsEvent, FsEventKind, FsEventSource, FsNotifyError, GitMetaKind};
 /// `false` twin: this template is not compiled into this build, so no
 /// template matches. Keeps ungated call sites compiling in both
@@ -348,6 +346,8 @@ pub mod tool_index;
 pub(crate) mod turn_completion;
 pub mod unified_list;
 mod user_message;
+pub(crate) mod verification_snapshot;
+pub(crate) mod verifier_runtime;
 pub(crate) mod wire_tags;
 pub mod worktree;
 pub mod worktree_pool;

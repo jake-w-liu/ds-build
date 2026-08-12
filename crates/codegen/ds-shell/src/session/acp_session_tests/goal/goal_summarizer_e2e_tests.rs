@@ -151,7 +151,18 @@ async fn answer_skeptic(
         ),
     };
     if let Some(p) = crate::session::goal_classifier::parse_verdict_path_from_prompt(&req.prompt) {
-        let _ = tokio::fs::write(&p, json).await;
+        let bound = req
+            .runtime_overrides
+            .verifier_sandbox
+            .as_ref()
+            .map_or_else(|| json.clone(), |sandbox| {
+                crate::session::goal_classifier::bind_test_verdict(
+                    &req.prompt,
+                    &sandbox.reviewed_root,
+                    &json,
+                )
+            });
+        let _ = tokio::fs::write(&p, bound).await;
     }
     let _ = req.result_tx.send(SubagentResult {
         success: true,
@@ -179,8 +190,10 @@ fn configure_goal_actor(
     actor.goal_classifier_max_runs = max_runs;
     actor.goal_verifier_skeptic_count = 1;
     actor.tool_context.subagent_event_tx = coordinator_tx;
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace dir");
     actor.tool_context.cwd =
-        ds_paths::AbsPathBuf::new(tmp.path().to_path_buf()).expect("abs cwd");
+        ds_paths::AbsPathBuf::new(workspace.clone()).expect("abs cwd");
     actor.goal_tracker.lock().create_goal(
         "test-goal".to_string(),
         "test objective".to_string(),
@@ -189,6 +202,16 @@ fn configure_goal_actor(
         "2026-01-01T00:00:00Z".to_string(),
         None,
     );
+    let initial_manifest = crate::session::verification_snapshot::capture_workspace_manifest(
+        &workspace,
+    )
+    .expect("initial workspace manifest");
+    let initial_manifest_path = actor.goal_tracker.lock().initial_workspace_manifest_path();
+    crate::session::verification_snapshot::persist_manifest(
+        &initial_manifest_path,
+        &initial_manifest,
+    )
+    .expect("persist initial workspace manifest");
 }
 
 /// Build an actor with an active goal (no notification capture). Returns the
@@ -553,12 +576,12 @@ async fn summarizer_does_not_fire_on_fail_open_achieved() {
 
             assert_eq!(
                 actor.goal_tracker.lock().status(),
-                Some(crate::session::goal_tracker::GoalStatus::Complete),
-                "infra failure fails open to Achieved",
+                Some(crate::session::goal_tracker::GoalStatus::Blocked),
+                "verification infrastructure failure pauses without approval",
             );
             assert!(
                 count_event(&tmp, "goal_classifier_fail_open") >= 1,
-                "completion must be via the FailOpenAchieved (infra) path",
+                "the infrastructure-failure path must be recorded",
             );
             assert_eq!(
                 counters.summarizer_spawns.load(SeqOrd::SeqCst),

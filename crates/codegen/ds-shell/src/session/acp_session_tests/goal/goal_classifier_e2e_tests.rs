@@ -274,6 +274,11 @@ impl MockCoordinator {
                                 crate::session::goal_classifier::parse_verdict_path_from_prompt(
                                     &req.prompt,
                                 );
+                            let reviewed_root = req
+                                .runtime_overrides
+                                .verifier_sandbox
+                                .as_ref()
+                                .map(|spec| spec.reviewed_root.clone());
                             if let Some(notify) = r.hold.as_ref() {
                                 notify.notified().await;
                             }
@@ -285,7 +290,17 @@ impl MockCoordinator {
                             if let (Some(p), Some(json)) =
                                 (verdict.as_deref(), r.verdict_json.as_deref())
                             {
-                                let _ = tokio::fs::write(p, json).await;
+                                let bound = reviewed_root.as_deref().map_or_else(
+                                    || json.to_string(),
+                                    |root| {
+                                        crate::session::goal_classifier::bind_test_verdict(
+                                            &req.prompt,
+                                            root,
+                                            json,
+                                        )
+                                    },
+                                );
+                                let _ = tokio::fs::write(p, bound).await;
                             }
                             let result = if r.subagent_cancelled {
                                 SubagentResult {
@@ -367,6 +382,10 @@ async fn make_actor_with_cap(
     set_goal_harness_for_tests(&actor);
     actor.goal_classifier_enabled = classifier_enabled;
     actor.goal_classifier_max_runs = max_runs;
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace dir");
+    actor.tool_context.cwd =
+        ds_paths::AbsPathBuf::new(workspace.clone()).expect("absolute workspace cwd");
     if let Some(tx) = coordinator_tx {
         actor.tool_context.subagent_event_tx = Some(tx);
     }
@@ -378,6 +397,15 @@ async fn make_actor_with_cap(
         "2026-01-01T00:00:00Z".to_string(),
         None,
     );
+    let initial_manifest =
+        crate::session::verification_snapshot::capture_workspace_manifest(&workspace)
+            .expect("initial workspace manifest");
+    let initial_manifest_path = actor.goal_tracker.lock().initial_workspace_manifest_path();
+    crate::session::verification_snapshot::persist_manifest(
+        &initial_manifest_path,
+        &initial_manifest,
+    )
+    .expect("persist initial workspace manifest");
     (StdArc::new(actor), tmp)
 }
 fn make_completed() -> UpdateGoalInput {
@@ -519,7 +547,6 @@ async fn goal_classifier_achieved_completes_and_emits_details_path() {
         .run_until(async {
             let coord = MockCoordinator::spawn(VecDeque::from([Response::achieved()]));
             let (actor, _tmp) = make_actor(Some(coord.tx.clone()), true).await;
-            let scratch_details = expected_details_path(&actor, 1);
             seed_channel(&actor, vec![make_completed()]);
             actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
@@ -531,16 +558,22 @@ async fn goal_classifier_achieved_completes_and_emits_details_path() {
                 snap.last_classifier_verdict,
                 Some(crate::session::goal_tracker::GoalClassifierVerdict::Achieved),
             );
-            let rescued = actor
-                .goal_tracker
-                .lock()
-                .plan_path()
-                .parent()
-                .unwrap()
-                .join(std::path::Path::new(&scratch_details).file_name().unwrap());
-            assert_eq!(
-                snap.last_classifier_details_path.as_deref(),
-                Some(rescued.to_string_lossy().as_ref()),
+            let rescued = std::path::PathBuf::from(
+                snap.last_classifier_details_path
+                    .as_deref()
+                    .expect("completed verification must retain its rescued details path"),
+            );
+            let plan_path = actor.goal_tracker.lock().plan_path();
+            let expected_parent = plan_path.parent().unwrap();
+            assert_eq!(rescued.parent(), Some(expected_parent));
+            assert!(
+                rescued
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(
+                        |name| name.starts_with("goal-classifier-") && name.ends_with(".md")
+                    ),
+                "rescued details must keep the unique round-scoped filename: {rescued:?}",
             );
             assert!(
                 std::fs::read_to_string(&rescued).is_ok(),
@@ -675,7 +708,7 @@ async fn harness_trace_drain_clears_buffer_even_with_uploads_disabled() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_subagent_cancelled_synthesises_refute_vote() {
+async fn goal_classifier_subagent_cancelled_pauses_without_approval() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -687,13 +720,10 @@ async fn goal_classifier_subagent_cancelled_synthesises_refute_vote() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Active,
-                "cancellation must NOT auto-complete; it produces a refute vote",
+                crate::session::goal_tracker::GoalStatus::Blocked,
+                "cancellation is an infrastructure failure and must pause without approval",
             );
-            assert_eq!(
-                snap.last_classifier_verdict,
-                Some(crate::session::goal_tracker::GoalClassifierVerdict::NotAchieved),
-            );
+            assert_eq!(snap.last_classifier_verdict, None);
             assert_eq!(snap.classifier_runs_attempted, 1);
             assert_eq!(coord.spawn_count.load(SeqOrd::SeqCst), 1);
             drop(actor);
@@ -755,7 +785,6 @@ async fn goal_classifier_cap_reached_pauses_with_backoff() {
         .run_until(async {
             let coord = MockCoordinator::spawn(three_distinct_not_achieved());
             let (actor, _tmp) = make_actor_with_cap(Some(coord.tx.clone()), true, 3).await;
-            let expected_3 = expected_details_path(&actor, 3);
             for _ in 0..3 {
                 seed_channel(&actor, vec![make_completed()]);
                 actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
@@ -767,8 +796,12 @@ async fn goal_classifier_cap_reached_pauses_with_backoff() {
             );
             assert_eq!(snap.classifier_runs_attempted, 3);
             let msg = snap.pause_message.as_deref().unwrap_or_default();
+            let details_path = snap
+                .last_classifier_details_path
+                .as_deref()
+                .expect("cap pause must retain the last round's details path");
             assert!(
-                msg.contains(&expected_3),
+                msg.contains(details_path),
                 "pause_message must mention the details path: {msg}",
             );
         })
@@ -1425,10 +1458,10 @@ async fn stall_pause_mid_panel_keeps_reserved_slot() {
     unsafe { std::env::remove_var(ENV_FLAG) };
 }
 /// A completion deferred while the verification stage awaits must be
-/// dropped by the FailOpenAchieved completion.
+/// dropped when an infrastructure failure pauses verification.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn fail_open_achieved_drops_concurrently_deferred_completions() {
+async fn infrastructure_failure_drops_concurrently_deferred_completions() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1450,13 +1483,13 @@ async fn fail_open_achieved_drops_concurrently_deferred_completions() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Complete,
-                "no-coordinator stage must fail open to Achieved",
+                crate::session::goal_tracker::GoalStatus::Blocked,
+                "a missing coordinator must pause without approving the goal",
             );
             assert_eq!(
                 actor.pending_classifier_completions.lock().len(),
                 0,
-                "FailOpenAchieved must drop completions deferred while the stage ran",
+                "the infrastructure-failure pause must drop deferred completions",
             );
         })
         .await;
@@ -1584,7 +1617,7 @@ async fn achieved_verdict_drops_concurrently_deferred_completions() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_malformed_terminal_response_synthesises_refute_vote() {
+async fn goal_classifier_malformed_terminal_response_pauses_without_approval() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1594,14 +1627,11 @@ async fn goal_classifier_malformed_terminal_response_synthesises_refute_vote() {
             seed_channel(&actor, vec![make_completed()]);
             actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
-            assert_eq!(
-                snap.last_classifier_verdict,
-                Some(crate::session::goal_tracker::GoalClassifierVerdict::NotAchieved),
-            );
+            assert_eq!(snap.last_classifier_verdict, None);
             assert_eq!(snap.classifier_runs_attempted, 1);
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Active
+                crate::session::goal_tracker::GoalStatus::Blocked
             );
             {
                 let state = actor.state.lock().await;
@@ -1632,7 +1662,7 @@ async fn goal_classifier_malformed_terminal_response_synthesises_refute_vote() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_repeated_malformed_eventually_pauses_with_backoff() {
+async fn goal_classifier_malformed_pauses_immediately_and_requires_resume() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1650,9 +1680,10 @@ async fn goal_classifier_repeated_malformed_eventually_pauses_with_backoff() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::BackOffPaused,
+                crate::session::goal_tracker::GoalStatus::Blocked,
             );
-            assert_eq!(snap.classifier_runs_attempted, 3);
+            assert_eq!(snap.classifier_runs_attempted, 1);
+            assert_eq!(coord.spawn_count.load(SeqOrd::SeqCst), 1);
         })
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };
@@ -2002,18 +2033,11 @@ async fn goal_classifier_env_override_disables_when_remote_enabled() {
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };
 }
-/// The drain wires the cached `goal_verifier_skeptic_count` field
-/// into `VerificationStageInputs`. Every `make_actor`-built test
-/// uses N=1 for spawn-count parity with the legacy single-classifier
-/// asserts; this test explicitly flips an actor to N=2 and runs a
-/// medium-refute skeptic 0 + a clearing cold skeptic 1. Under
-/// variant-C, approval rests on the COLD panel (skeptic 1), so a
-/// non-decisive skeptic-0 refute does not block — the goal completes.
-/// Regression guard: a refactor that silently drops the cached field
-/// (or fans out 1 spawn instead of 2) is caught here.
+/// Every applicable verifier must approve. One refutation in an N=2 panel
+/// keeps the goal active even when the other verifier clears the work.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_verification_stage_n2_skeptic0_medium_refute_cold_clears_completes() {
+async fn goal_verification_stage_n2_one_refute_prevents_completion() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -2034,8 +2058,12 @@ async fn goal_verification_stage_n2_skeptic0_medium_refute_cold_clears_completes
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Complete,
-                "cold skeptic 1 clears → cold quorum approves → goal complete",
+                crate::session::goal_tracker::GoalStatus::Active,
+                "unanimous approval is required",
+            );
+            assert_eq!(
+                snap.last_classifier_verdict,
+                Some(crate::session::goal_tracker::GoalClassifierVerdict::NotAchieved),
             );
             assert_eq!(
                 coord.spawn_count.load(SeqOrd::SeqCst),
@@ -2085,14 +2113,11 @@ async fn goal_verification_stage_n2_skeptic0_clear_cold_refute_does_not_complete
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };
 }
-/// Part-A persistence round-trip through the drain: a NotAchieved
-/// N=2 attempt writes skeptic 0's child id back onto the orchestration,
-/// and the NEXT attempt threads it back in as `resume_from` for the
-/// resumed skeptic 0 (cold skeptic 1 stays fresh). Drives two attempts
-/// in one drain (distinct gaps so the stall early-exit never fires).
+/// Every verification round uses fresh critics. No prior child session is
+/// persisted or resumed into a later round.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_verification_stage_n2_drain_persists_and_resumes_skeptic0() {
+async fn goal_verification_stage_n2_uses_fresh_critics_each_round() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -2114,21 +2139,13 @@ async fn goal_verification_stage_n2_drain_persists_and_resumes_skeptic0() {
             actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(snap.classifier_runs_attempted, 2, "two attempts ran");
-            assert!(
-                snap.skeptic0_session_id.is_some(),
-                "drain must write skeptic 0's child id back onto the orchestration",
-            );
+            assert!(snap.skeptic0_session_id.is_none());
             let spawns = coord.spawns.lock().clone();
             assert_eq!(spawns.len(), 4, "2 skeptics × 2 attempts");
-            let attempt1_skeptic0_id = spawns[0].0.clone();
             assert_eq!(spawns[0].1, None, "attempt 1 skeptic 0 is a cold spawn");
-            assert_eq!(spawns[1].1, None, "cold skeptic 1 never resumes");
-            assert_eq!(
-                spawns[2].1.as_deref(),
-                Some(attempt1_skeptic0_id.as_str()),
-                "attempt 2 skeptic 0 resumes attempt 1's persisted child id",
-            );
-            assert_eq!(spawns[3].1, None, "cold skeptic 1 never resumes");
+            assert_eq!(spawns[1].1, None, "attempt 1 skeptic 1 is a cold spawn");
+            assert_eq!(spawns[2].1, None, "attempt 2 skeptic 0 is a cold spawn");
+            assert_eq!(spawns[3].1, None, "attempt 2 skeptic 1 is a cold spawn");
         })
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };
@@ -2545,15 +2562,19 @@ fn render_ack_classifier_achieved_is_success() {
     assert!(out.summary.contains("/tmp/details.md"));
 }
 #[test]
-fn render_ack_classifier_fail_open_achieved_clarifies_no_verdict() {
+fn render_ack_classifier_infrastructure_failure_is_tool_error() {
     use ds_tools::implementations::ds_build::update_goal::{UpdateGoalAck, render_ack_into_output};
-    let out =
-        render_ack_into_output(UpdateGoalAck::ClassifierFailOpenAchieved { reason: "timeout" })
-            .expect("FailOpen must be Ok (treated as achieved)");
-    assert!(out.success);
-    assert!(out.summary.contains("fail-open"));
-    assert!(out.summary.contains("timeout"));
-    assert!(out.summary.contains("No classifier verdict"));
+    let err = render_ack_into_output(UpdateGoalAck::ClassifierInfrastructureFailure {
+        reason: "timeout",
+    })
+    .expect_err("an infrastructure failure must not acknowledge completion");
+    assert_eq!(
+        tool_error_code(&err),
+        "goal_verification_infrastructure_failure"
+    );
+    let rendered = format!("{err:?}");
+    assert!(rendered.contains("timeout"));
+    assert!(rendered.contains("not marked complete"));
 }
 #[test]
 fn render_ack_not_achieved_is_tool_error_with_correct_code() {
@@ -2740,6 +2761,10 @@ async fn make_role_model_actor(
         strategist: Default::default(),
         skeptic_pool: pool,
     };
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace dir");
+    actor.tool_context.cwd =
+        ds_paths::AbsPathBuf::new(workspace.clone()).expect("absolute workspace cwd");
     if !catalog.is_empty() {
         actor.models_manager = crate::agent::models::ModelsManager::new(
             None,
@@ -2760,6 +2785,15 @@ async fn make_role_model_actor(
         "2026-01-01T00:00:00Z".to_string(),
         None,
     );
+    let initial_manifest =
+        crate::session::verification_snapshot::capture_workspace_manifest(&workspace)
+            .expect("initial workspace manifest");
+    let initial_manifest_path = actor.goal_tracker.lock().initial_workspace_manifest_path();
+    crate::session::verification_snapshot::persist_manifest(
+        &initial_manifest_path,
+        &initial_manifest,
+    )
+    .expect("persist initial workspace manifest");
     if !frozen.is_empty() {
         actor
             .goal_tracker

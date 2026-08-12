@@ -261,6 +261,16 @@ async fn run_goal_round_end_continues_in_turn_for_active_goal() {
                 state.pending_inputs.is_empty(),
                 "in-turn continuation must not queue a GoalSummary turn"
             );
+            assert_eq!(
+                actor
+                    .goal_tracker
+                    .lock()
+                    .snapshot()
+                    .unwrap()
+                    .total_worker_rounds,
+                1,
+                "the completed worker turn must be counted"
+            );
         })
         .await;
 }

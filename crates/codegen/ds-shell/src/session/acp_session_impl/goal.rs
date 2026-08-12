@@ -117,9 +117,7 @@ impl SessionActor {
         purpose: DrainPurpose,
         extra: Vec<ds_tools::implementations::ds_build::update_goal::UpdateGoalEnvelope>,
     ) {
-        use ds_tools::implementations::ds_build::update_goal::{
-            RejectReason, UpdateGoalAck,
-        };
+        use ds_tools::implementations::ds_build::update_goal::{RejectReason, UpdateGoalAck};
         // The `update_goal` tool and its `GoalUpdateHandle` are always
         // registered (see `spawn_session_actor`), so a model can call
         // `update_goal` in a session that never entered goal mode — e.g. any
@@ -616,6 +614,7 @@ impl SessionActor {
         let mut tracker = self.goal_tracker.lock();
         let o = tracker.snapshot_mut()?;
         o.classifier_runs_attempted = o.classifier_runs_attempted.saturating_add(1);
+        o.total_verify_rounds = o.total_verify_rounds.saturating_add(1);
         o.classifier_max_runs = Some(policy.max_runs);
         // Verification is firing — restart the re-verify round counter.
         o.rounds_since_verify = 0;
@@ -800,9 +799,9 @@ impl SessionActor {
                     let round = tracker.snapshot().map(|o| o.total_verify_rounds);
                     tracker.record_decision(
                         crate::session::goal_tracker::GoalDecisionKind::Verdict,
-                        crate::session::goal_tracker::truncate_decision_detail(
-                            &format!("blocked: {pause_summary}"),
-                        ),
+                        crate::session::goal_tracker::truncate_decision_detail(&format!(
+                            "blocked: {pause_summary}"
+                        )),
                         round,
                     );
                 }
@@ -831,53 +830,33 @@ impl SessionActor {
                     Some(round),
                 );
                 drop(tracker);
-                // Fail-closed policy: an infra-class verification failure must
-                // never be recorded as an achieved check. Pause for a user
-                // decision instead of completing the goal.
-                if self.goal_fail_closed_verification {
-                    tracing::error!(
-                        ?reason,
-                        "goal verification fail-open suppressed (fail-closed policy) — pausing",
-                    );
-                    self.prune_subagent_records_for_active_goal();
-                    self.clear_pending_classifier_completions();
-                    let msg = format_goal_pause_message(
-                        "Goal verification infrastructure failed and the goal was NOT marked \
-                         complete (fail-closed policy). Fix the verification environment and \
-                         resume, or clear the goal.",
-                        reason.as_const_str(),
-                        &details_path,
-                    );
-                    self.auto_pause_goal_if_active_with_message(
-                        crate::session::goal_tracker::GoalPauseReason::Verification,
-                        msg,
-                    )
-                    .await;
-                    UpdateGoalAck::ClassifierFailOpenAchieved {
-                        reason: reason.as_const_str(),
-                    }
-                } else {
+                // The old setting is retained only for config compatibility;
+                // infrastructure failure can no longer synthesize approval.
+                if !self.goal_fail_closed_verification {
                     tracing::warn!(
-                        ?reason,
-                        "goal verification fail-open (infra-class) → Achieved",
+                        "deprecated fail-open verification setting ignored; verification is \
+                         always fail-closed"
                     );
-                    self.prune_subagent_records_for_active_goal();
-                    self.clear_pending_classifier_completions();
-                    let mut tracker = self.goal_tracker.lock();
-                    Self::record_verdict_on_orchestration(
-                        &mut tracker,
-                        GoalClassifierVerdict::Achieved,
-                        (!details_path.is_empty()).then_some(details_path.as_str()),
-                        GapsUpdate::Clear,
-                    );
-                    // Fail-open is treated as Achieved: break the streak and drop
-                    // any stale strategist note, symmetric with the real Achieved.
-                    tracker.reset_strategist_state();
-                    tracker.complete();
-                    notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
-                    UpdateGoalAck::ClassifierFailOpenAchieved {
-                        reason: reason.as_const_str(),
-                    }
+                }
+                tracing::error!(
+                    ?reason,
+                    "goal verification infrastructure failed — pausing without approval",
+                );
+                self.prune_subagent_records_for_active_goal();
+                self.clear_pending_classifier_completions();
+                let msg = format_goal_pause_message(
+                    "Goal verification infrastructure failed and the goal was NOT marked \
+                     complete. Fix the verification environment and resume, or clear the goal.",
+                    reason.as_const_str(),
+                    &details_path,
+                );
+                self.auto_pause_goal_if_active_with_message(
+                    crate::session::goal_tracker::GoalPauseReason::Verification,
+                    msg,
+                )
+                .await;
+                UpdateGoalAck::ClassifierInfrastructureFailure {
+                    reason: reason.as_const_str(),
                 }
             }
         }
@@ -1009,12 +988,18 @@ impl SessionActor {
         let body = reason.details_body(attempt, policy.max_runs);
         // Best-effort write, gated like every classifier artifact: never
         // through an unverified (possibly squatted) root.
-        let wrote_details =
-            if crate::session::goal_tracker::ensure_goal_scratch_root(&verifier_id).is_ok() {
-                tokio::fs::write(&details_path, body).await.is_ok()
-            } else {
-                false
-            };
+        let wrote_details = crate::session::goal_tracker::ensure_goal_scratch_root(&verifier_id)
+            .is_ok()
+            && crate::session::goal_classifier::validate_details_path(std::path::Path::new(
+                &details_path,
+            ))
+            .is_ok()
+            && crate::session::goal_classifier::write_patch_file_atomic(
+                std::path::Path::new(&details_path),
+                &body,
+            )
+            .await
+            .is_ok();
         // SECURITY: only surface the scratch-rooted path if WE actually wrote
         // the synthetic details. If ensure (or the write) failed — e.g. a local
         // attacker squatted the predictable scratch root — pointing the tracker,
@@ -1155,11 +1140,13 @@ impl SessionActor {
         self.stop_precision.lock().unwrap().record_outcome(true);
 
         let (
+            goal_id,
             objective,
             verifier_id,
             baseline_commit,
             plan_file,
             plan_baseline_file,
+            initial_workspace_manifest_file,
             goal_created_at,
             prior_skeptic0,
             prior_gaps,
@@ -1174,11 +1161,13 @@ impl SessionActor {
                 };
             };
             (
+                o.goal_id.clone(),
                 o.objective.clone(),
                 o.verifier_id.clone(),
                 o.changes_baseline_commit.clone(),
                 o.plan_file.clone(),
                 o.plan_baseline_file.clone(),
+                tracker.initial_workspace_manifest_path(),
                 crate::session::goal_classifier::evidence::parse_created_at_to_unix(&o.created_at),
                 o.skeptic0_session_id.clone(),
                 o.last_classifier_gaps.clone(),
@@ -1317,7 +1306,6 @@ impl SessionActor {
                 cwd: Some(self.tool_context.cwd.as_str().to_owned()),
                 trace_sink: Some((self.chat_state_handle.clone(), task_tool_name)),
                 skeptic_overrides,
-                events: Some(self.events.writer()),
                 goal_phase: Some("verify"),
                 goal_attempt: Some(attempt),
             });
@@ -1327,6 +1315,7 @@ impl SessionActor {
             crate::session::goal_tracker::implementer_scratch_dir(&verifier_id);
 
         let inputs = VerificationStageInputs {
+            goal_id: &goal_id,
             objective: &objective,
             final_response: &final_response,
             baseline_commit: baseline_commit.as_deref(),
@@ -1337,6 +1326,7 @@ impl SessionActor {
             goal_created_at,
             plan_file: plan_file.as_deref(),
             plan_baseline_file: plan_baseline_file.as_deref(),
+            initial_workspace_manifest_file: Some(&initial_workspace_manifest_file),
             implementer_scratch_dir: implementer_scratch.as_path(),
             scratch_dir_ready,
             skeptic_count: self.goal_verifier_skeptic_count,
@@ -1491,9 +1481,7 @@ impl SessionActor {
     ) -> crate::session::goal_planner::RoleSpawnOverride {
         use crate::session::events::{Event, GoalRoleModelFailOpenReason as Reason};
         use crate::session::goal_planner::RoleSpawnOverride;
-        use ds_tools::implementations::ds_build::task::backend::{
-            ChannelBackend, SubagentBackend,
-        };
+        use ds_tools::implementations::ds_build::task::backend::{ChannelBackend, SubagentBackend};
         use ds_tools::implementations::ds_build::task::types::SubagentDescribeOutcome;
 
         let fail_open = |reason: Reason| {
@@ -1663,6 +1651,11 @@ impl SessionActor {
         let baseline_commit =
             crate::session::goal_classifier::capture_git_baseline(self.tool_context.cwd.as_path())
                 .await;
+        let workspace_root = self.tool_context.cwd.as_path().to_path_buf();
+        let initial_manifest = tokio::task::spawn_blocking(move || {
+            crate::session::verification_snapshot::capture_workspace_manifest(&workspace_root)
+        })
+        .await;
         self.goal_tracker.lock().create_goal(
             goal_id,
             objective.to_owned(),
@@ -1671,6 +1664,26 @@ impl SessionActor {
             created_at,
             baseline_commit,
         );
+        let manifest_path = self.goal_tracker.lock().initial_workspace_manifest_path();
+        // Never let a failed fresh capture fall back to the previous goal's
+        // manifest at the same session-scoped path.
+        let _ = std::fs::remove_file(&manifest_path);
+        match initial_manifest {
+            Ok(Ok(manifest)) => {
+                if let Err(error) = crate::session::verification_snapshot::persist_manifest(
+                    &manifest_path,
+                    &manifest,
+                ) {
+                    tracing::warn!(%error, "goal setup: initial workspace manifest write failed");
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "goal setup: initial workspace capture failed");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "goal setup: initial workspace capture task failed");
+            }
+        }
         // Fresh goal — drop any goal-turn-origin task ids carried over from a
         // previous goal so the new goal's drain starts clean.
         self.goal_turn_task_ids.lock().clear();
@@ -2035,6 +2048,15 @@ impl SessionActor {
     /// turn. Shared by the in-turn loop ([`Self::run_goal_round_end`]) and the
     /// legacy queue path ([`Self::maybe_queue_goal_continuation`]).
     async fn prepare_goal_continuation(&self, current_tokens: i64) -> Option<GoalContinuationPlan> {
+        // Count the worker turn before its completion request is drained; a
+        // terminal round is still a real worker round. Lifetime counters are
+        // monotonic and intentionally survive pause/resume.
+        if self.goal_harness_enabled()
+            && let Some(goal) = self.goal_tracker.lock().snapshot_mut()
+            && goal.status == crate::session::goal_tracker::GoalStatus::Active
+        {
+            goal.total_worker_rounds = goal.total_worker_rounds.saturating_add(1);
+        }
         // Turn-end drain: classifier-eligible completions fire the verifier
         // here (deferred completions from the prior mid-turn drain first).
         self.drain_goal_updates(current_tokens, DrainPurpose::TurnEnd)
