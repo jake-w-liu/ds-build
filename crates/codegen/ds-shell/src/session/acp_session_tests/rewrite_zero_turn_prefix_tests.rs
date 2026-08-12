@@ -186,7 +186,7 @@ async fn rebuild_reinjects_baseline_skill_reminder_for_non_cursor() {
             );
             let text = reminder.text_content();
             assert!(
-                text.contains("The following skills are available for use:"),
+                text.contains("<agent_skill fullPath="),
                 "reminder must carry the ds skill catalog header:\n{text}",
             );
             assert!(
