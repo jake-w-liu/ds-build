@@ -115,6 +115,7 @@ pub(crate) enum ChangesRef<'a> {
     /// Absolute path to a unified-diff patch file on disk.
     File(&'a str),
     /// Capture failed — verifier prompt rule 5 takes over.
+    #[allow(dead_code)] // reserved capture failure class
     Unavailable,
 }
 
@@ -314,6 +315,7 @@ fn truncate_diff(raw: String) -> String {
 #[derive(Debug)]
 pub(crate) struct CapturedChanges {
     pub diff: String,
+    #[allow(dead_code)] // populated for future evidence packs / tests
     pub changed_files: Vec<String>,
 }
 

@@ -1,10 +1,5 @@
-#![allow(
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    unreachable_code,
-    dead_code
-)]
+// Lint surface is intentional: unused/dead code must not be silenced at the
+// crate root. Prefer local `#[allow(...)]` only with a reason comment.
 pub(crate) use ds_telemetry::unified_log;
 pub use ds_tracing_macros::{teprintln, timed, tprintln};
 pub mod active_sessions;

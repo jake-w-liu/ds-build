@@ -845,11 +845,6 @@ pub(crate) struct SessionActor {
     pub(crate) stop_precision: std::sync::Mutex<
         crate::session::goal_stop_detector::StopPatternPrecision,
     >,
-    /// Strict skeptic verdicts (`DS_GOAL_STRICT_SKEPTIC_VERDICTS` /
-    /// `[goal] strict_skeptic_verdicts`) resolved at actor build. When
-    /// `true`, a skeptic whose verdict JSON is missing/malformed votes a
-    /// synthetic REFUTE (never an approval without the structured record).
-    pub(crate) goal_strict_skeptic_verdicts: bool,
     /// Resolved per-goal classifier run cap (number of
     /// `update_goal(completed: true)` rejections before the goal
     /// auto-pauses via `BackOff`). Cached at actor construction like

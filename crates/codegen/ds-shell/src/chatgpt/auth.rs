@@ -549,7 +549,7 @@ fn read_tokens(path: &Path) -> anyhow::Result<Option<Tokens>> {
     if metadata.len() > MAX_TOKEN_FILE_BYTES {
         bail!("ChatGPT credential file exceeded the size limit");
     }
-    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_TOKEN_FILE_BYTES + 1)
         .read_to_end(&mut bytes)?;

@@ -233,6 +233,7 @@ impl BridgeAttach {
     }
 }
 /// `_meta["ds.cli/session"].kind` → [`SessionKind`]; absent/unknown/malformed → `Build`.
+#[cfg(test)]
 fn parse_session_kind(
     meta: Option<&acp::Meta>,
 ) -> crate::session::unified_list::SessionKind {
@@ -245,7 +246,7 @@ fn parse_session_kind(
 }
 /// Hard-off in release builds: `kind: "chat"` meta is ignored and
 /// sessions stay on the local Build path.
-fn is_chat_session_kind(meta: Option<&acp::Meta>) -> bool {
+fn is_chat_session_kind(_meta: Option<&acp::Meta>) -> bool {
     false
 }
 fn chat_initial_model(

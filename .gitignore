@@ -6,6 +6,7 @@
 /.ds/
 /live-audit/
 /.lyceum-trash/
+/.cleanup-audit/
 
 # Local upstream-sync scratch (if created under repo)
 .upstream-sync/

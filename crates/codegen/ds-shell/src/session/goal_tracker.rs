@@ -548,6 +548,7 @@ pub(crate) fn implementer_scratch_dir(verifier_id: &str) -> PathBuf {
 /// Skeptic `idx`'s private scratch dir (`<scratch_root>/skeptic-<idx>`).
 /// Each skeptic re-runs the verification plan into its OWN dir so N
 /// skeptics never overwrite each other or the implementer's outputs.
+#[cfg(test)]
 pub(crate) fn skeptic_scratch_dir(verifier_id: &str, idx: u32) -> PathBuf {
     goal_scratch_root(verifier_id).join(format!("skeptic-{idx}"))
 }

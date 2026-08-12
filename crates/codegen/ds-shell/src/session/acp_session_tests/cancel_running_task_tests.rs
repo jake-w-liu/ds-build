@@ -233,7 +233,6 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 goal_role_models: Default::default(),
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
-                goal_strict_skeptic_verdicts: false,
                 stop_precision: std::sync::Mutex::new(
                     crate::session::goal_stop_detector::StopPatternPrecision::new(),
                 ),
@@ -692,7 +691,6 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 goal_role_models: Default::default(),
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
-                goal_strict_skeptic_verdicts: false,
                 stop_precision: std::sync::Mutex::new(
                     crate::session::goal_stop_detector::StopPatternPrecision::new(),
                 ),
@@ -949,7 +947,6 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 goal_role_models: Default::default(),
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
-                goal_strict_skeptic_verdicts: false,
                 stop_precision: std::sync::Mutex::new(
                     crate::session::goal_stop_detector::StopPatternPrecision::new(),
                 ),
@@ -1959,7 +1956,6 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 goal_role_models: Default::default(),
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
-                goal_strict_skeptic_verdicts: false,
                 stop_precision: std::sync::Mutex::new(
                     crate::session::goal_stop_detector::StopPatternPrecision::new(),
                 ),

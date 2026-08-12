@@ -1108,7 +1108,6 @@ pub(crate) async fn spawn_session_actor(
     let goal_fail_closed_verification = effective_config
         .resolve_goal_fail_closed_verification()
         .value;
-    let goal_strict_skeptic_verdicts = effective_config.resolve_goal_strict_skeptic_verdicts().value;
     let goal_role_models = {
         let planner = effective_config
             .resolve_goal_planner_model(goal_use_current_model_only)
@@ -1273,7 +1272,6 @@ pub(crate) async fn spawn_session_actor(
         goal_role_models,
         goal_use_current_model_only,
         goal_fail_closed_verification,
-        goal_strict_skeptic_verdicts,
         stop_precision: std::sync::Mutex::new(
             crate::session::goal_stop_detector::StopPatternPrecision::new(),
         ),

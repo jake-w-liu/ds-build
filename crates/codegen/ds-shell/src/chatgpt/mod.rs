@@ -6,7 +6,6 @@
 mod auth;
 mod catalog;
 
-use anyhow::Context as _;
 use indexmap::IndexMap;
 
 use crate::agent::config::ModelEntry;

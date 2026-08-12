@@ -550,7 +550,7 @@ fn read_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     if !metadata.file_type().is_file() || metadata.len() > limit {
         return Err(format!("{} is not a bounded regular file", path.display()));
     }
-    let mut file = open_read_no_follow(path)
+    let file = open_read_no_follow(path)
         .map_err(|error| format!("cannot open {} safely: {error}", path.display()))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(limit + 1)

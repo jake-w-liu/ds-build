@@ -213,12 +213,14 @@ impl StopPatternPrecision {
     }
 
     /// Number of times `pattern` has fired (for diagnostics/tests).
+    #[cfg(test)]
     pub(crate) fn fired_count(&self, pattern: &'static str) -> u32 {
         self.fired.get(pattern).copied().unwrap_or(0)
     }
 
     /// Measured precision for `pattern`: productive / fired. `None`
     /// when the pattern never fired.
+    #[cfg(test)]
     pub(crate) fn precision(&self, pattern: &'static str) -> Option<f64> {
         let fired = self.fired.get(pattern).copied()?;
         if fired == 0 {
@@ -292,6 +294,7 @@ const PATTERN_LABELS: &[&str] = &[
 ///   against each pattern individually. The patterns are `^`-anchored,
 ///   so the marker must start a line: "I can't continue without your
 ///   input" inside a sentence does NOT match.
+#[cfg(test)]
 pub(crate) fn matched_stop_pattern(text: &str) -> Option<&'static str> {
     matched_stop_pattern_with_precision(text, None)
 }

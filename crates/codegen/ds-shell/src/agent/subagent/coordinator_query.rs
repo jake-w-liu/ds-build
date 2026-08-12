@@ -307,6 +307,7 @@ impl SubagentCoordinator {
         std::time::Duration::from_secs(30 * 60);
 
     /// Count of initializing + running subagents (dashboard/tasks pane).
+#[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
         self.pending.len() + self.active.len()
     }

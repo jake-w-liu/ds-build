@@ -188,7 +188,6 @@ async fn create_test_actor(
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
         goal_fail_closed_verification: false,
-        goal_strict_skeptic_verdicts: false,
         stop_precision: std::sync::Mutex::new(
             crate::session::goal_stop_detector::StopPatternPrecision::new(),
         ),
@@ -638,7 +637,6 @@ async fn create_test_actor_with_memory(
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
         goal_fail_closed_verification: false,
-        goal_strict_skeptic_verdicts: false,
         stop_precision: std::sync::Mutex::new(
             crate::session::goal_stop_detector::StopPatternPrecision::new(),
         ),
@@ -1400,7 +1398,6 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 goal_role_models: Default::default(),
                 goal_use_current_model_only: false,
                 goal_fail_closed_verification: false,
-                goal_strict_skeptic_verdicts: false,
                 stop_precision: std::sync::Mutex::new(
                     crate::session::goal_stop_detector::StopPatternPrecision::new(),
                 ),

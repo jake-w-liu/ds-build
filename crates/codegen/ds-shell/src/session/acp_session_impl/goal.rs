@@ -1148,7 +1148,6 @@ impl SessionActor {
             plan_baseline_file,
             initial_workspace_manifest_file,
             goal_created_at,
-            prior_skeptic0,
             prior_gaps,
             first_final_response,
             scratch_dir_ready,
@@ -1169,7 +1168,6 @@ impl SessionActor {
                 o.plan_baseline_file.clone(),
                 tracker.initial_workspace_manifest_path(),
                 crate::session::goal_classifier::evidence::parse_created_at_to_unix(&o.created_at),
-                o.skeptic0_session_id.clone(),
                 o.last_classifier_gaps.clone(),
                 o.first_final_response.clone(),
                 o.scratch_dir_ready,
@@ -1331,11 +1329,9 @@ impl SessionActor {
             scratch_dir_ready,
             skeptic_count: self.goal_verifier_skeptic_count,
             max_runs,
-            prior_skeptic0_session_id: prior_skeptic0.as_deref(),
             prior_gaps: prior_gaps.as_deref(),
             tool_names: &skeptic_tool_names,
             inherit_tool_names: &inherit_tool_names,
-            strict_skeptic_verdicts: self.goal_strict_skeptic_verdicts,
         };
 
         // Soft spawn backpressure: while live subagent token burn exceeds

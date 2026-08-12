@@ -196,7 +196,6 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         goal_role_models: Default::default(),
         goal_use_current_model_only: false,
         goal_fail_closed_verification: false,
-        goal_strict_skeptic_verdicts: false,
         stop_precision: std::sync::Mutex::new(
             crate::session::goal_stop_detector::StopPatternPrecision::new(),
         ),

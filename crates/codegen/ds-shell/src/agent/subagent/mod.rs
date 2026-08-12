@@ -44,6 +44,7 @@ mod handle_request;
 pub(crate) use handle_request::handle_subagent_request;
 
 /// Acceptance-critical adversarial reviewer subagent types (Fable Stage 3).
+#[cfg(test)]
 pub(crate) fn is_attacker_subagent_type(subagent_type: &str) -> bool {
     matches!(
         subagent_type,

@@ -18,10 +18,12 @@ pub(crate) struct SyntheticTurnTraceRequest {
 }
 /// Outcome of a session-state upload with categorized failure reason.
 pub(crate) enum UploadOutcome {
+    #[allow(dead_code)] // wire-stable enum; construction reserved
     Confirmed,
     /// Not confirmed within the flush deadline; the upload continues in the
     /// live queue worker. Not `Confirmed`: cloud restorability is unobserved,
     /// so `restorable_turn_number` must not advance on it.
+    #[allow(dead_code)] // wire-stable enum; construction reserved
     Deferred,
     Failed {
         reason: &'static str,
