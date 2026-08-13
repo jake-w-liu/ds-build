@@ -87,6 +87,14 @@ pub fn user_config_path() -> PathBuf {
     ds_home().join("config.toml")
 }
 
+/// Path to the auth file, honoring `DS_AUTH_PATH` when set (custom file path
+/// overrides the default `$DS_HOME/auth.json`), matching the auth manager.
+fn auth_json_path() -> PathBuf {
+    std::env::var("DS_AUTH_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| ds_home().join("auth.json"))
+}
+
 /// Resolve where an API key would come from without printing secrets.
 pub fn api_key_status() -> ApiKeyStatus {
     let config_path = user_config_path();
@@ -132,7 +140,7 @@ fn detect_key_origin() -> (ApiKeyOrigin, Option<String>) {
     if let Some(k) = read_model_api_key_from_config_only() {
         return (ApiKeyOrigin::ConfigModel, Some(k));
     }
-    if let Some(k) = crate::auth::read_api_key(&ds_home()) {
+    if let Some(k) = crate::auth::read_api_key_from_file(&auth_json_path()) {
         let k = k.trim().to_owned();
         if !k.is_empty() {
             return (ApiKeyOrigin::AuthJson, Some(k));
@@ -333,7 +341,7 @@ fn preferred_method_is_api_key() -> bool {
 
 /// True when auth.json holds a non-empty non-ApiKey credential (OIDC / external).
 fn has_session_credential() -> bool {
-    let path = ds_home().join("auth.json");
+    let path = auth_json_path();
     let Ok(store) = crate::auth::read_auth_json(&path) else {
         return false;
     };
@@ -590,7 +598,10 @@ pub(crate) fn read_api_key_from_config_or_auth_json() -> Option<String> {
     if let Some(k) = read_model_api_key_from_config_only() {
         return Some(k);
     }
-    let k = crate::auth::read_api_key(&ds_home())?;
+    // Honor `DS_AUTH_PATH` (custom auth file) exactly like the auth manager,
+    // so `has_ds_api_key_env()` and the live session reader can't disagree
+    // about which auth.json holds the `ds::api_key` scope.
+    let k = crate::auth::read_api_key_from_file(&auth_json_path())?;
     let k = k.trim();
     if k.is_empty() {
         None

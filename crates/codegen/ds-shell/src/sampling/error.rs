@@ -247,6 +247,7 @@ pub fn prompt_complete_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ds_test_support::isolated_ds_home;
     use reqwest::StatusCode;
 
     #[test]
@@ -440,6 +441,7 @@ mod tests {
     /// Helper: run a closure with DEEPSEEK_API_KEY temporarily set (or cleared).
     /// Cleans up even if the closure panics.
     fn with_api_key_env<F: FnOnce()>(key: Option<&str>, f: F) {
+        let (_home, _ds_home) = isolated_ds_home();
         let prev = std::env::var("DEEPSEEK_API_KEY").ok();
         let prev_legacy = std::env::var("DS_CODE_API_KEY").ok();
         // SAFETY: serial_test ensures no concurrent env mutation.

@@ -613,17 +613,6 @@ fn normalize_hash(hash: &str) -> Option<String> {
     }
 }
 
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on" | "enable" | "enabled"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn positive_usize_env(name: &str, default: usize, cap: usize) -> usize {
     std::env::var(name)
         .ok()

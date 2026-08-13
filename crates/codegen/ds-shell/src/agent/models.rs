@@ -3372,6 +3372,7 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_falls_back_to_session_when_nothing_set() {
+        let (_home, _ds_home) = ds_test_support::isolated_ds_home();
         let _unset = EnvGuard::unset("DEEPSEEK_API_KEY");
         let _unset_legacy = EnvGuard::unset("DS_CODE_API_KEY");
         let endpoints = config::EndpointsConfig::default();
@@ -3452,6 +3453,7 @@ mod tests {
     #[test]
     #[serial]
     fn prefetch_env_resolves_when_remote_fetch_enabled() {
+        let (_home, _ds_home) = ds_test_support::isolated_ds_home();
         let _unset = EnvGuard::unset("DEEPSEEK_API_KEY");
         let _unset_legacy = EnvGuard::unset("DS_CODE_API_KEY");
         let endpoints = config::EndpointsConfig {

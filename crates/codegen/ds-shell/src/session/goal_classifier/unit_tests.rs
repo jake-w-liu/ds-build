@@ -4009,7 +4009,12 @@
         let wait_for = |target: usize| {
             let observed = observed.clone();
             async move {
-                for _ in 0..10_000 {
+                // Wall-clock deadline (not a fixed yield count): under a loaded
+                // test runner the 3 skeptics may need real time to be scheduled,
+                // so a bare `yield_now` loop flakes by exhausting early.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
                     if observed
                         .spawn_count
                         .load(std::sync::atomic::Ordering::SeqCst)
@@ -4017,9 +4022,11 @@
                     {
                         return;
                     }
-                    tokio::task::yield_now().await;
+                    if std::time::Instant::now() >= deadline {
+                        panic!("timed out waiting for spawn_count == {target}");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
                 }
-                panic!("timed out waiting for spawn_count == {target}");
             }
         };
         let watcher = async {

@@ -48,6 +48,18 @@ impl Drop for EnvGuard {
     }
 }
 
+/// Isolate the ds home directory into a fresh temp dir so config readers
+/// (`ds_home()`, `config.toml`, `auth.json`) never leak the real `~/.ds`.
+///
+/// Returns the temp dir (held alive for the caller's scope, so `DS_HOME`
+/// always points at a live directory) and an `EnvGuard` that sets `DS_HOME`
+/// and restores it on drop. Callers must be `#[serial_test::serial]`.
+pub fn isolated_ds_home() -> (TempDir, EnvGuard) {
+    let dir = TempDir::new().expect("create temp ds home");
+    let guard = EnvGuard::set("DS_HOME", dir.path().to_str().expect("temp path is UTF-8"));
+    (dir, guard)
+}
+
 fn workspace_root() -> PathBuf {
     // nth(3): crate is nested three levels below the cargo workspace root.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

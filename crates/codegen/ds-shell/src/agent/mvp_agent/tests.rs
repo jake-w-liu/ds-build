@@ -2423,6 +2423,7 @@ async fn cached_token_fallthrough_falls_to_ds_com_without_credentials() {
         DS_COM_METHOD_ID, LEGACY_DEEPSEEK_API_KEY_ENV_VAR, DEEPSEEK_API_KEY_ENV_VAR,
     };
     use ds_test_support::EnvGuard;
+    let (_home, _ds_home) = ds_test_support::isolated_ds_home();
     let _lockdown = EnvGuard::unset("DS_DISABLE_API_KEY_AUTH");
     let _new = EnvGuard::unset(DEEPSEEK_API_KEY_ENV_VAR);
     let _legacy = EnvGuard::unset(LEGACY_DEEPSEEK_API_KEY_ENV_VAR);

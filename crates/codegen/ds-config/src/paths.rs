@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-static DS_HOME: OnceLock<PathBuf> = OnceLock::new();
+static DEFAULT_DS_HOME: OnceLock<PathBuf> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str =
@@ -32,16 +32,23 @@ pub fn default_ds_home() -> PathBuf {
 }
 
 /// Per-user config directory: `$DS_HOME` or `~/.ds`. Created if needed.
+///
+/// `DS_HOME` is re-read on every call so an explicit override takes effect
+/// immediately (required for in-process tests that redirect the home before
+/// exercising config readers). The default path is canonicalized and cached
+/// in [`DEFAULT_DS_HOME`] because `default_ds_home()` is the expensive branch
+/// (`dunce::canonicalize`).
 pub fn ds_home() -> PathBuf {
-    DS_HOME
+    if let Ok(v) = std::env::var("DS_HOME") {
+        let home = PathBuf::from(v);
+        let _ = std::fs::create_dir_all(&home);
+        return home;
+    }
+    DEFAULT_DS_HOME
         .get_or_init(|| {
-            let ds_home = if let Ok(v) = std::env::var("DS_HOME") {
-                PathBuf::from(v)
-            } else {
-                default_ds_home()
-            };
-            let _ = std::fs::create_dir_all(&ds_home);
-            ds_home
+            let home = default_ds_home();
+            let _ = std::fs::create_dir_all(&home);
+            home
         })
         .clone()
 }

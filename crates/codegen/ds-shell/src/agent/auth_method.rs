@@ -56,14 +56,17 @@ fn read_api_key_from_user_config() -> Option<String> {
     }
 
     // Also scan project `.ds/config.toml` and hard-fallback home paths not
-    // covered by `ds_home()` (e.g. divergent `user_ds_home`).
+    // covered by `ds_home()` (e.g. divergent `user_ds_home`). When `DS_HOME`
+    // is set explicitly it is authoritative, so the `$HOME/.ds` hard fallback
+    // must not leak a separate default-home config into the resolution.
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
     if let Some(home) = ds_config::user_ds_home() {
         roots.push(home.join("config.toml"));
     }
-    if let Some(home) = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(dirs::home_dir)
+    if std::env::var_os("DS_HOME").is_none()
+        && let Some(home) = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir)
     {
         roots.push(home.join(".ds").join("config.toml"));
     }
@@ -863,6 +866,7 @@ mod tests {
         // Make sure no global key is masking the per-model path we're trying
         // to exercise. Held until end-of-scope so we restore on panic too.
         let _global = EnvGuard::unset(DEEPSEEK_API_KEY_ENV_VAR);
+        let (_home, _ds_home) = ds_test_support::isolated_ds_home();
 
         let dm = crate::models::default_model();
         let toml: toml::Value = toml::from_str(&format!(

@@ -98,11 +98,10 @@ mod tests {
     use serial_test::serial;
     use ds_test_support::EnvGuard;
 
-    /// Isolate process-global auth sources that `AuthStatus::resolve` consults.
-    ///
-    /// Uses `DS_AUTH_PATH` (not `DS_HOME`) so a OnceLock-cached real home
-    /// with `auth.json` cannot leak into these tests.
-    fn isolate_auth_sources() -> (tempfile::TempDir, [EnvGuard; 7]) {
+    /// Isolate process-global auth sources that `AuthStatus::resolve` consults:
+    /// env keys, the auth file (`DS_AUTH_PATH`), and the config home
+    /// (`DS_HOME`) so a real `~/.ds` with credentials cannot leak in.
+    fn isolate_auth_sources() -> (tempfile::TempDir, [EnvGuard; 8]) {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("no-auth.json");
         let guards = [
@@ -110,6 +109,7 @@ mod tests {
             EnvGuard::unset(LEGACY_DEEPSEEK_API_KEY_ENV_VAR),
             EnvGuard::unset("DS_AUTH"),
             EnvGuard::set("DS_AUTH_PATH", auth_path.to_str().unwrap()),
+            EnvGuard::set("DS_HOME", dir.path().to_str().unwrap()),
             EnvGuard::unset("DS_DEPLOYMENT_KEY"),
             EnvGuard::unset("DS_WS_ORIGIN"),
             EnvGuard::unset("DS_DISABLE_API_KEY_AUTH"),

@@ -2529,6 +2529,7 @@ reasoning_effort = "low"
     #[test]
     #[serial]
     fn e2e_credential_priority_model_key_beats_session_beats_env() {
+        let (_home, _ds_home) = ds_test_support::isolated_ds_home();
         let model_with_key = test_model_entry(
             "test",
             "https://custom.api/v1",

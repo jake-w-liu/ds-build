@@ -336,10 +336,14 @@ pub fn read_token_by_scope(ds_home: &Path, scope: &str) -> anyhow::Result<String
     })
 }
 
-/// Read the API key from the `ds::api_key` scope in auth.json.
+/// Read the API key from the `ds::api_key` scope in `$DS_HOME/auth.json`.
 pub fn read_api_key(ds_home: &Path) -> Option<String> {
-    let path = ds_home.join("auth.json");
-    let map = read_auth_json(&path).ok()?;
+    read_api_key_from_file(&ds_home.join("auth.json"))
+}
+
+/// Read the API key from the `ds::api_key` scope in a specific auth.json path.
+pub fn read_api_key_from_file(path: &Path) -> Option<String> {
+    let map = read_auth_json(path).ok()?;
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
 }
 
