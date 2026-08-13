@@ -1677,6 +1677,16 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
     }
 }
 
+/// Normalize tool-result text for the chat-completions wire.
+///
+/// DeepSeek (and OpenAI-compatible gateways) reject a `role: "tool"` message
+/// whose `content` is empty. Tool runs that produce no stdout/result text
+/// still need some non-empty content, so use the same `(no output)` fallback
+/// the official harness serializes.
+fn tool_result_content(content: &str) -> &str {
+    if content.is_empty() { "(no output)" } else { content }
+}
+
 /// Convert a single non-`Reasoning` [`ConversationItem`] into the
 /// chat-completions wire format.
 ///
@@ -1767,11 +1777,15 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
             }
         }
         ConversationItem::ToolResult(t) => {
+            // DeepSeek chat-completions requires role "tool" content to carry
+            // text; empty output is rejected with a 400. Mirror the harness
+            // convention of `(no output)` rather than sending an empty string.
+            let content = tool_result_content(&t.content);
             if t.images.is_empty() {
-                ChatRequestMessage::tool(t.tool_call_id, t.content.as_ref().to_owned())
+                ChatRequestMessage::tool(t.tool_call_id, content.to_owned())
             } else {
                 let mut blocks = vec![ChatContentBlock::Text {
-                    text: t.content.as_ref().to_owned(),
+                    text: content.to_owned(),
                 }];
                 for img in t.images {
                     if let ContentPart::Image { url } = img {
@@ -3742,6 +3756,16 @@ mod tests {
         let tool_result = ConversationItem::tool_result("call_123", "Result data");
         let chat_msg = conversation_item_to_chat_message(tool_result);
         assert_eq!(chat_msg.tool_call_id, Some("call_123".to_string()));
+    }
+
+    #[test]
+    fn empty_tool_result_content_uses_no_output_fallback() {
+        let tr = ConversationItem::tool_result("call_1", "");
+        let msg = conversation_item_to_chat_message(tr);
+        let MessageContent::Text(text) = msg.content else {
+            panic!("expected text tool-result content");
+        };
+        assert_eq!(text, "(no output)");
     }
 
     #[test]

@@ -68,6 +68,10 @@ rebuild dual install). Never blind-merge `xai-org/grok-build`.
 | Subagents | **enabled** by default |
 | Reasoning effort | max / high by default on DeepSeek models |
 
+> **DeepSeek reasoning runs at maximum effort by default.** DS Build ships
+> with `reasoning_effort = "max"` so answers get the deepest thinking available.
+> Prefer a lower effort? Switch it with `/model` or set it in `~/.ds/config.toml`.
+
 ---
 
 ## Quick start
