@@ -392,6 +392,7 @@ fn neutralize_directive_slot(text: &str) -> std::borrow::Cow<'_, str> {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_goal_continuation_directive(
     objective: &str,
+    status: &str,
     tokens: u64,
     elapsed: &str,
     bail_preface: &str,
@@ -418,6 +419,10 @@ pub(super) fn render_goal_continuation_directive(
     let next_step = neutralize_directive_slot(next_step);
     GOAL_CONTINUATION_DIRECTIVE_TEMPLATE
         .replace("{objective}", objective)
+        // Render the truthful status rather than a hardcoded "Active": the
+        // directive is only delivered on the Active path today, but a future
+        // path that reaches it while paused must not lie to the model.
+        .replace("{status}", status)
         .replace("{tokens}", &tokens.to_string())
         .replace("{elapsed}", elapsed)
         .replace("{bail_preface}", &bail_preface)
@@ -439,6 +444,26 @@ pub(super) fn render_goal_continuation_directive(
             },
         )
         .replace("{strategist_note}", &strategist_note)
+}
+
+/// Compact human label for the injected `<goal-state>` header.
+///
+/// The reminder/directive paths are gated on `Active` today, so the label is
+/// `Active` in practice; every other status is still given a truthful label so
+/// a future path that renders the header while paused/blocked cannot claim
+/// `Active` and send the model to work on a goal it cannot complete.
+pub(crate) fn goal_status_label(status: crate::session::goal_tracker::GoalStatus) -> &'static str {
+    use crate::session::goal_tracker::GoalStatus;
+    match status {
+        GoalStatus::Active => "Active",
+        GoalStatus::UserPaused => "Paused (user)",
+        GoalStatus::BackOffPaused => "Paused (back-off)",
+        GoalStatus::NoProgressPaused => "Paused (no progress)",
+        GoalStatus::InfraPaused => "Paused (infrastructure)",
+        GoalStatus::Blocked => "Blocked",
+        GoalStatus::BudgetLimited => "Budget-limited",
+        GoalStatus::Complete => "Complete",
+    }
 }
 
 /// Render the `{reverify_block}` slot. Empty unless the goal has been

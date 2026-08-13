@@ -1705,6 +1705,20 @@ impl SessionActor {
         // (failure pauses the goal).
         self.maybe_run_goal_planner(objective).await;
 
+        // A fail-closed planner pauses the goal (UserPaused). Do NOT flow
+        // through to inference against a paused goal with a "Start now"
+        // directive — the model would work the goal only to have its final
+        // `update_goal(completed: true)` rejected as non-Active. Surface the
+        // canonical pause message and end setup instead.
+        if self.goal_tracker.lock().status()
+            != Some(crate::session::goal_tracker::GoalStatus::Active)
+        {
+            return format!(
+                "<system-reminder>\n{}\n</system-reminder>\n\n",
+                planner_failure_pause_message()
+            );
+        }
+
         let names = self.resolve_goal_tool_names().await;
         // Hold the lock across the render so the plan path is borrowed
         // from the snapshot without cloning.
@@ -1899,8 +1913,9 @@ impl SessionActor {
             tracker.account_elapsed();
             tracker.snapshot().map(|o| {
                 let elapsed = crate::session::goal_orchestrator::format_elapsed(o.elapsed_ms);
+                let status = goal_status_label(o.status);
                 let goal_state = format!(
-                    "<goal-state>\nStatus: Active\nTokens: {tokens} | Elapsed: \
+                    "<goal-state>\nStatus: {status}\nTokens: {tokens} | Elapsed: \
                      {elapsed}\n</goal-state>\n\n",
                     tokens = tokens_used,
                 );
@@ -2100,6 +2115,7 @@ impl SessionActor {
         let planner_enabled = self.goal_planner_enabled;
         let (
             objective,
+            status,
             elapsed,
             plan_pointer,
             verifier_gaps,
@@ -2114,6 +2130,8 @@ impl SessionActor {
             let mut tracker = self.goal_tracker.lock();
             tracker.account_elapsed();
             let o = tracker.snapshot_mut()?;
+            // Render the truthful status label for the directive header.
+            let status = goal_status_label(o.status);
             // Count this worker round for the re-verify escalation.
             o.rounds_since_verify = o.rounds_since_verify.saturating_add(1);
             let rounds_since_verify = o.rounds_since_verify;
@@ -2154,6 +2172,7 @@ impl SessionActor {
                 .unwrap_or_default();
             (
                 o.objective.clone(),
+                status,
                 elapsed,
                 plan_pointer,
                 verifier_gaps,
@@ -2183,6 +2202,7 @@ impl SessionActor {
         );
         let directive = render_goal_continuation_directive(
             &objective,
+            status,
             tokens,
             &elapsed,
             bail_preface,

@@ -92,30 +92,36 @@ impl ModelState {
     /// Whether the current model accepts image input, read from the model's
     /// `meta` (the ACP extension point — same source as `totalContextTokens`).
     ///
-    /// Honors an explicit `acceptsImages` bool, else an `inputModalities` array
-    /// containing `"image"`. DEFAULTS TO `true` when neither key is present:
-    /// correct today (all current DS models accept images, so nothing is
-    /// suppressed) and forward-compatible (suppresses non-vision models once the
-    /// ACP server populates the key). Populating that key server-side is a
-    /// separate change.
+    /// Resolution order:
+    /// 1. Explicit `acceptsImages` bool in `meta`.
+    /// 2. Explicit `inputModalities` array containing `"image"`.
+    /// 3. Model-family fallback: known text-only families (DeepSeek chat
+    ///    models) default to `false`; every other unknown model defaults to
+    ///    `true` so a future vision model works before the ACP server
+    ///    populates the key. No selected model defaults to `true` (permissive),
+    ///    preserving the legacy behavior for an empty session.
+    ///
+    /// The family fallback keeps DeepSeek suppressed even before the server
+    /// populates `acceptsImages`/`inputModalities`; the explicit keys remain
+    /// the switch to flip any model on or off later.
     pub fn current_model_accepts_images(&self) -> bool {
-        let Some(meta) = self
-            .current
-            .as_ref()
-            .and_then(|id| self.available.get(id))
-            .and_then(|info| info.meta.as_ref())
-        else {
+        let Some(id) = self.current.as_ref() else {
             return true;
         };
-        if let Some(accepts) = meta.get("acceptsImages").and_then(|v| v.as_bool()) {
-            return accepts;
+        let Some(info) = self.available.get(id) else {
+            return model_family_accepts_images(&id.0, "");
+        };
+        if let Some(meta) = info.meta.as_ref() {
+            if let Some(accepts) = meta.get("acceptsImages").and_then(|v| v.as_bool()) {
+                return accepts;
+            }
+            if let Some(modalities) = meta.get("inputModalities").and_then(|v| v.as_array()) {
+                return modalities
+                    .iter()
+                    .any(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case("image")));
+            }
         }
-        if let Some(modalities) = meta.get("inputModalities").and_then(|v| v.as_array()) {
-            return modalities
-                .iter()
-                .any(|m| m.as_str().is_some_and(|s| s.eq_ignore_ascii_case("image")));
-        }
-        true
+        model_family_accepts_images(&id.0, &info.name)
     }
 
     /// Get the effective context window size (tokens).
@@ -303,6 +309,20 @@ impl ModelState {
             Some(self.available.first()?.0.clone())
         }
     }
+}
+
+/// Model-family vision fallback used when a model's `meta` carries no
+/// explicit `acceptsImages` / `inputModalities` key.
+///
+/// DeepSeek chat models only deserialize `type: "text"` content parts and
+/// reject native `image_url` blocks with a hard 400, so they are treated as
+/// text-only by default. Unknown families default to `true` so a future
+/// vision model is not suppressed before the ACP server populates the key.
+fn model_family_accepts_images(model_id: &str, model_name: &str) -> bool {
+    let is_text_only = [model_id, model_name]
+        .iter()
+        .any(|s| s.to_ascii_lowercase().contains("deepseek"));
+    !is_text_only
 }
 
 impl From<Option<acp::SessionModelState>> for ModelState {
@@ -646,5 +666,45 @@ mod tests {
             !state_with_meta(Some(serde_json::json!({ "inputModalities": ["text"] })))
                 .current_model_accepts_images()
         );
+    }
+
+    #[test]
+    fn accepts_images_defaults_false_for_deepseek_without_meta() {
+        // DeepSeek chat models are text-only: with no explicit vision key in
+        // `meta`, the family fallback must suppress them (id or display name),
+        // while an unknown family stays permissive for future vision models.
+        let deepseek_id = acp::ModelId::new(Arc::from("deepseek-v4-pro"));
+        let mut by_id = ModelState::default();
+        by_id.available.insert(
+            deepseek_id.clone(),
+            acp::ModelInfo::new(deepseek_id.clone(), "DeepSeek V4 Pro".to_string()),
+        );
+        by_id.current = Some(deepseek_id);
+        assert!(
+            !by_id.current_model_accepts_images(),
+            "deepseek id must default to no vision"
+        );
+
+        let deepseek_name = acp::ModelId::new(Arc::from("custom-router"));
+        let mut by_name = ModelState::default();
+        by_name.available.insert(
+            deepseek_name.clone(),
+            acp::ModelInfo::new(deepseek_name.clone(), "DeepSeek (enterprise)".to_string()),
+        );
+        by_name.current = Some(deepseek_name);
+        assert!(
+            !by_name.current_model_accepts_images(),
+            "deepseek display name must default to no vision"
+        );
+
+        // Unknown family with no meta stays permissive.
+        let unknown = acp::ModelId::new(Arc::from("gpt-4o"));
+        let mut other = ModelState::default();
+        other.available.insert(
+            unknown.clone(),
+            acp::ModelInfo::new(unknown.clone(), "GPT-4o".to_string()),
+        );
+        other.current = Some(unknown);
+        assert!(other.current_model_accepts_images());
     }
 }

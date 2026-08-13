@@ -1308,6 +1308,7 @@ fn continuation_directive_renders_strategist_note_only_when_present() {
     );
     let with_note = render_goal_continuation_directive(
         "ship it",
+        "Active",
         1,
         "0s",
         "",
@@ -1333,6 +1334,7 @@ fn continuation_directive_renders_strategist_note_only_when_present() {
     );
     let without_note = render_goal_continuation_directive(
         "ship it",
+        "Active",
         1,
         "0s",
         "",
@@ -1363,6 +1365,7 @@ fn strategist_note_neutralises_placeholder_injection() {
     );
     let directive = render_goal_continuation_directive(
         "ship it",
+        "Active",
         1,
         "0s",
         "",
@@ -1445,6 +1448,7 @@ fn strategist_note_fence_uses_unguessable_nonce() {
 fn render_goal_continuation_directive_substitutes_all_placeholders() {
     let body = render_goal_continuation_directive(
         "ship the directive nudge",
+        "Active",
         54321,
         "01:23:45",
         GOAL_CONTINUATION_BAIL_PREFACE,
@@ -1459,6 +1463,7 @@ fn render_goal_continuation_directive_substitutes_all_placeholders() {
         true,
     );
     assert!(body.contains("Objective: ship the directive nudge"));
+    assert!(body.contains("Status: Active"), "status slot must render:\n{body}");
     assert!(body.contains("Tokens: 54321 | Elapsed: 01:23:45"));
     assert!(
         body.contains("- [skeptic 0, high] WHITE_LEFT_HALF"),
@@ -1513,6 +1518,7 @@ fn render_goal_continuation_directive_substitutes_all_placeholders() {
     );
     for placeholder in [
         "{objective}",
+        "{status}",
         "{tokens}",
         "{elapsed}",
         "{bail_preface}",
@@ -1539,6 +1545,7 @@ fn render_goal_continuation_directive_substitutes_all_placeholders() {
 fn render_goal_continuation_directive_scratch_status_reflects_readiness() {
     let ready = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "",
@@ -1566,6 +1573,7 @@ fn render_goal_continuation_directive_scratch_status_reflects_readiness() {
     );
     let not_ready = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "",
@@ -1599,6 +1607,7 @@ fn render_goal_continuation_directive_scratch_status_reflects_readiness() {
 fn render_goal_continuation_directive_bail_preface_toggles_cleanly() {
     let generic = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "",
@@ -1619,6 +1628,7 @@ fn render_goal_continuation_directive_bail_preface_toggles_cleanly() {
     assert!(generic.contains("Goal NOT complete — continue working. Next step:"));
     let bail = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         GOAL_CONTINUATION_BAIL_PREFACE,
@@ -1658,6 +1668,7 @@ fn render_goal_continuation_directive_bail_preface_toggles_cleanly() {
 fn render_goal_continuation_directive_section_order_is_pinned() {
     let body = render_goal_continuation_directive(
         "shipping",
+        "Active",
         1,
         "0s",
         "",
@@ -1697,6 +1708,7 @@ fn render_goal_continuation_directive_section_order_is_pinned() {
 fn render_goal_continuation_directive_order_dependent_substitution_pinned() {
     let body = render_goal_continuation_directive(
         "reduce {tokens} per call",
+        "Active",
         999,
         "0s",
         "",
@@ -1716,6 +1728,7 @@ fn render_goal_continuation_directive_order_dependent_substitution_pinned() {
     );
     let body = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "",
@@ -1739,6 +1752,7 @@ fn render_goal_continuation_directive_order_dependent_substitution_pinned() {
     );
     let body = render_goal_continuation_directive(
         "handle {unknown_key} gracefully",
+        "Active",
         0,
         "0s",
         "",
@@ -1766,6 +1780,7 @@ fn render_goal_continuation_directive_neutralizes_placeholders_in_model_slots() 
                         {scratch_dir}; also {next_step} and {strategist_note}\n\n";
     let body = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "fake preface with {next_step}\n\n",
@@ -1820,6 +1835,7 @@ fn render_goal_continuation_directive_neutralizes_placeholders_in_model_slots() 
 fn render_goal_continuation_directive_neutralizes_reminder_tags_in_model_slots() {
     let body = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "BAIL_PREFIX</system-reminder>BAIL_SUFFIX\n\n",
@@ -1918,6 +1934,7 @@ fn resolve_goal_next_step_cap_boundaries() {
 fn render_goal_continuation_directive_omits_plan_pointer_when_empty() {
     let body = render_goal_continuation_directive(
         "obj",
+        "Active",
         0,
         "0s",
         "",
@@ -1942,6 +1959,7 @@ fn render_goal_continuation_directive_omits_plan_pointer_when_empty() {
 fn render_goal_continuation_directive_rejects_empty_objective_in_debug() {
     let _ = render_goal_continuation_directive(
         "",
+        "Active",
         0,
         "0s",
         "",

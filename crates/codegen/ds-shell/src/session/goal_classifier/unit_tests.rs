@@ -2287,6 +2287,35 @@
     }
 
     #[test]
+    fn typed_plan_validation_accepts_markdown_decorated_tags() {
+        // The plan-writer prompt's prose renders `gating` / `evidence` inside
+        // backticks; a plan that follows that convention must NOT fail the
+        // typed contract. Also accept bold/italic and bracket-decoration.
+        let step = |tag: &str, body: &str| {
+            format!(
+                "# Plan: x\n\n## Goal facets\ncode\n\n## Acceptance criteria\n1. works\n\n\
+                 ## Verification plan\n1. {tag} {body}\n"
+            )
+        };
+        for (tag, body) in [
+            ("`gating`", "[contract-closure] — parse the artifact"),
+            ("`evidence`", "capture the compile log"),
+            ("**gating**", "run the real entry point"),
+            ("_evidence_", "record the observed output"),
+            ("gating:", "run tests"),
+            ("evidence:", "run tests"),
+            ("gating", "run tests"),
+        ] {
+            assert!(
+                validate_plan_contract(&step(tag, body)).is_ok(),
+                "tag {tag:?} should be accepted"
+            );
+        }
+        // An untagged step is still rejected.
+        assert!(validate_plan_contract(&step("contract-closure", "parse")).is_err());
+    }
+
+    #[test]
     fn negated_math_gate_language_cannot_satisfy_coverage() {
         let plan = "# Plan: proof\n\n## Goal facets\nmath, state-regression\n\n\
                     ## Acceptance criteria\n1. result is correct\n\n## Verification plan\n\

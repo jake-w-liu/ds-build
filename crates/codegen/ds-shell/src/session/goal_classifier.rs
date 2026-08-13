@@ -2331,17 +2331,25 @@ pub(crate) fn validate_plan_contract(plan: &str) -> Result<(), &'static str> {
             });
         }
         if section == "## Verification plan"
-            && items.iter().any(|item| {
-                !item.starts_with("gating:")
-                    && !item.starts_with("gating ")
-                    && !item.starts_with("evidence:")
-                    && !item.starts_with("evidence ")
-            })
+            && items.iter().any(|item| !has_verification_step_tag(item))
         {
             return Err("every verification step must be tagged `gating` or `evidence`");
         }
     }
     Ok(())
+}
+
+/// True when a `## Verification plan` item carries a typed `gating` or
+/// `evidence` tag as its leading token. Tolerates Markdown decoration around
+/// the tag word (backticks, bold/italic `*`/`_`), matching the plan-writer
+/// prompt's `` `gating` `` / `` `evidence` `` prose, so a plan that quotes the
+/// tag is not rejected on decoration alone. The tag must be the item's first
+/// whitespace-delimited token, consistent with the "tag each step" contract.
+fn has_verification_step_tag(item: &str) -> bool {
+    item.split_whitespace().next().is_some_and(|token| {
+        let tag = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
+        tag == "gating" || tag == "evidence"
+    })
 }
 
 /// Extract normalized numbered/bulleted items from `## Verification plan`.

@@ -1,7 +1,7 @@
 <system-reminder>
 <goal-state>
 Objective: {objective}
-Status: Active
+Status: {status}
 Tokens: {tokens} | Elapsed: {elapsed}
 </goal-state>
 
