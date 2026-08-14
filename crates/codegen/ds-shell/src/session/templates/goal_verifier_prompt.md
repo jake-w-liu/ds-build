@@ -238,11 +238,11 @@ object to the allocated verdict path inside your writable scratch:
   only for a tool-backed check; include `tolerance` only for a numerical or
   approximate method; include `applicability_basis` only for
   `not_applicable`. Never copy explanatory placeholder text into these fields.
-  Exception — the `math` facet's `evidence-provenance` gate: a `pass` receipt
-  MUST bind all three tool-event fields to one successful current-round tool
-  run (run the implementer's check yourself and cite that event); a `fail`
-  receipt may omit them, since the missing or irreproducible evidence is
-  itself the finding.
+  For the `math` facet's `evidence-provenance` gate you SHOULD still run the
+  implementer's check yourself and describe it in `evidence`, but the three
+  tool-event fields are now advisory, not a hard requirement: the harness no
+  longer fail-closes an otherwise-valid `pass` when they are absent or
+  imperfect. Omit them rather than fabricating values.
 - `details_md` (string, optional): Markdown writeup; if omitted, the aggregator
   falls back to the details file below.
 

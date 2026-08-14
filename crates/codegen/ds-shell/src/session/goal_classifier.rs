@@ -1288,50 +1288,51 @@ fn validate_structured_verdict(
                         facet.as_str()
                     ));
                 }
-                match (
-                    check.tool_event_id.as_deref(),
-                    check.exact_input_digest.as_deref(),
-                    check.observed_output_digest.as_deref(),
-                ) {
-                    (None, None, None) => {
-                        // Only an APPROVAL of math evidence-provenance must
-                        // bind a live, successful tool event. A REFUTATION
-                        // (`fail`) is itself the finding that the evidence is
-                        // missing / unreproducible, so it cannot be required to
-                        // produce the very tool event the implementer failed to
-                        // capture — requiring it turned every legitimate
-                        // evidence-provenance refutation into a spurious
-                        // "infrastructure failure" (fail-closed pause).
-                        if status == "pass"
-                            && facet == VerificationFacet::Math
-                            && gate == "evidence-provenance"
-                        {
-                            return Err(
-                                "math evidence-provenance requires a successful current-round tool event"
-                                    .to_string(),
-                            );
+                // Tool-event binding is advisory, never a hard gate, for the
+                // math `evidence-provenance` approval. The receipt already
+                // binds to a real artifact revision (`entry_matches`) and an
+                // exact substring present in that artifact
+                // (`artifact_contains_target`) above, so fabrication is still
+                // blocked mechanically. Requiring the verifier to additionally
+                // transcribe an opaque marker (a UUID + two digests) from its
+                // shell output was both (a) unreliable for an LLM and (b)
+                // unbacked in the current runtime — the verifier shell runs
+                // through the `TerminalBackend`, not the `AsyncTerminalRunner`
+                // that records the trace — so every valid approval fail-closed
+                // on a missing or fabricated binding. Other gates keep the
+                // strict binding check (they do not use tool-event fields in
+                // practice).
+                let math_evidence_approval = status == "pass"
+                    && facet == VerificationFacet::Math
+                    && gate == "evidence-provenance";
+                if !math_evidence_approval {
+                    match (
+                        check.tool_event_id.as_deref(),
+                        check.exact_input_digest.as_deref(),
+                        check.observed_output_digest.as_deref(),
+                    ) {
+                        (None, None, None) => {}
+                        (Some(event), Some(input), Some(output)) => {
+                            if !super::verifier_runtime::trace_contains(
+                                trace,
+                                event,
+                                input,
+                                output,
+                                &check.artifact_path,
+                                &check.target,
+                            ) {
+                                return Err(format!(
+                                    "receipt {}/{gate} cites a missing, failed, or stale tool event",
+                                    facet.as_str()
+                                ));
+                            }
                         }
-                    }
-                    (Some(event), Some(input), Some(output)) => {
-                        if !super::verifier_runtime::trace_contains(
-                            trace,
-                            event,
-                            input,
-                            output,
-                            &check.artifact_path,
-                            &check.target,
-                        ) {
+                        _ => {
                             return Err(format!(
-                                "receipt {}/{gate} cites a missing, failed, or stale tool event",
+                                "receipt {}/{gate} has a partial tool-event binding",
                                 facet.as_str()
                             ));
                         }
-                    }
-                    _ => {
-                        return Err(format!(
-                            "receipt {}/{gate} has a partial tool-event binding",
-                            facet.as_str()
-                        ));
                     }
                 }
                 let method = check.method.to_ascii_lowercase();
