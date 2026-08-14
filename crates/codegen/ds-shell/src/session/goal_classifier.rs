@@ -1294,7 +1294,18 @@ fn validate_structured_verdict(
                     check.observed_output_digest.as_deref(),
                 ) {
                     (None, None, None) => {
-                        if facet == VerificationFacet::Math && gate == "evidence-provenance" {
+                        // Only an APPROVAL of math evidence-provenance must
+                        // bind a live, successful tool event. A REFUTATION
+                        // (`fail`) is itself the finding that the evidence is
+                        // missing / unreproducible, so it cannot be required to
+                        // produce the very tool event the implementer failed to
+                        // capture — requiring it turned every legitimate
+                        // evidence-provenance refutation into a spurious
+                        // "infrastructure failure" (fail-closed pause).
+                        if status == "pass"
+                            && facet == VerificationFacet::Math
+                            && gate == "evidence-provenance"
+                        {
                             return Err(
                                 "math evidence-provenance requires a successful current-round tool event"
                                     .to_string(),

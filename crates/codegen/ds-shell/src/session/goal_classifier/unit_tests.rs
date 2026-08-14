@@ -1428,6 +1428,95 @@
         );
     }
 
+    #[test]
+    fn math_evidence_provenance_refutation_needs_no_tool_event() {
+        // A `fail` receipt on math evidence-provenance is the finding itself
+        // (e.g. "the implementer never captured the numerical output"), so it
+        // must NOT be forced to bind a live tool event — that turned every
+        // legitimate evidence-provenance refutation into an infra failure.
+        let (dir, manifest, identity, facets, mut verdict) =
+            receipt_fixture(&[VerificationFacet::Math, VerificationFacet::StateRegression]);
+        let artifact_sha = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "answer.txt")
+            .and_then(|entry| entry.sha256.clone())
+            .unwrap();
+        let check = verdict
+            .checks
+            .iter_mut()
+            .find(|check| check.gate == "evidence-provenance")
+            .unwrap();
+        check.status = "fail".to_string();
+        check.target = "x + y = z".to_string();
+        check.artifact_path = "answer.txt".to_string();
+        check.artifact_sha256 = artifact_sha.clone();
+        check.applicability_basis = None;
+        check.method = "inspection".to_string();
+        check.tool_event_id = None;
+        check.exact_input_digest = None;
+        check.observed_output_digest = None;
+        verdict.refuted = true;
+        verdict.findings.push(Finding {
+            kind: "gap".to_string(),
+            location: "answer.txt:1".to_string(),
+            detail: "captured numerical run output is missing".to_string(),
+        });
+
+        assert!(
+            validate_structured_verdict(
+                &verdict,
+                &identity,
+                &facets,
+                dir.path(),
+                &manifest,
+                &[],
+            )
+            .is_ok(),
+            "a refutation of evidence-provenance must not require a live tool event"
+        );
+    }
+
+    #[test]
+    fn math_evidence_provenance_approval_still_requires_tool_event() {
+        let (dir, manifest, identity, facets, mut verdict) =
+            receipt_fixture(&[VerificationFacet::Math, VerificationFacet::StateRegression]);
+        let artifact_sha = manifest
+            .entries
+            .iter()
+            .find(|entry| entry.path == "answer.txt")
+            .and_then(|entry| entry.sha256.clone())
+            .unwrap();
+        let check = verdict
+            .checks
+            .iter_mut()
+            .find(|check| check.gate == "evidence-provenance")
+            .unwrap();
+        check.status = "pass".to_string();
+        check.target = "x + y = z".to_string();
+        check.artifact_path = "answer.txt".to_string();
+        check.artifact_sha256 = artifact_sha;
+        check.applicability_basis = None;
+        check.method = "inspection".to_string();
+        check.tool_event_id = None;
+        check.exact_input_digest = None;
+        check.observed_output_digest = None;
+
+        let error = validate_structured_verdict(
+            &verdict,
+            &identity,
+            &facets,
+            dir.path(),
+            &manifest,
+            &[],
+        )
+        .expect_err("an approval of evidence-provenance must bind a live tool event");
+        assert!(
+            error.contains("evidence-provenance requires a successful"),
+            "unexpected rejection reason: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn read_skeptic_verdict_requires_structured_current_round_approval() {
         let (dir, manifest, identity, facets, verdict) = receipt_fixture(&[
