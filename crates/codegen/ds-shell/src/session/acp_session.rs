@@ -834,9 +834,11 @@ pub(crate) struct SessionActor {
     /// instant rollback even for an already-frozen goal.
     pub(crate) goal_use_current_model_only: bool,
     /// Fail-closed verification (`DS_GOAL_FAIL_CLOSED_VERIFICATION` /
-    /// `[goal] fail_closed_verification`) resolved at actor build. When
-    /// `true`, an infra-class verification failure pauses the goal instead
-    /// of recording `Achieved`.
+    /// `[goal] fail_closed_verification`) resolved at actor build. Retained
+    /// for config-compat only: infra-class verification failures now retry
+    /// (a `NotAchieved` nudge) rather than pausing, so this flag is no longer
+    /// consulted at the apply site.
+    #[allow(dead_code)]
     pub(crate) goal_fail_closed_verification: bool,
     /// Per-pattern stop-detector precision accounting (pure in-memory).
     /// Fires are recorded on premature-stop detection; outcomes are

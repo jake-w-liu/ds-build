@@ -576,8 +576,8 @@ async fn summarizer_does_not_fire_on_fail_open_achieved() {
 
             assert_eq!(
                 actor.goal_tracker.lock().status(),
-                Some(crate::session::goal_tracker::GoalStatus::Blocked),
-                "verification infrastructure failure pauses without approval",
+                Some(crate::session::goal_tracker::GoalStatus::Active),
+                "verification infrastructure failure retries without approval",
             );
             assert!(
                 count_event(&tmp, "goal_classifier_fail_open") >= 1,

@@ -658,6 +658,39 @@ impl SessionActor {
 
         let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
         let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
+        // Verification infrastructure failures (skeptic crash / timeout /
+        // malformed verdict, or a stage-level file-write / snapshot-integrity
+        // hiccup) are RETRYABLE, not permanent pauses: normalize them into a
+        // NotAchieved nudge so a transient verifier failure re-runs
+        // verification instead of blocking the goal. Approval stays impossible
+        // (a nudge never completes), and the stall guard + run cap bound a
+        // persistently broken verifier. The infra-fallback telemetry event is
+        // emitted upstream by the verification stage; record the InfraFallback
+        // decision here so the decisions log still surfaces it.
+        let outcome = match outcome {
+            GoalClassifierOutcome::FailOpenAchieved { reason, details_path } => {
+                let label = reason.as_const_str();
+                {
+                    let mut tracker = self.goal_tracker.lock();
+                    let round = tracker
+                        .snapshot()
+                        .map(|o| o.total_verify_rounds)
+                        .unwrap_or(0);
+                    tracker.record_decision(
+                        crate::session::goal_tracker::GoalDecisionKind::InfraFallback,
+                        label.to_string(),
+                        Some(round),
+                    );
+                }
+                GoalClassifierOutcome::NotAchieved {
+                    details_path,
+                    gaps_summary: format!("verification infrastructure failure: {label}"),
+                    pause_summary: format!("verification infrastructure failure: {label}"),
+                    gap_fingerprint: format!("infra:{label}"),
+                }
+            }
+            other => other,
+        };
         match outcome {
             GoalClassifierOutcome::Achieved { details_path } => {
                 self.prune_subagent_records_for_active_goal();
@@ -809,55 +842,8 @@ impl SessionActor {
                     .await;
                 UpdateGoalAck::ClassifierBlocked { details_path }
             }
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason,
-                details_path,
-            } => {
-                // Surface the infra-class nature of this round regardless of
-                // policy: the panel badges "infra fallback" instead of
-                // presenting the outcome as a normal pass.
-                let mut tracker = self.goal_tracker.lock();
-                let round = tracker
-                    .snapshot()
-                    .map(|o| o.total_verify_rounds)
-                    .unwrap_or(0);
-                if let Some(o) = tracker.snapshot_mut() {
-                    o.last_classifier_infra_fallback = true;
-                }
-                tracker.record_decision(
-                    crate::session::goal_tracker::GoalDecisionKind::InfraFallback,
-                    reason.as_const_str().to_string(),
-                    Some(round),
-                );
-                drop(tracker);
-                // The old setting is retained only for config compatibility;
-                // infrastructure failure can no longer synthesize approval.
-                if !self.goal_fail_closed_verification {
-                    tracing::warn!(
-                        "deprecated fail-open verification setting ignored; verification is \
-                         always fail-closed"
-                    );
-                }
-                tracing::error!(
-                    ?reason,
-                    "goal verification infrastructure failed — pausing without approval",
-                );
-                self.prune_subagent_records_for_active_goal();
-                self.clear_pending_classifier_completions();
-                let msg = format_goal_pause_message(
-                    "Goal verification infrastructure failed and the goal was NOT marked \
-                     complete. Fix the verification environment and resume, or clear the goal.",
-                    reason.as_const_str(),
-                    &details_path,
-                );
-                self.auto_pause_goal_if_active_with_message(
-                    crate::session::goal_tracker::GoalPauseReason::Verification,
-                    msg,
-                )
-                .await;
-                UpdateGoalAck::ClassifierInfrastructureFailure {
-                    reason: reason.as_const_str(),
-                }
+            GoalClassifierOutcome::FailOpenAchieved { .. } => {
+                unreachable!("infrastructure failures are normalized to NotAchieved above")
             }
         }
     }

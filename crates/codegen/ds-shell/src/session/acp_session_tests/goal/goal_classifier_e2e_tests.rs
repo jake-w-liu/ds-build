@@ -1460,11 +1460,12 @@ async fn stall_pause_mid_panel_keeps_reserved_slot() {
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };
 }
-/// A completion deferred while the verification stage awaits must be
-/// dropped when an infrastructure failure pauses verification.
+/// A completion deferred while the verification stage awaits must be retained
+/// when an infrastructure failure is normalized to a retry (NotAchieved): the
+/// goal stays Active and the deferred completion drives the next attempt.
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn infrastructure_failure_drops_concurrently_deferred_completions() {
+async fn infrastructure_failure_retains_deferred_completions_for_retry() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1486,13 +1487,13 @@ async fn infrastructure_failure_drops_concurrently_deferred_completions() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Blocked,
-                "a missing coordinator must pause without approving the goal",
+                crate::session::goal_tracker::GoalStatus::Active,
+                "a missing coordinator must retry without approving the goal",
             );
             assert_eq!(
                 actor.pending_classifier_completions.lock().len(),
-                0,
-                "the infrastructure-failure pause must drop deferred completions",
+                1,
+                "the retry must retain the deferred completion for the next attempt",
             );
         })
         .await;
