@@ -3375,7 +3375,7 @@
         )
         .await;
 
-        let GoalClassifierOutcome::FailOpenAchieved { details_path, .. } = result.outcome else {
+        let GoalClassifierOutcome::NotAchieved { details_path, .. } = result.outcome else {
             panic!("math approval without five gate rows must not achieve");
         };
         let details = tokio::fs::read_to_string(&details_path).await.unwrap();
@@ -3597,13 +3597,7 @@
         )
         .await
         .outcome;
-        assert!(matches!(
-            outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
-        ));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
         let log = log.lock().unwrap();
         assert!(
             log.iter().any(|t| t == "skeptic:0:true:unknown"),
@@ -3627,13 +3621,7 @@
         )
         .await
         .outcome;
-        assert!(matches!(
-            outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
-        ));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
     }
 
     #[tokio::test]
@@ -3654,13 +3642,7 @@
         )
         .await
         .outcome;
-        assert!(matches!(
-            outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
-        ));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
         let log = log.lock().unwrap();
         assert!(log.iter().any(|t| t == "skeptic:0:true:unknown"));
         assert!(log.iter().any(|t| t == "skeptic:1:true:high"));
@@ -3685,13 +3667,7 @@
         )
         .await
         .outcome;
-        assert!(matches!(
-            outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
-        ));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
         let log = log.lock().unwrap();
         assert!(
             log.iter().any(|t| t == "skeptic:0:true:unknown"),
@@ -3716,7 +3692,7 @@
         )
         .await
         .outcome;
-        let GoalClassifierOutcome::FailOpenAchieved { details_path, .. } = outcome else {
+        let GoalClassifierOutcome::NotAchieved { details_path, .. } = outcome else {
             panic!("missing structured verdicts must fail as infrastructure");
         };
         let body = tokio::fs::read_to_string(&details_path).await.unwrap();
@@ -4071,13 +4047,7 @@
             3,
             "a skeptic-0 spawn failure must NOT short-circuit the panel",
         );
-        assert!(matches!(
-            outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
-        ));
+        assert!(matches!(outcome, GoalClassifierOutcome::NotAchieved { .. }));
     }
 
     #[tokio::test]
@@ -4276,10 +4246,7 @@
         .await;
         assert!(matches!(
             result.outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
+            GoalClassifierOutcome::NotAchieved { .. }
         ));
         let resume_froms = observed.resume_froms.lock().unwrap();
         assert_eq!(resume_froms.as_slice(), [None, None]);
@@ -4348,10 +4315,7 @@
         .await;
         assert!(matches!(
             result.outcome,
-            GoalClassifierOutcome::FailOpenAchieved {
-                reason: GoalClassifierFailOpenReason::SamplerError,
-                ..
-            }
+            GoalClassifierOutcome::NotAchieved { .. }
         ));
 
         let spawns = captured.lock().unwrap().clone();

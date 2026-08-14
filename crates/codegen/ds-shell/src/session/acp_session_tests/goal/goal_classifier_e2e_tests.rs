@@ -708,7 +708,7 @@ async fn harness_trace_drain_clears_buffer_even_with_uploads_disabled() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_subagent_cancelled_pauses_without_approval() {
+async fn goal_classifier_subagent_cancelled_retries_without_approval() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -720,10 +720,13 @@ async fn goal_classifier_subagent_cancelled_pauses_without_approval() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Blocked,
-                "cancellation is an infrastructure failure and must pause without approval",
+                crate::session::goal_tracker::GoalStatus::Active,
+                "cancellation is retryable — it must not pause, and must not approve",
             );
-            assert_eq!(snap.last_classifier_verdict, None);
+            assert_eq!(
+                snap.last_classifier_verdict,
+                Some(crate::session::goal_tracker::GoalClassifierVerdict::NotAchieved),
+            );
             assert_eq!(snap.classifier_runs_attempted, 1);
             assert_eq!(coord.spawn_count.load(SeqOrd::SeqCst), 1);
             drop(actor);
@@ -1617,7 +1620,7 @@ async fn achieved_verdict_drops_concurrently_deferred_completions() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_malformed_terminal_response_pauses_without_approval() {
+async fn goal_classifier_malformed_terminal_response_retries_without_approval() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1627,11 +1630,18 @@ async fn goal_classifier_malformed_terminal_response_pauses_without_approval() {
             seed_channel(&actor, vec![make_completed()]);
             actor.drain_goal_updates(0, DrainPurpose::TurnEnd).await;
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
-            assert_eq!(snap.last_classifier_verdict, None);
+            assert_eq!(
+                snap.last_classifier_verdict,
+                Some(crate::session::goal_tracker::GoalClassifierVerdict::NotAchieved),
+            );
             assert_eq!(snap.classifier_runs_attempted, 1);
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Blocked
+                crate::session::goal_tracker::GoalStatus::Active,
+            );
+            assert!(
+                snap.last_classifier_gaps.is_some(),
+                "a retryable infra failure must persist its fallback gaps",
             );
             {
                 let state = actor.state.lock().await;
@@ -1662,7 +1672,7 @@ async fn goal_classifier_malformed_terminal_response_pauses_without_approval() {
 }
 #[tokio::test(flavor = "current_thread")]
 #[serial]
-async fn goal_classifier_malformed_pauses_immediately_and_requires_resume() {
+async fn goal_classifier_malformed_repeated_stalls_without_progress() {
     unsafe { std::env::set_var(ENV_FLAG, "1") };
     let local = tokio::task::LocalSet::new();
     local
@@ -1680,10 +1690,10 @@ async fn goal_classifier_malformed_pauses_immediately_and_requires_resume() {
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 snap.status,
-                crate::session::goal_tracker::GoalStatus::Blocked,
+                crate::session::goal_tracker::GoalStatus::NoProgressPaused,
             );
-            assert_eq!(snap.classifier_runs_attempted, 1);
-            assert_eq!(coord.spawn_count.load(SeqOrd::SeqCst), 1);
+            assert_eq!(snap.classifier_runs_attempted, 2);
+            assert_eq!(coord.spawn_count.load(SeqOrd::SeqCst), 2);
         })
         .await;
     unsafe { std::env::remove_var(ENV_FLAG) };

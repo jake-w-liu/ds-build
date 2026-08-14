@@ -3804,21 +3804,21 @@ pub(crate) async fn run_verification_stage_with_backpressure(
         .into();
     }
 
+    // A skeptic-level infrastructure failure (spawn crash / timeout /
+    // transport error / malformed or missing verdict JSON) is RETRYABLE, not a
+    // permanent block: `achieved` is already false whenever any skeptic carries
+    // a `fallback_note`, so this routes through the ordinary `NotAchieved`
+    // nudge below instead of pausing. Approval stays impossible (never
+    // fail-open), and the stall guard plus the per-goal run cap bound a
+    // persistently broken verifier. Keep the telemetry event so the panel can
+    // still surface the infra-fallback nature of this round.
     if results.iter().any(|result| result.fallback_note.is_some()) {
-        let outcome = record_fail_open(
-            GoalClassifierFailOpenReason::SamplerError,
-            inputs.attempt,
-            started,
-            emit_event,
-            Some(&details_path),
-            details_raw,
-        )
-        .await;
-        return VerificationStageResult {
-            outcome,
-            skeptic0_session_id: None,
-            panel_ran: true,
-        };
+        let latency_ms = started.elapsed().as_millis() as u64;
+        emit_event(Event::GoalClassifierFailOpen {
+            reason: GoalClassifierFailOpenReason::SamplerError.as_const_str(),
+            attempt: inputs.attempt,
+            latency_ms,
+        });
     }
 
     let latency_ms = started.elapsed().as_millis() as u64;
