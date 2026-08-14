@@ -1401,9 +1401,9 @@
         );
 
         // A stale (failed) or surrogate (different command) binding is now
-        // advisory for the math evidence-provenance approval: it does NOT
-        // fail-close the verdict, because the artifact revision + artifact
-        // substring checks above already prevent fabrication.
+        // advisory for every receipt (not just math evidence-provenance): it
+        // does NOT fail-close the verdict, because the artifact revision +
+        // artifact substring checks above already prevent fabrication.
         let mut stale = event.clone();
         stale.success = false;
         assert!(
@@ -1429,6 +1429,29 @@
                 &[surrogate],
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn non_math_tool_evidence_binding_is_advisory_not_fatal() {
+        // The tool-event binding is advisory for EVERY gate, not just math
+        // evidence-provenance. A non-math receipt carrying a fabricated binding
+        // must not fail-close the verdict.
+        let (dir, manifest, identity, facets, mut verdict) =
+            receipt_fixture(&[VerificationFacet::Code]);
+        let check = verdict
+            .checks
+            .iter_mut()
+            .find(|check| check.gate == "code-correctness")
+            .unwrap();
+        check.tool_event_id = Some("fabricated-event".to_string());
+        check.exact_input_digest = Some("sha256:deadbeef".to_string());
+        check.observed_output_digest = Some("sha256:cafebabe".to_string());
+
+        assert!(
+            validate_structured_verdict(&verdict, &identity, &facets, dir.path(), &manifest, &[],)
+                .is_ok(),
+            "a fabricated tool-event binding on a non-math gate must be advisory"
         );
     }
 
