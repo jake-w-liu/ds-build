@@ -210,7 +210,7 @@ object to the allocated verdict path inside your writable scratch:
       "target": "exact non-empty text copied from the cited artifact",
       "evidence": "concrete claim-bound observation",
       "artifact_path": "manifest-relative path, or empty only for not_applicable",
-      "artifact_sha256": "exact manifest digest, or empty only for not_applicable",
+      "artifact_sha256": "exact manifest digest (bare 64-hex also accepted), or empty only for not_applicable",
       "method": "inspection|symbolic|numerical|test|other concrete method"
     }
   ],

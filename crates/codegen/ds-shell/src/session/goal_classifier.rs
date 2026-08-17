@@ -715,7 +715,13 @@ impl ChannelSpawner {
             .await
             .map_err(|_| SpawnError::Transport("subagent result channel dropped".to_string()))?;
         if !result.success {
-            let message = result.error.unwrap_or_else(|| "unknown error".to_string());
+            let message = super::helpers::subagent_failure::describe_subagent_failure(
+                result.cancelled,
+                result.error.as_deref(),
+                result.output.as_ref(),
+                &result.subagent_id,
+                "verification skeptic",
+            );
             return Err(SpawnError::Runtime {
                 message,
                 cancelled: result.cancelled,
@@ -1272,15 +1278,12 @@ fn validate_structured_verdict(
                 if status == "fail" {
                     failures += 1;
                 }
-                if !super::verification_snapshot::entry_matches(
+                if let Err(reason) = super::verification_snapshot::match_entry_diagnostic(
                     manifest,
                     &check.artifact_path,
                     &check.artifact_sha256,
                 ) {
-                    return Err(format!(
-                        "receipt {}/{gate} cites an unknown artifact revision",
-                        facet.as_str()
-                    ));
+                    return Err(format!("receipt {}/{gate} {reason}", facet.as_str()));
                 }
                 if !artifact_contains_target(reviewed_root, &check.artifact_path, &check.target)? {
                     return Err(format!(
@@ -1291,8 +1294,8 @@ fn validate_structured_verdict(
                 // The tool-event binding (tool_event_id + exact_input_digest +
                 // observed_output_digest) is advisory for EVERY receipt, never
                 // a hard gate. Fabrication is already blocked mechanically by
-                // the two checks above: `entry_matches` pins the manifest
-                // revision and `artifact_contains_target` pins an exact
+                // the two checks above: `match_entry_diagnostic` pins the
+                // manifest revision and `artifact_contains_target` pins an exact
                 // substring present in that artifact. The binding itself cannot
                 // be validated reliably: the verifier shell runs through the
                 // `TerminalBackend` while the evidence trace is recorded on the

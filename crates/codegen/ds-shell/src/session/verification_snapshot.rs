@@ -318,12 +318,103 @@ pub(crate) fn changed_paths(
         .collect())
 }
 
-pub(crate) fn entry_matches(manifest: &ArtifactManifest, path: &str, sha256: &str) -> bool {
-    manifest.entries.iter().any(|entry| {
-        entry.kind == ArtifactKind::File
-            && entry.path == path
-            && entry.sha256.as_deref() == Some(sha256)
-    })
+/// Normalize a receipt-cited sha256 to the canonical `sha256:<64 hex>` form.
+///
+/// Accepts the bare 64-hex form as well: skeptic models reliably strip the
+/// prefix when transcribing a manifest digest, and rejecting that with an
+/// opaque "unknown artifact revision" was a recurring harness friction.
+/// Anything else (wrong length, non-hex, other prefixes) is rejected.
+pub(crate) fn normalize_sha256(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let hex = trimmed
+        .strip_prefix("sha256:")
+        .or_else(|| trimmed.strip_prefix("SHA256:"))
+        .unwrap_or(trimmed);
+    if hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("sha256:{}", hex.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
+/// Validate a receipt's artifact citation against the manifest with a
+/// distinct, actionable reason for every failure mode an implementer can
+/// hit, instead of one opaque "unknown artifact revision" for all of them:
+///
+/// - the cited path is not part of the reviewed manifest at all (the usual
+///   cause: citing an absolute scratch-dir path or a file created after the
+///   round's manifest snapshot — both are invisible to the reviewer),
+/// - the path exists but is not a regular-file entry,
+/// - the cited digest is malformed, or
+/// - the digest is well-formed but does not match the manifest revision
+///   (stale file: the artifact changed after the snapshot).
+pub(crate) fn match_entry_diagnostic(
+    manifest: &ArtifactManifest,
+    path: &str,
+    sha256: &str,
+) -> Result<(), String> {
+    let entry = manifest.entries.iter().find(|entry| entry.path == path);
+    let Some(entry) = entry else {
+        return Err(format!(
+            "cites artifact `{path}` which is not part of the reviewed manifest{}",
+            manifest_hint(manifest, path)
+        ));
+    };
+    if entry.kind != ArtifactKind::File {
+        return Err(format!(
+            "cites artifact `{path}` which is not a regular file in the reviewed manifest"
+        ));
+    }
+    let Some(cited) = normalize_sha256(sha256) else {
+        return Err(format!(
+            "has a malformed artifact digest for `{path}` \
+             (expected `sha256:<64 hex>` or a bare 64-hex digest; got `{}`)",
+            ellipsize(sha256.trim(), 80)
+        ));
+    };
+    let recorded = entry.sha256.as_deref().unwrap_or_default();
+    if !recorded.eq_ignore_ascii_case(&cited) {
+        return Err(format!(
+            "cites a stale or unknown revision of `{path}` \
+             (cited {cited}, manifest records {recorded})"
+        ));
+    }
+    Ok(())
+}
+
+/// Suggest the manifest paths closest to a missing citation so the skeptic
+/// (and through it the implementer) can pick a real one next round.
+fn manifest_hint(manifest: &ArtifactManifest, path: &str) -> String {
+    const HINT_COUNT: usize = 3;
+    let mut scored: Vec<(&str, usize)> = manifest
+        .entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), shared_prefix_len(&entry.path, path)))
+        .collect();
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    let names: Vec<String> = scored
+        .iter()
+        .take(HINT_COUNT)
+        .map(|(candidate, _)| format!("`{candidate}`"))
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!("; nearest manifest paths: {}", names.join(", "))
+    }
+}
+
+fn shared_prefix_len(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+fn ellipsize(text: &str, max_chars: usize) -> String {
+    if text.chars().count() > max_chars {
+        let cut: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        text.to_string()
+    }
 }
 
 fn validate_manifest(manifest: &ArtifactManifest) -> Result<(), String> {
@@ -711,6 +802,96 @@ fn set_dir_read_only(_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_manifest() -> ArtifactManifest {
+        ArtifactManifest {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            scope_policy: "test".to_string(),
+            manifest_digest: "sha256:00".repeat(4),
+            entries: vec![
+                ArtifactEntry {
+                    path: "sheet.tex".to_string(),
+                    kind: ArtifactKind::File,
+                    sha256: Some(digest_bytes(b"sheet v1")),
+                    byte_len: 8,
+                    executable: false,
+                    symlink_target: None,
+                },
+                ArtifactEntry {
+                    path: "verification/run.out".to_string(),
+                    kind: ArtifactKind::File,
+                    sha256: Some(digest_bytes(b"run out")),
+                    byte_len: 7,
+                    executable: false,
+                    symlink_target: None,
+                },
+                ArtifactEntry {
+                    path: "notes.md".to_string(),
+                    kind: ArtifactKind::Missing,
+                    sha256: None,
+                    byte_len: 0,
+                    executable: false,
+                    symlink_target: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn normalize_sha256_accepts_both_digest_forms() {
+        let bare = "0f".repeat(32);
+        assert_eq!(
+            normalize_sha256(&bare).as_deref(),
+            Some(format!("sha256:{bare}").as_str())
+        );
+        assert_eq!(
+            normalize_sha256(&format!("sha256:{bare}")).as_deref(),
+            Some(format!("sha256:{bare}").as_str())
+        );
+        assert_eq!(
+            normalize_sha256(&format!("SHA256:{}", bare.to_ascii_uppercase())).as_deref(),
+            Some(format!("sha256:{bare}").as_str())
+        );
+        assert!(normalize_sha256("sha256:beef").is_none(), "short digest");
+        assert!(normalize_sha256("").is_none());
+        assert!(normalize_sha256(&("md5:".to_string() + &bare)).is_none());
+    }
+
+    #[test]
+    fn match_entry_diagnostic_distinguishes_failure_modes() {
+        let manifest = sample_manifest();
+        let recorded = digest_bytes(b"sheet v1");
+
+        // Unknown path → names the path and hints at real manifest entries.
+        let err = match_entry_diagnostic(&manifest, "/tmp/scratch/evidence.out", &recorded)
+            .unwrap_err();
+        assert!(err.contains("not part of the reviewed manifest"), "{err}");
+        assert!(err.contains("nearest manifest paths"), "{err}");
+        assert!(err.contains("`sheet.tex`"), "{err}");
+
+        // Non-file entry → distinct message.
+        let err = match_entry_diagnostic(&manifest, "notes.md", &recorded).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        // Malformed digest → shows the bad value, bounded.
+        let err = match_entry_diagnostic(&manifest, "sheet.tex", "not-a-digest").unwrap_err();
+        assert!(err.contains("malformed artifact digest"), "{err}");
+
+        // Well-formed but stale → shows cited vs recorded digests.
+        let stale = digest_bytes(b"sheet v2");
+        let err = match_entry_diagnostic(&manifest, "sheet.tex", &stale).unwrap_err();
+        assert!(err.contains("stale or unknown revision"), "{err}");
+        assert!(err.contains("manifest records"), "{err}");
+
+        // Matching revisions (both digest forms) pass.
+        assert!(match_entry_diagnostic(&manifest, "sheet.tex", &recorded).is_ok());
+        assert!(match_entry_diagnostic(
+            &manifest,
+            "sheet.tex",
+            recorded.trim_start_matches("sha256:")
+        )
+        .is_ok());
+    }
 
     #[test]
     fn manifest_captures_dirty_untracked_missing_and_spaces() {

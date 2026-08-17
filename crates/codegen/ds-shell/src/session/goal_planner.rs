@@ -373,7 +373,13 @@ impl ChannelSpawner {
             .await
             .map_err(|_| SpawnError::Transport("subagent result channel dropped".to_string()))?;
         if !result.success {
-            let message = result.error.unwrap_or_else(|| "unknown error".to_string());
+            let message = super::helpers::subagent_failure::describe_subagent_failure(
+                result.cancelled,
+                result.error.as_deref(),
+                result.output.as_ref(),
+                &result.subagent_id,
+                "goal planner",
+            );
             return Err(SpawnError::Runtime {
                 message,
                 cancelled: result.cancelled,
