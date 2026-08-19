@@ -1,11 +1,9 @@
 ---
 name: fable
 description: >
-  Fable Method toggle and dispatcher (think/act/prove). A compact Fable loop is
-  ON by default in the system prompt; this skill expands the full method and
-  orchestration details. /fable or /fable on re-affirms; /fable off temporarily
-  deactivates; /fable <task> applies the full loop; subcommands: plan, audit,
-  report, loop, judge.
+  Fable Method toggle and dispatcher (think/act/prove). Fable is OFF by default.
+  /fable or /fable on enables it; /fable off turns it back off; /fable <task>
+  applies the full loop; subcommands: plan, audit, report, loop, judge.
 metadata:
   short-description: "Fable Method on/off and subcommands"
   user-invocable: true
@@ -13,16 +11,15 @@ metadata:
 
 # The Fable Method
 
-A **compact** Fable loop is active by default in the system prompt. This skill
-expands the full method, re-affirms, routes sub-commands, or temporarily
-deactivates.
+Fable is **off** until the user invokes this skill. Enabling it applies the
+method loop and orchestration details for subsequent work.
 
 ## Usage
 
 | Invocation | Effect |
 |---|---|
-| `/fable` or `/fable on` | Re-affirm: Fable active for all subsequent work |
-| `/fable off` | Temporary deactivation until re-enabled |
+| `/fable` or `/fable on` | Enable: Fable active for all subsequent work |
+| `/fable off` | Turn Fable off (the default) |
 | `/fable <task>` | Full loop on this task immediately |
 | `/fable plan <task>` | Steps 0–3 only; no file edits |
 | `/fable audit` | Grade recent work against the loop |
@@ -33,10 +30,25 @@ deactivates.
 
 ## The method loop
 
-The system prompt ships a **compact** Fable loop. The expanded method
-(Steps 0–6: Classify → Define → Gather → Decide → Act → Verify → Report) and
-orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT) live in this
-skill and in `/fable-loop`.
+Applies only after `/fable` / `/fable on` / `/fable <task>`. Never narrate
+stage names in user-facing text.
+
+**Trivial gate:** ≤1 file, ≤10 lines, no new behavior, clear path → do it,
+check it, 2-sentence report; skip the rest.
+
+**Otherwise (compact loop):**
+1. DEFINE done (observable criterion + how verified); freeze scope.
+2. GATHER evidence from primary sources; for bug claims run a decisive test first.
+3. ACT: smallest correct change; user > spec > tests > code; no speculative refactors.
+4. VERIFY by observation (criterion + nearest tests). Tool-based claims need successful trace evidence.
+5. REPORT outcome-first; honest caveats; no method scaffolding.
+
+**Math / physics / quantitative research:** use a foreground `attacker-math` or
+direct tool-backed recomputation for acceptance-critical claims. Follow MPR
+rules strictly.
+
+Expanded orchestration (PLAN → EXECUTE → VERIFY → AUDIT/REPORT, parallel
+subagents) is `/fable-loop`.
 
 ## Sub-command routing
 

@@ -134,7 +134,13 @@ Switch to a different model. Accepts model IDs or display names (case-insensitiv
 /model ds-build
 /model DS Build
 /model Reasoning X high
+/model qwen3-8-27b-4bit
+/model Qwen 4-bit (local)
 ```
+
+Local MLX Qwen entries (`qwen3-8-27b-4bit` / `6bit` / `8bit`) appear in this
+list after `ds local setup`. They match on catalog id or display name. Serve
+the quant first (`ds local serve --bits 4`). See [`LOCAL.md`](../../../../../LOCAL.md).
 
 Aliases: `/m`
 

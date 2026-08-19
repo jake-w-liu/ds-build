@@ -23,7 +23,7 @@ Everything else runs the four stages **in order**.
 
 ## How it works
 
-The orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT), resource bounds (max subagents, model preferences, file:line citation rules), and attacker spawning directives are defined in the system prompt's `<fable_method>` block. This skill activates them for the current task.
+The orchestration stages (1–4: PLAN → EXECUTE → VERIFY → AUDIT/REPORT), resource bounds (max subagents, model preferences, file:line citation rules), and attacker spawning directives live in this skill and `/fable`. They apply only when the user invokes `/fable-loop` or `/fable loop`.
 
 ## When NOT to use
 

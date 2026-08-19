@@ -919,7 +919,16 @@ pub(crate) async fn spawn_session_actor(
     ) {
         tracing::warn!(error = % e, "failed to bind local session toolset");
     }
-    let system_prompt = agent.system_prompt().to_string();
+    // Local OpenAI-compatible servers (mlx-vlm, Ollama, llama.cpp) cannot
+    // afford the full tool-heavy prompt. Keep CRC/verification via the
+    // compact prompt; Fable stays off unless `/fable` is invoked.
+    let system_prompt = if !startup_hints.is_subagent
+        && crate::util::is_loopback_url(&sampling_config.base_url)
+    {
+        agent.compact_system_prompt().to_string()
+    } else {
+        agent.system_prompt().to_string()
+    };
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);

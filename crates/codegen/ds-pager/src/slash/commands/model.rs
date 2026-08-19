@@ -172,9 +172,12 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             info.name.clone()
         };
 
+        // Include the catalog id so `/model qwen3-8-27b-4bit` and `/model local`
+        // fuzzy-match even when the display name is longer.
+        let match_text = format!("{} {}", info.name, id.0);
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text,
             insert_text,
             description: info.description.clone().unwrap_or_default(),
         });
@@ -286,12 +289,15 @@ mod tests {
         // Enter so the effort sub-menu can render.
         let reasoning = items
             .iter()
-            .find(|i| i.match_text == "Reasoning X")
+            .find(|i| i.match_text == "Reasoning X reasoning-x")
             .unwrap();
         assert_eq!(reasoning.insert_text, "Reasoning X ");
 
         // Plain model has no trailing space -- Enter commits immediately.
-        let plain = items.iter().find(|i| i.match_text == "DS 4.5").unwrap();
+        let plain = items
+            .iter()
+            .find(|i| i.match_text == "DS 4.5 deepseek-v4-pro.5")
+            .unwrap();
         assert_eq!(plain.insert_text, "DS 4.5");
     }
 
@@ -446,6 +452,54 @@ mod tests {
     ///
     /// The payload is the typed `acp::ModelId` (resolved at the slash
     /// boundary), not a String.
+    #[test]
+    fn run_resolves_catalog_id_as_well_as_display_name() {
+        let mut state = ModelState::default();
+        let (id, info) = plain_model("qwen3-8-27b-4bit", "Qwen 4-bit (local)");
+        state.available.insert(id.clone(), info);
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "qwen3-8-27b-4bit");
+        match result {
+            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
+                assert_eq!(resolved_id, id);
+            }
+            other => panic!("expected SetDefaultModel by catalog id, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suggest_args_match_text_includes_catalog_id() {
+        let mut state = ModelState::default();
+        let (id, info) = plain_model("qwen3-8-27b-4bit", "Qwen 4-bit (local)");
+        state.available.insert(id, info);
+        let cmd = ModelCommand;
+        let ctx = AppCtx {
+            models: &state,
+            cwd: std::path::Path::new("."),
+            has_session_announcements: false,
+            screen_mode: crate::app::ScreenMode::Fullscreen,
+        };
+        let items = cmd.suggest_args(&ctx, "").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].match_text, "Qwen 4-bit (local) qwen3-8-27b-4bit");
+        assert_eq!(items[0].insert_text, "Qwen 4-bit (local)");
+    }
+
+    #[test]
+    fn run_resolves_local_display_name() {
+        let mut state = ModelState::default();
+        let (id, info) = plain_model("qwen3-8-27b-4bit", "Qwen 4-bit (local)");
+        state.available.insert(id.clone(), info);
+        let mut ctx = dummy_exec_ctx(&state);
+        let result = ModelCommand.run(&mut ctx, "Qwen 4-bit (local)");
+        match result {
+            CommandResult::Action(Action::SetDefaultModel(resolved_id)) => {
+                assert_eq!(resolved_id, id);
+            }
+            other => panic!("expected SetDefaultModel by display name, got {other:?}"),
+        }
+    }
+
     #[test]
     fn run_bare_model_name_dispatches_set_default_model() {
         let mut state = ModelState::default();

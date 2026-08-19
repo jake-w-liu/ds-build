@@ -252,6 +252,16 @@ ds local serve --bits 4
 ds --model qwen3-8-27b-4bit
 ```
 
+In the TUI the same entries appear in `/model` (catalog id or display name):
+
+```
+/model qwen3-8-27b-4bit
+/model Qwen 4-bit (local)
+```
+
+Local loopback models use a compact system prompt (`use_concise = true`).
+Fable stays off unless you run `/fable`.
+
 See [`LOCAL.md`](../../../../../LOCAL.md) at the repo root for paths, RAM
 notes, and the Hugging Face gated-repo token.
 

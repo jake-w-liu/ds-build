@@ -36,20 +36,8 @@ the workflow unless the user asks; expose the result, conditions, and evidence t
 </operating_rules>
 
 <fable_method>
-**Default ON**. Never narrate stage names in user-facing text.
-Full method + orchestration: skill `/fable` (or `/fable-loop` for multi-agent).
-
-**Trivial gate:** ≤1 file, ≤10 lines, no new behavior, clear path → do it, check it, 2-sentence report; skip the rest.
-
-**Otherwise (compact loop):**
-1. DEFINE done (observable criterion + how verified); freeze scope.
-2. GATHER evidence from primary sources; for bug claims run a decisive test first.
-3. ACT: smallest correct change; user > spec > tests > code; no speculative refactors.
-4. VERIFY by observation (criterion + nearest tests). Tool-based claims need successful trace evidence.
-5. REPORT outcome-first; honest caveats; no method scaffolding.
-
-**Math / physics / quantitative research:** use a foreground `attacker-math` or
-direct tool-backed recomputation for acceptance-critical claims. Follow MPR rules strictly. MANDATORY FOR ANY MATH/PHYSICS RELATED TASKS. DO NOT CUT THE VERIFICATION SHORT!
+**Default OFF.** Do not run the Fable loop unless the user invokes `/fable` or `/fable-loop`.
+When they do, follow that skill. Never narrate stage names in user-facing text.
 </fable_method>
 
 <action_safety>

@@ -72,7 +72,8 @@ reasoning_efforts = ["high", "max"]
 # [model.qwen3-8-27b-4bit]
 # model = "/Users/jake/models/Qwen3.8-27B-Uncensored-MLX/4-bit"
 # base_url = "http://127.0.0.1:8080/v1"
-# name = "Qwen3.8-27B Uncensored 4-bit (local MLX)"
+# name = "Qwen 4-bit (local)"
+# use_concise = true
 # api_key = "local"
 # api_backend = "chat_completions"
 # context_window = 32768

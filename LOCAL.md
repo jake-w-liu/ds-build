@@ -48,6 +48,16 @@ ds --model qwen3-8-27b-4bit    # or /model qwen3-8-27b-4bit in the TUI
 
 `ds local use 4` sets `[models].default` and restarts a running server.
 
+In the TUI:
+
+```
+/model qwen3-8-27b-4bit
+/model Qwen 4-bit (local)
+```
+
+Local models use a **compact** system prompt (CRC/verification, no Fable
+preamble). `/fable` turns the method on for that session.
+
 ## Commands
 
 ```

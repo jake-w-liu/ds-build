@@ -43,7 +43,19 @@ is your selected DeepSeek, ChatGPT-subscription, or other BYOK API traffic.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
-**→ Local Qwen / MLX on this Mac:** [`LOCAL.md`](LOCAL.md) (`ds local setup|download|serve`)
+**→ Local Qwen / MLX on this Mac:** [`LOCAL.md`](LOCAL.md)
+
+Local models (4/6/8-bit Qwen) are first-class catalog entries. After
+`ds local serve --bits 4`, pick them with:
+
+```
+/model qwen3-8-27b-4bit
+/model Qwen 4-bit (local)
+ds --model qwen3-8-27b-4bit
+```
+
+Fable is **off** unless you run `/fable`. Local loopback models use a compact
+system prompt so a 27B MLX load is not crushed by an 11k-token preamble.
 
 **→ Upstream fixes:** run **`/upstream-sync`** (fetch → triage → port →
 verify → mark reviewed → **`./bump-and-install.sh`** patch bump, push main,
@@ -161,7 +173,8 @@ If you see `Not signed in` or `401 Unauthorized`, re-check the key steps in
 - **Full TUI** — scrollback, markdown, plans, todos, worktrees, session resume
 - **Headless / CI** — `ds -p "…"` for scripts; `--always-approve`, `--max-turns`, etc.
 - **Tools** — read/edit/search, terminal, web fetch/search, MCP, skills, subagents
-- **Orchestration** — Fable-style plan → execute → verify harness with resource bounds
+- **Local Qwen (MLX)** — `ds local` + `/model qwen3-8-27b-4bit` (4/6/8-bit)
+- **Orchestration** — `/fable` plan → execute → verify (off until invoked)
 - **Privacy defaults** — no Mixpanel / Sentry / product phone-home unless you opt in
 
 ---
@@ -189,7 +202,9 @@ cargo check -p ds-pager-bin               # fast validation
 |---------|---------|----------|
 | Permission mode | always-approve | `[ui] permission_mode = "ask"` or omit always-approve |
 | Subagents | on | `DS_SUBAGENTS=0`, `--no-subagents`, or `[subagents] enabled = false` |
-| System prompt | Neutral coding-agent prompt + Fable harness | templates under `crates/codegen/ds-agent/templates/` |
+| Fable method | **off** | `/fable` or `/fable-loop` |
+| System prompt | Full coding prompt, Fable off | compact CRC prompt on local loopback / `use_concise` |
+| Local Qwen | `/model qwen3-8-27b-4bit` after `ds local serve` | [`LOCAL.md`](LOCAL.md) |
 | Telemetry / Mixpanel / Sentry | off | only if you explicitly opt in (`DS_TELEMETRY_OPT_IN=1`, etc.) |
 
 Full setup notes: [`DEEPSEEK.md`](DEEPSEEK.md).

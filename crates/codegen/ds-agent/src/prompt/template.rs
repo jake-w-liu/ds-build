@@ -410,6 +410,33 @@ mod tests {
     }
 
     #[test]
+    fn test_default_prompt_fable_is_off_until_slash_fable() {
+        let p = default_placeholders();
+        let prompt = render_base(&default_renderer(), &p);
+        assert!(
+            prompt.contains("Default OFF"),
+            "default prompt must not run Fable unless /fable is invoked"
+        );
+        assert!(
+            !prompt.contains("Default ON"),
+            "Fable must not be default-on in the base prompt"
+        );
+    }
+
+    #[test]
+    fn test_compact_prompt_is_minimal_and_has_no_fable() {
+        assert!(
+            !COMPACT_SYSTEM_PROMPT.to_ascii_lowercase().contains("fable"),
+            "compact prompt must stay Fable-free; invoke /fable to enable the method"
+        );
+        assert!(
+            COMPACT_SYSTEM_PROMPT.len() < 2_000,
+            "compact prompt must stay small for local 27B loads, got {}",
+            COMPACT_SYSTEM_PROMPT.len()
+        );
+    }
+
+    #[test]
     fn test_compact_prompt_preserves_cross_domain_correctness_rules() {
         assert!(COMPACT_SYSTEM_PROMPT.contains("<user_query>"));
         assert!(COMPACT_SYSTEM_PROMPT.contains("exactly at"));

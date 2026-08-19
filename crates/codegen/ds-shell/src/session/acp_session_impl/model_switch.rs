@@ -5,11 +5,16 @@ use ds_chat_state::conversation_util::replace_or_insert_system_head;
 /// A full-mode agent owns its complete system prompt. Model switching must not
 /// replace that prompt with the generic concise prompt, even when the selected
 /// model normally requests concise mode.
+///
+/// Loopback endpoints (mlx-vlm, Ollama, llama.cpp) always take the compact
+/// prompt so a 27B local load is not crushed by the full tool-heavy preamble.
 fn should_use_compact_prompt(
     use_concise: bool,
     prompt_mode: &ds_agent::config::PromptMode,
+    base_url: &str,
 ) -> bool {
-    use_concise && prompt_mode != &ds_agent::config::PromptMode::Full
+    prompt_mode != &ds_agent::config::PromptMode::Full
+        && (use_concise || crate::util::is_loopback_url(base_url))
 }
 
 impl SessionActor {
@@ -91,8 +96,12 @@ impl SessionActor {
         if apply_prompt_override && !skip_prompt_rewrite {
             let replacement_prompt = {
                 let agent = self.agent.borrow();
-                if should_use_compact_prompt(use_concise, &agent.definition().prompt_mode) {
-                    ds_agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_string()
+                if should_use_compact_prompt(
+                    use_concise,
+                    &agent.definition().prompt_mode,
+                    &sampling_config.base_url,
+                ) {
+                    agent.compact_system_prompt().to_string()
                 } else {
                     agent.system_prompt().to_string()
                 }
@@ -335,13 +344,43 @@ mod compact_prompt_selection_tests {
 
     #[test]
     fn extend_mode_can_use_compact_prompt() {
-        assert!(should_use_compact_prompt(true, &PromptMode::Extend));
-        assert!(!should_use_compact_prompt(false, &PromptMode::Extend));
+        assert!(should_use_compact_prompt(
+            true,
+            &PromptMode::Extend,
+            "https://api.deepseek.com/v1"
+        ));
+        assert!(!should_use_compact_prompt(
+            false,
+            &PromptMode::Extend,
+            "https://api.deepseek.com/v1"
+        ));
+    }
+
+    #[test]
+    fn loopback_uses_compact_prompt_even_without_use_concise() {
+        assert!(should_use_compact_prompt(
+            false,
+            &PromptMode::Extend,
+            "http://127.0.0.1:8080/v1"
+        ));
+        assert!(should_use_compact_prompt(
+            false,
+            &PromptMode::Extend,
+            "http://localhost:11434/v1"
+        ));
     }
 
     #[test]
     fn full_mode_never_loses_its_custom_system_prompt() {
-        assert!(!should_use_compact_prompt(true, &PromptMode::Full));
-        assert!(!should_use_compact_prompt(false, &PromptMode::Full));
+        assert!(!should_use_compact_prompt(
+            true,
+            &PromptMode::Full,
+            "http://127.0.0.1:8080/v1"
+        ));
+        assert!(!should_use_compact_prompt(
+            false,
+            &PromptMode::Full,
+            "https://api.deepseek.com/v1"
+        ));
     }
 }

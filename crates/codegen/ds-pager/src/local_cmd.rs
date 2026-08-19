@@ -268,10 +268,10 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
             // local path. Route each catalog entry at its quant directory.
             model["model"] = toml_edit::value(quant_dir(&model_root, bits).display().to_string());
             model["base_url"] = toml_edit::value(&base_url);
-            model["name"] =
-                toml_edit::value(format!("Qwen3.8-27B Uncensored {bits}-bit (local MLX)"));
-            model["description"] =
-                toml_edit::value(format!("Local mlx-vlm server — {HF_REPO} {bits}-bit"));
+            model["name"] = toml_edit::value(format!("Qwen {bits}-bit (local)"));
+            model["description"] = toml_edit::value(format!(
+                "Local mlx-vlm {bits}-bit — /model qwen3-8-27b-{bits}bit"
+            ));
             model["api_key"] = toml_edit::value(DUMMY_API_KEY);
             model["api_backend"] = toml_edit::value("chat_completions");
             model["context_window"] = toml_edit::value(CONTEXT_WINDOW);
@@ -280,6 +280,7 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
             model["supports_reasoning_effort"] = toml_edit::value(false);
             model["supports_backend_search"] = toml_edit::value(false);
             model["stream_tool_calls"] = toml_edit::value(false);
+            model["use_concise"] = toml_edit::value(true);
             model["temperature"] = toml_edit::value(0.7);
         }
     }
@@ -300,7 +301,8 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
         config_path.display()
     );
     for bits in SUPPORTED_BITS {
-        println!("  {}  —  ds --model {}", model_id(bits), model_id(bits));
+        let id = model_id(bits);
+        println!("  {id}  —  /model {id}  or  /model \"Qwen {bits}-bit (local)\"");
     }
     if let Some(bits) = default_bits {
         println!("Default model set to {}", model_id(bits));
