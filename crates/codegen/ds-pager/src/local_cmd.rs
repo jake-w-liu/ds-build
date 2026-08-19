@@ -243,7 +243,9 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
         );
     };
 
-    let port = load_state().port;
+    let state = load_state();
+    let port = state.port;
+    let model_root = PathBuf::from(&state.model_dir);
     let base_url = format!("http://{DEFAULT_HOST}:{port}/v1");
 
     {
@@ -262,7 +264,9 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
             let model = entry
                 .as_table_mut()
                 .with_context(|| format!("[model.{id}] is not a table"))?;
-            model["model"] = toml_edit::value("qwen3.8-27b");
+            // mlx-vlm treats `model` as a Hugging Face repo id unless it is a
+            // local path. Route each catalog entry at its quant directory.
+            model["model"] = toml_edit::value(quant_dir(&model_root, bits).display().to_string());
             model["base_url"] = toml_edit::value(&base_url);
             model["name"] =
                 toml_edit::value(format!("Qwen3.8-27B Uncensored {bits}-bit (local MLX)"));
@@ -403,7 +407,7 @@ fn require_venv_python() -> Result<PathBuf> {
     } else {
         bail!(
             "mlx-vlm venv not found at {}. Recreate it with:\n  \
-             python3 -m venv {dir}/venv && {dir}/venv/bin/pip install -U 'mlx>=0.32' 'mlx-vlm>=0.6.13' 'huggingface_hub[cli,hf_xet]'",
+             python3 -m venv {dir}/venv && {dir}/venv/bin/pip install -U 'mlx>=0.32' 'mlx-vlm>=0.6.13' 'huggingface_hub[cli,hf_xet]' jinja2",
             python.display(),
             dir = state_dir().display()
         )

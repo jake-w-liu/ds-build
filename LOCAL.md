@@ -38,7 +38,7 @@ export HF_TOKEN=hf_...
 ```sh
 # venv (already created on this Mac if setup ran)
 python3 -m venv ~/.ds/local-mlx/venv
-~/.ds/local-mlx/venv/bin/pip install -U 'mlx>=0.32' 'mlx-vlm>=0.6.13' 'huggingface_hub[cli,hf_xet]'
+~/.ds/local-mlx/venv/bin/pip install -U 'mlx>=0.32' 'mlx-vlm>=0.6.13' 'huggingface_hub[cli,hf_xet]' jinja2
 
 ds local setup                 # write [model.qwen3-8-27b-{4,6,8}bit]
 ds local download              # 4 + 6 + 8 (or: --bits 4)
