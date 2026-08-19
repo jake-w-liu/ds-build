@@ -225,44 +225,9 @@ impl WebSearchClient {
             )
         })?;
 
-        // Collect message output items: output_text parts become content,
-        // url_citation annotations become citations (verify() requires at
-        // least one citation for web_search).
-        let mut content_parts: Vec<String> = Vec::new();
-        let mut citations: Vec<String> = Vec::new();
-        if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
-            for item in output {
-                if item.get("type").and_then(|t| t.as_str()) != Some("message") {
-                    continue;
-                }
-                if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
-                    for part in content {
-                        match part.get("type").and_then(|t| t.as_str()) {
-                            Some("output_text") => {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    content_parts.push(text.to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                        if let Some(anns) = part.get("annotations").and_then(|a| a.as_array()) {
-                            for ann in anns {
-                                if let Some(url) = ann.get("url").and_then(|u| u.as_str()) {
-                                    citations.push(url.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let content = if content_parts.is_empty() {
-            format!("No search results found for query: {query}")
-        } else {
-            content_parts.join("\n")
-        };
-        Ok((content, citations))
+        parse_responses_web_search(&value).map_err(|reason| {
+            ds_tool_runtime::ToolError::execution(tool_id, reason.to_string())
+        })
     }
 
     pub async fn search_with_titles(
@@ -531,6 +496,107 @@ fn strip_html_tags(s: &str) -> String {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+/// Pull answer text and citation URLs out of a Responses `/responses` body.
+///
+/// DeepSeek's hosted `web_search` often returns:
+/// - `web_search_call` items (`action.type = open_page` + `action.url`)
+/// - a final `message` with `output_text` and **no** `url_citation` annotations
+///
+/// The previous parser only read annotations, so a 200 with a real answer
+/// produced zero citations, `verify()` rejected the tool, and DuckDuckGo
+/// never ran. Empty citations is treated as a backend miss so `search()`
+/// can fall back to DDG.
+fn parse_responses_web_search(value: &serde_json::Value) -> Result<(String, Vec<String>), String> {
+    let mut content_parts: Vec<String> = Vec::new();
+    let mut citations: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut push_url = |raw: &str| {
+        let url = raw.trim();
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return;
+        }
+        if seen.insert(url.to_string()) {
+            citations.push(url.to_string());
+        }
+    };
+
+    if let Some(output) = value.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    if let Some(content) = item.get("content").and_then(|c| c.as_array()) {
+                        for part in content {
+                            if part.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    if !text.trim().is_empty() {
+                                        content_parts.push(text.to_string());
+                                    }
+                                }
+                            }
+                            if let Some(anns) = part.get("annotations").and_then(|a| a.as_array())
+                            {
+                                for ann in anns {
+                                    if let Some(url) = ann.get("url").and_then(|u| u.as_str()) {
+                                        push_url(url);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("web_search_call") => {
+                    if let Some(action) = item.get("action") {
+                        if let Some(url) = action.get("url").and_then(|u| u.as_str()) {
+                            push_url(url);
+                        }
+                        if let Some(urls) = action.get("urls").and_then(|u| u.as_array()) {
+                            for u in urls {
+                                if let Some(url) = u.as_str() {
+                                    push_url(url);
+                                } else if let Some(url) = u.get("url").and_then(|v| v.as_str())
+                                {
+                                    push_url(url);
+                                }
+                            }
+                        }
+                        if let Some(sources) = action.get("sources").and_then(|s| s.as_array()) {
+                            for src in sources {
+                                if let Some(url) = src.as_str() {
+                                    push_url(url);
+                                } else if let Some(url) =
+                                    src.get("url").and_then(|v| v.as_str())
+                                {
+                                    push_url(url);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if citations.is_empty() {
+        return Err(
+            "backend search returned no citation URLs; falling back".to_string(),
+        );
+    }
+
+    let content = if content_parts.is_empty() {
+        citations
+            .iter()
+            .enumerate()
+            .map(|(i, url)| format!("{}. URL: {url}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        content_parts.join("\n")
+    };
+    Ok((content, citations))
+}
+
 fn format_results(results: &[SearchResult]) -> String {
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {
@@ -638,6 +704,109 @@ mod tests {
         assert!(
             err.to_string().contains("401"),
             "expected HTTP 401 in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_deepseek_open_page_urls_without_annotations() {
+        // Shape observed from DeepSeek /v1/responses with hosted web_search:
+        // web_search_call open_page URLs + a message with no annotations.
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {"type": "reasoning"},
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "search", "queries": ["Krakow weather"]}
+                },
+                {
+                    "type": "web_search_call",
+                    "status": "failed",
+                    "action": {"type": "open_page", "url": "https://example.com/a"}
+                },
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {"type": "open_page", "url": "https://example.com/b"}
+                },
+                {
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "Kraków is warm and stormy tomorrow.",
+                        "annotations": []
+                    }]
+                }
+            ]
+        });
+        let (content, citations) = parse_responses_web_search(&value).unwrap();
+        assert!(content.contains("warm and stormy"), "got: {content}");
+        assert_eq!(
+            citations,
+            vec![
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_message_without_urls_is_backend_miss() {
+        let value = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": "I cannot access the live internet.",
+                    "annotations": []
+                }]
+            }]
+        });
+        let err = parse_responses_web_search(&value).expect_err("must miss so DDG can run");
+        assert!(
+            err.contains("no citation URLs"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_falls_back_to_ddg_when_backend_has_no_citations() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "some answer with no urls",
+                        "annotations": []
+                    }]
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = WebSearchConfig::Enabled {
+            api_key: "enterprise-key".into(),
+            base_url: server.uri(),
+            model: "enterprise-search".into(),
+            extra_headers: Default::default(),
+            alpha_test_key: None,
+        };
+        let client = WebSearchClient::new(&config, None).unwrap();
+        let backend = client.backend.as_ref().expect("backend configured");
+        let err = client
+            .search_via_backend(backend, "Krakow weather", None)
+            .await
+            .expect_err("empty citations must be a backend miss");
+        assert!(
+            err.to_string().contains("no citation URLs"),
+            "got: {err}"
         );
     }
 
