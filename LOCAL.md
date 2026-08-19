@@ -13,8 +13,14 @@ severely degraded).
 | **6-bit** | ~22 GB | Tight; close other apps |
 | **8-bit** | ~27.5 GB | Likely to swap |
 
-Practical context is capped at **32 768** tokens in config (the weights
-advertise 262k; that KV cache will not fit).
+`ds local setup` / `ds local serve` **auto-size** `context_window` from
+physical RAM, on-disk weight size, and this model's KV cost (16 full-attention
+layers x 4 KV heads x 256 dim x bf16). The weights advertise 262144; that
+cache will not fit. DeepSeek's 1M window is not inherited.
+
+On this 32 GB Mac the planner currently writes about **49k / 16k / 4k** for
+4 / 6 / 8-bit (ladder-snapped, cap 65536). `ds local serve` also passes
+`--max-kv-size` so mlx-vlm cannot grow past that.
 
 ## Layout
 

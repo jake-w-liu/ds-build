@@ -56,6 +56,8 @@ ds --model qwen3-8-27b-4bit
 
 Fable is **off** unless you run `/fable`. Local loopback models use a compact
 system prompt so a 27B MLX load is not crushed by an 11k-token preamble.
+`ds local setup` sizes `context_window` from RAM + weight size + KV cost
+(not DeepSeek's 1M, not the card's 262k).
 
 **→ Upstream fixes:** run **`/upstream-sync`** (fetch → triage → port →
 verify → mark reviewed → **`./bump-and-install.sh`** patch bump, push main,

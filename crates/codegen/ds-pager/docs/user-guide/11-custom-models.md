@@ -260,7 +260,8 @@ In the TUI the same entries appear in `/model` (catalog id or display name):
 ```
 
 Local loopback models use a compact system prompt (`use_concise = true`).
-Fable stays off unless you run `/fable`.
+Fable stays off unless you run `/fable`. `ds local setup` writes a
+RAM-fitted `context_window` (not DeepSeek's 1M).
 
 See [`LOCAL.md`](../../../../../LOCAL.md) at the repo root for paths, RAM
 notes, and the Hugging Face gated-repo token.

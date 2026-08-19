@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
@@ -20,10 +20,18 @@ const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_BITS: u8 = 4;
 const SUPPORTED_BITS: [u8; 3] = [4, 6, 8];
 const DUMMY_API_KEY: &str = "local";
-const CONTEXT_WINDOW: i64 = 32_768;
-const MAX_COMPLETION_TOKENS: i64 = 8_192;
 const IDLE_TIMEOUT_SECS: i64 = 600;
 const HEALTH_WAIT: Duration = Duration::from_secs(300);
+
+/// Smallest window we will write. Below this, a coding-agent turn cannot
+/// hold tools + compact prompt + a reply.
+const MIN_CONTEXT_WINDOW: u64 = 4_096;
+/// Local 27B cap. The card advertises 262144; that KV cache will not fit
+/// in 32-64 GB unified memory once weights are loaded.
+const MAX_LOCAL_CONTEXT_WINDOW: u64 = 65_536;
+const MIN_COMPLETION_TOKENS: u64 = 1_024;
+const MAX_COMPLETION_TOKENS: u64 = 8_192;
+const WINDOW_LADDER: &[u64] = &[4_096, 8_192, 12_288, 16_384, 24_576, 32_768, 49_152, 65_536];
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct LocalArgs {
@@ -169,6 +177,247 @@ fn model_id(bits: u8) -> String {
     format!("qwen3-8-27b-{bits}bit")
 }
 
+/// Architecture fields that drive KV-cache bytes/token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModelArch {
+    max_position_embeddings: u64,
+    num_hidden_layers: u64,
+    num_key_value_heads: u64,
+    head_dim: u64,
+    full_attention_layers: u64,
+}
+
+impl ModelArch {
+    /// Defaults for this Qwen3.8-27B MLX repo (`text_config` in config.json).
+    fn qwen38_27b() -> Self {
+        Self {
+            max_position_embeddings: 262_144,
+            num_hidden_layers: 64,
+            num_key_value_heads: 4,
+            head_dim: 256,
+            full_attention_layers: 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalContextPlan {
+    context_window: u64,
+    max_completion_tokens: u64,
+    thinking_budget: u64,
+    kv_bytes_per_token: u64,
+    weight_bytes: u64,
+    ram_bytes: u64,
+    model_max: u64,
+    tight: bool,
+}
+
+fn parse_model_arch(v: &serde_json::Value) -> ModelArch {
+    let mut arch = ModelArch::qwen38_27b();
+    let text = v.get("text_config").unwrap_or(v);
+    if let Some(n) = text
+        .get("max_position_embeddings")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        arch.max_position_embeddings = n;
+    }
+    if let Some(n) = text
+        .get("num_hidden_layers")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        arch.num_hidden_layers = n;
+    }
+    if let Some(n) = text
+        .get("num_key_value_heads")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        arch.num_key_value_heads = n;
+    }
+    if let Some(n) = text
+        .get("head_dim")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|n| *n > 0)
+    {
+        arch.head_dim = n;
+    }
+    if let Some(layers) = text
+        .get("layer_types")
+        .and_then(serde_json::Value::as_array)
+    {
+        let n_full = layers
+            .iter()
+            .filter(|t| t.as_str() == Some("full_attention"))
+            .count() as u64;
+        if n_full > 0 {
+            arch.full_attention_layers = n_full;
+        } else if !layers.is_empty() {
+            arch.full_attention_layers = arch.num_hidden_layers;
+        }
+    }
+    arch
+}
+
+fn read_model_arch(quant_dir: &Path) -> ModelArch {
+    let path = quant_dir.join("config.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return ModelArch::qwen38_27b();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ModelArch::qwen38_27b();
+    };
+    parse_model_arch(&v)
+}
+
+/// Conservative on-disk size for this 27B MLX repo when weights are not
+/// downloaded yet (rounded up from the measured shards).
+fn typical_weight_bytes(bits: u8) -> u64 {
+    match bits {
+        4 => 15 << 30,
+        6 => 22 << 30,
+        8 => 28 << 30,
+        _ => 15 << 30,
+    }
+}
+
+fn quant_weight_bytes(dir: &Path, bits: u8) -> u64 {
+    let mut sum = 0u64;
+    if let Ok(rd) = fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            if name.to_string_lossy().ends_with(".safetensors") {
+                if let Ok(meta) = ent.metadata() {
+                    sum = sum.saturating_add(meta.len());
+                }
+            }
+        }
+    }
+    if sum == 0 {
+        typical_weight_bytes(bits)
+    } else {
+        sum
+    }
+}
+
+fn physical_ram_bytes() -> u64 {
+    physical_ram_bytes_impl().unwrap_or(32 << 30)
+}
+
+#[cfg(target_os = "macos")]
+fn physical_ram_bytes_impl() -> Option<u64> {
+    let name = std::ffi::CString::new("hw.memsize").ok()?;
+    let mut val: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let ret = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut val as *mut u64 as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret == 0 && val > 0 {
+        Some(val)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn physical_ram_bytes_impl() -> Option<u64> {
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("MemTotal:") else {
+            continue;
+        };
+        let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
+        return Some(kb.saturating_mul(1024));
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn physical_ram_bytes_impl() -> Option<u64> {
+    None
+}
+
+fn ram_reserve(ram_bytes: u64) -> u64 {
+    // 20% of RAM, floored at 4 GiB (OS + Metal) and capped at 12 GiB.
+    (ram_bytes / 5).clamp(4 << 30, 12 << 30)
+}
+
+fn kv_bytes_per_token(arch: &ModelArch) -> u64 {
+    let n_full = if arch.full_attention_layers > 0 {
+        arch.full_attention_layers
+    } else {
+        arch.num_hidden_layers.max(1)
+    };
+    // K+V, bf16/fp16. Linear-attention layers are O(1) state, not O(seq).
+    2u64.saturating_mul(n_full)
+        .saturating_mul(arch.num_key_value_heads.max(1))
+        .saturating_mul(arch.head_dim.max(1))
+        .saturating_mul(2)
+}
+
+fn snap_window(raw: u64, cap: u64) -> u64 {
+    let cap = cap.clamp(MIN_CONTEXT_WINDOW, MAX_LOCAL_CONTEXT_WINDOW);
+    if raw >= cap {
+        return cap;
+    }
+    WINDOW_LADDER
+        .iter()
+        .copied()
+        .rev()
+        .find(|&w| w <= raw && w <= cap)
+        .unwrap_or(MIN_CONTEXT_WINDOW)
+        .min(cap)
+}
+
+fn plan_context(ram_bytes: u64, weight_bytes: u64, arch: &ModelArch) -> LocalContextPlan {
+    let ram_bytes = ram_bytes.max(1);
+    let kv_bpt = kv_bytes_per_token(arch).max(1);
+    let leftover = ram_bytes
+        .saturating_sub(weight_bytes)
+        .saturating_sub(ram_reserve(ram_bytes));
+    // 35% of leftover for KV; the rest is prefill activations / fragmentation.
+    let kv_budget = leftover.saturating_mul(7) / 20;
+    let raw = kv_budget / kv_bpt;
+    let model_max = arch.max_position_embeddings.max(MIN_CONTEXT_WINDOW);
+    let cap = model_max.min(MAX_LOCAL_CONTEXT_WINDOW);
+    let context_window = snap_window(raw, cap);
+    let mut max_completion_tokens =
+        (context_window / 4).clamp(MIN_COMPLETION_TOKENS, MAX_COMPLETION_TOKENS);
+    let prompt_floor = MIN_CONTEXT_WINDOW / 2;
+    if context_window > prompt_floor {
+        max_completion_tokens = max_completion_tokens.min(context_window - prompt_floor);
+    }
+    max_completion_tokens = max_completion_tokens.max(256);
+    let thinking_budget = (max_completion_tokens / 4)
+        .max(256)
+        .min(max_completion_tokens / 2)
+        .max(1);
+    LocalContextPlan {
+        context_window,
+        max_completion_tokens,
+        thinking_budget,
+        kv_bytes_per_token: kv_bpt,
+        weight_bytes,
+        ram_bytes,
+        model_max,
+        tight: leftover == 0 || raw < MIN_CONTEXT_WINDOW,
+    }
+}
+
+fn plan_for_quant(root: &Path, bits: u8) -> LocalContextPlan {
+    let dir = quant_dir(root, bits);
+    let arch = read_model_arch(&dir);
+    let weights = quant_weight_bytes(&dir, bits);
+    plan_context(physical_ram_bytes(), weights, &arch)
+}
+
 fn load_state() -> LocalState {
     fs::read_to_string(state_path())
         .ok()
@@ -272,10 +521,11 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
             model["description"] = toml_edit::value(format!(
                 "Local mlx-vlm {bits}-bit — /model qwen3-8-27b-{bits}bit"
             ));
+            let plan = plan_for_quant(&model_root, bits);
             model["api_key"] = toml_edit::value(DUMMY_API_KEY);
             model["api_backend"] = toml_edit::value("chat_completions");
-            model["context_window"] = toml_edit::value(CONTEXT_WINDOW);
-            model["max_completion_tokens"] = toml_edit::value(MAX_COMPLETION_TOKENS);
+            model["context_window"] = toml_edit::value(plan.context_window as i64);
+            model["max_completion_tokens"] = toml_edit::value(plan.max_completion_tokens as i64);
             model["inference_idle_timeout_secs"] = toml_edit::value(IDLE_TIMEOUT_SECS);
             model["supports_reasoning_effort"] = toml_edit::value(false);
             model["supports_backend_search"] = toml_edit::value(false);
@@ -302,7 +552,15 @@ fn cmd_setup(default_bits: Option<u8>) -> Result<()> {
     );
     for bits in SUPPORTED_BITS {
         let id = model_id(bits);
-        println!("  {id}  —  /model {id}  or  /model \"Qwen {bits}-bit (local)\"");
+        let plan = plan_for_quant(&model_root, bits);
+        print!(
+            "  {id}  —  /model {id}  context={}  max_out={}",
+            plan.context_window, plan.max_completion_tokens
+        );
+        if plan.tight {
+            print!("  (tight RAM — expect swap)");
+        }
+        println!();
     }
     if let Some(bits) = default_bits {
         println!("Default model set to {}", model_id(bits));
@@ -381,7 +639,12 @@ fn cmd_download(bits: Option<u8>) -> Result<()> {
     Ok(())
 }
 
-fn server_args(model: &Path, host: &str, port: u16) -> Result<Vec<String>> {
+fn server_args(
+    model: &Path,
+    host: &str,
+    port: u16,
+    plan: &LocalContextPlan,
+) -> Result<Vec<String>> {
     Ok(vec![
         "-m".into(),
         "mlx_vlm".into(),
@@ -397,7 +660,11 @@ fn server_args(model: &Path, host: &str, port: u16) -> Result<Vec<String>> {
         port.to_string(),
         // HF card: do not enable KV-cache quantization on this VL architecture.
         "--max-tokens".into(),
-        MAX_COMPLETION_TOKENS.to_string(),
+        plan.max_completion_tokens.to_string(),
+        "--max-kv-size".into(),
+        plan.context_window.to_string(),
+        "--thinking-budget".into(),
+        plan.thinking_budget.to_string(),
         "--enable-thinking".into(),
     ])
 }
@@ -436,6 +703,18 @@ fn cmd_serve(bits: Option<u8>, port: u16, host: String, foreground: bool) -> Res
 
     let python = require_venv_python()?;
     fs::create_dir_all(state_dir())?;
+    let plan = plan_for_quant(&root, bits);
+    println!(
+        "Context auto: {} tokens (model max {}, KV ~{:.1} GiB, weights {:.1} GiB, RAM {:.1} GiB)",
+        plan.context_window,
+        plan.model_max,
+        (plan.context_window as f64 * plan.kv_bytes_per_token as f64) / 1024.0 / 1024.0 / 1024.0,
+        plan.weight_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+        plan.ram_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+    );
+    if plan.tight {
+        println!("Warning: leftover RAM after weights is tight; this quant may swap.");
+    }
 
     if foreground {
         state.bits = bits;
@@ -448,7 +727,7 @@ fn cmd_serve(bits: Option<u8>, port: u16, host: String, foreground: bool) -> Res
             model.display()
         );
         let status = Command::new(python)
-            .args(server_args(&model, &host, port)?)
+            .args(server_args(&model, &host, port, &plan)?)
             .status()
             .context("failed to start mlx_vlm server")?;
         if !status.success() {
@@ -459,7 +738,7 @@ fn cmd_serve(bits: Option<u8>, port: u16, host: String, foreground: bool) -> Res
 
     let log = fs::File::create(log_path()).context("create server.log")?;
     let mut cmd = Command::new(python);
-    cmd.args(server_args(&model, &host, port)?)
+    cmd.args(server_args(&model, &host, port, &plan)?)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
@@ -579,6 +858,20 @@ fn cmd_status(json: bool) -> Result<()> {
     let healthy = pid.is_some() && http_models_ok(&state.host, state.port);
 
     if json {
+        let windows: serde_json::Map<String, serde_json::Value> = SUPPORTED_BITS
+            .into_iter()
+            .map(|b| {
+                let p = plan_for_quant(&root, b);
+                (
+                    format!("{b}bit"),
+                    serde_json::json!({
+                        "context_window": p.context_window,
+                        "max_completion_tokens": p.max_completion_tokens,
+                        "tight": p.tight,
+                    }),
+                )
+            })
+            .collect();
         let payload = serde_json::json!({
             "repo": HF_REPO,
             "model_dir": root,
@@ -590,6 +883,8 @@ fn cmd_status(json: bool) -> Result<()> {
             "healthy": healthy,
             "venv_python": venv_python(),
             "venv_ok": venv_python().is_file(),
+            "ram_bytes": physical_ram_bytes(),
+            "windows": windows,
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -613,7 +908,11 @@ fn cmd_status(json: bool) -> Result<()> {
         } else {
             "not downloaded"
         };
-        println!("  {b}-bit:      {mark}");
+        let plan = plan_for_quant(&root, b);
+        println!(
+            "  {b}-bit:      {mark}  context={}  max_out={}",
+            plan.context_window, plan.max_completion_tokens
+        );
     }
     match pid {
         Some(p) if healthy => println!(
@@ -671,5 +970,90 @@ mod tests {
     fn quant_dir_nests_under_root() {
         let root = PathBuf::from("/tmp/qwen");
         assert_eq!(quant_dir(&root, 4), PathBuf::from("/tmp/qwen/4-bit"));
+    }
+
+    #[test]
+    fn qwen38_kv_is_64kib_per_token() {
+        let arch = ModelArch::qwen38_27b();
+        assert_eq!(kv_bytes_per_token(&arch), 65_536);
+    }
+
+    #[test]
+    fn parse_arch_counts_full_attention_layers() {
+        let v = serde_json::json!({
+            "text_config": {
+                "max_position_embeddings": 262144,
+                "num_hidden_layers": 64,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+                "layer_types": [
+                    "linear_attention",
+                    "linear_attention",
+                    "linear_attention",
+                    "full_attention",
+                    "linear_attention",
+                    "full_attention"
+                ]
+            }
+        });
+        let arch = parse_model_arch(&v);
+        assert_eq!(arch.full_attention_layers, 2);
+        assert_eq!(arch.max_position_embeddings, 262_144);
+    }
+
+    #[test]
+    fn context_on_32gib_fits_4bit_not_1m() {
+        let arch = ModelArch::qwen38_27b();
+        let ram = 32u64 << 30;
+        let p4 = plan_context(ram, 15 << 30, &arch);
+        let p6 = plan_context(ram, 22 << 30, &arch);
+        let p8 = plan_context(ram, 28 << 30, &arch);
+        assert_eq!(p4.context_window, 49_152);
+        assert_eq!(p4.max_completion_tokens, 8_192);
+        assert!(!p4.tight);
+        assert_eq!(p6.context_window, 16_384);
+        assert_eq!(p6.max_completion_tokens, 4_096);
+        assert_eq!(p8.context_window, 4_096);
+        assert!(p8.tight);
+        assert!(p4.context_window < 200_000);
+        assert!(p4.context_window < p4.model_max);
+    }
+
+    #[test]
+    fn context_on_64gib_caps_at_local_max() {
+        let arch = ModelArch::qwen38_27b();
+        let p = plan_context(64 << 30, 15 << 30, &arch);
+        assert_eq!(p.context_window, MAX_LOCAL_CONTEXT_WINDOW);
+        assert!(!p.tight);
+    }
+
+    #[test]
+    fn snap_window_picks_ladder_not_raw() {
+        assert_eq!(snap_window(60_774, 65_536), 49_152);
+        assert_eq!(snap_window(1_000, 65_536), 4_096);
+        assert_eq!(snap_window(80_000, 65_536), 65_536);
+    }
+
+    #[test]
+    fn server_args_pin_kv_and_completion() {
+        let plan = LocalContextPlan {
+            context_window: 16_384,
+            max_completion_tokens: 4_096,
+            thinking_budget: 1_024,
+            kv_bytes_per_token: 65_536,
+            weight_bytes: 1,
+            ram_bytes: 1,
+            model_max: 262_144,
+            tight: false,
+        };
+        let args = server_args(Path::new("/tmp/4-bit"), "127.0.0.1", 8080, &plan).unwrap();
+        let kv = args.iter().position(|a| a == "--max-kv-size").unwrap();
+        assert_eq!(args[kv + 1], "16384");
+        let mt = args.iter().position(|a| a == "--max-tokens").unwrap();
+        assert_eq!(args[mt + 1], "4096");
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--thinking-budget" && w[1] == "1024"));
+        assert!(!args.iter().any(|a| a.contains("kv-bits")));
     }
 }
