@@ -63,6 +63,25 @@ supports_reasoning_effort = true
 reasoning_effort = "max"
 reasoning_efforts = ["high", "max"]
 
+# -----------------------------------------------------------------------------
+# Optional: local Qwen3.8-27B Uncensored (MLX). See LOCAL.md
+#   ds local setup && ds local download && ds local serve --bits 4
+# 4-bit is the right default on a 32 GB Mac. 2-bit is not offered.
+# -----------------------------------------------------------------------------
+#
+# [model.qwen3-8-27b-4bit]
+# model = "qwen3.8-27b"
+# base_url = "http://127.0.0.1:8080/v1"
+# name = "Qwen3.8-27B Uncensored 4-bit (local MLX)"
+# api_key = "local"
+# api_backend = "chat_completions"
+# context_window = 32768
+# max_completion_tokens = 8192
+# inference_idle_timeout_secs = 600
+# supports_reasoning_effort = false
+# supports_backend_search = false
+# stream_tool_calls = false
+
 [features]
 telemetry = false
 

@@ -43,6 +43,8 @@ is your selected DeepSeek, ChatGPT-subscription, or other BYOK API traffic.
 
 **→ Full DeepSeek API setup (step-by-step): [`DEEPSEEK.md`](DEEPSEEK.md)**
 
+**→ Local Qwen / MLX on this Mac:** [`LOCAL.md`](LOCAL.md) (`ds local setup|download|serve`)
+
 **→ Upstream fixes:** run **`/upstream-sync`** (fetch → triage → port →
 verify → mark reviewed → **`./bump-and-install.sh`** patch bump, push main,
 rebuild dual install). Never blind-merge `xai-org/grok-build`.

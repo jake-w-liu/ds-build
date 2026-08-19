@@ -8,10 +8,11 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-use crate::agent::config::DEEPSEEK_API_BASE_URL_DEFAULT;
 use crate::agent::auth_method::{
-    DEEPSEEK_API_KEY_ENV_VAR, DS_API_KEY_ENV_VAR, LEGACY_DEEPSEEK_API_KEY_ENV_VAR, has_ds_api_key_env,
+    DEEPSEEK_API_KEY_ENV_VAR, DS_API_KEY_ENV_VAR, LEGACY_DEEPSEEK_API_KEY_ENV_VAR,
+    has_ds_api_key_env,
 };
+use crate::agent::config::DEEPSEEK_API_BASE_URL_DEFAULT;
 use crate::util::ds_home::ds_home;
 
 /// Default model IDs that receive a pasted API key when missing from config.
@@ -189,7 +190,10 @@ pub fn read_api_key_input(input: ApiKeyInput) -> anyhow::Result<String> {
 }
 
 fn normalize_api_key(raw: &str) -> anyhow::Result<String> {
-    let key = raw.trim().trim_matches(|c| c == '"' || c == '\'').to_owned();
+    let key = raw
+        .trim()
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_owned();
     if key.is_empty() {
         anyhow::bail!("empty API key provided");
     }
@@ -197,7 +201,9 @@ fn normalize_api_key(raw: &str) -> anyhow::Result<String> {
         anyhow::bail!("API key must be a single line");
     }
     if is_placeholder_api_key(&key) {
-        anyhow::bail!("API key still looks like a placeholder — paste the real key from {KEY_PLATFORM_URL}");
+        anyhow::bail!(
+            "API key still looks like a placeholder — paste the real key from {KEY_PLATFORM_URL}"
+        );
     }
     Ok(key)
 }
@@ -292,6 +298,10 @@ pub fn ensure_api_key_interactive() -> anyhow::Result<EnsureApiKeyOutcome> {
     if detect_key_origin().1.is_some() {
         return Ok(EnsureApiKeyOutcome::AlreadyConfigured);
     }
+    // A loopback default (local MLX / Ollama / llama.cpp) does not need DeepSeek.
+    if default_model_is_loopback() {
+        return Ok(EnsureApiKeyOutcome::AlreadyConfigured);
+    }
 
     let pin_api_key = preferred_method_is_api_key();
     if !pin_api_key && has_session_credential() {
@@ -310,10 +320,7 @@ pub fn ensure_api_key_interactive() -> anyhow::Result<EnsureApiKeyOutcome> {
 
     let key = read_api_key_input(ApiKeyInput::Prompt)?;
     let path = save_api_key(&key)?;
-    eprintln!(
-        "Saved API key to {} (and auth.json).",
-        path.display()
-    );
+    eprintln!("Saved API key to {} (and auth.json).", path.display());
     Ok(EnsureApiKeyOutcome::Saved)
 }
 
@@ -383,10 +390,7 @@ pub fn run_auth_status(json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     if status.origin.is_set() {
-        println!(
-            "deepseek: set (source: {})",
-            status.origin.as_str()
-        );
+        println!("deepseek: set (source: {})", status.origin.as_str());
         if let Some(r) = &status.redacted {
             println!("key: {r}");
         }
@@ -395,7 +399,10 @@ pub fn run_auth_status(json: bool) -> anyhow::Result<()> {
         println!("deepseek: not set");
         println!("Get a key: {KEY_PLATFORM_URL}");
         println!("Save it with: ds auth set");
-        println!("Or set DEEPSEEK_API_KEY / add api_key under [model.*] in {}", status.config_path.display());
+        println!(
+            "Or set DEEPSEEK_API_KEY / add api_key under [model.*] in {}",
+            status.config_path.display()
+        );
     }
     Ok(())
 }
@@ -449,9 +456,9 @@ fn write_api_key_to_config(path: &Path, key: &str) -> anyhow::Result<()> {
     let model_item = doc
         .entry("model")
         .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let model_table = model_item.as_table_mut().ok_or_else(|| {
-        anyhow::anyhow!("[model] in config.toml is not a table")
-    })?;
+    let model_table = model_item
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[model] in config.toml is not a table"))?;
 
     // Collect existing model ids + defaults.
     let mut ids: Vec<String> = model_table
@@ -468,9 +475,18 @@ fn write_api_key_to_config(path: &Path, key: &str) -> anyhow::Result<()> {
         let entry = model_table
             .entry(&id)
             .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-        let table = entry.as_table_mut().ok_or_else(|| {
-            anyhow::anyhow!("[model.{id}] in config.toml is not a table")
-        })?;
+        let table = entry
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("[model.{id}] in config.toml is not a table"))?;
+        // Local OpenAI-compatible servers keep their own dummy key / URL.
+        // A DeepSeek `ds auth set` must not retarget them at api.deepseek.com.
+        if table
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .is_some_and(crate::util::is_loopback_url)
+        {
+            continue;
+        }
         table["api_key"] = toml_edit::value(key);
         if table.get("base_url").and_then(|v| v.as_str()).is_none() {
             table["base_url"] = toml_edit::value(DEEPSEEK_API_BASE_URL_DEFAULT);
@@ -478,7 +494,11 @@ fn write_api_key_to_config(path: &Path, key: &str) -> anyhow::Result<()> {
         if table.get("api_backend").and_then(|v| v.as_str()).is_none() {
             table["api_backend"] = toml_edit::value("chat_completions");
         }
-        if table.get("context_window").and_then(|v| v.as_integer()).is_none() {
+        if table
+            .get("context_window")
+            .and_then(|v| v.as_integer())
+            .is_none()
+        {
             table["context_window"] = toml_edit::value(1_000_000i64);
         }
     }
@@ -497,9 +517,9 @@ fn clear_api_key_from_config(path: &Path) -> anyhow::Result<()> {
     if existing.trim().is_empty() {
         return Ok(());
     }
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|e| {
-        anyhow::anyhow!("config.toml is not valid TOML ({}); cannot clear key", e)
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| anyhow::anyhow!("config.toml is not valid TOML ({}); cannot clear key", e))?;
 
     // Remove top-level api_key.
     let _ = doc.as_table_mut().remove("api_key");
@@ -512,6 +532,13 @@ fn clear_api_key_from_config(path: &Path) -> anyhow::Result<()> {
             .collect();
         for k in keys {
             if let Some(entry) = model.get_mut(k.as_str()).and_then(|t| t.as_table_mut()) {
+                if entry
+                    .get("base_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(crate::util::is_loopback_url)
+                {
+                    continue;
+                }
                 let _ = entry.remove("api_key");
             }
         }
@@ -524,6 +551,13 @@ fn clear_api_key_from_config(path: &Path) -> anyhow::Result<()> {
             .collect();
         for k in keys {
             if let Some(entry) = models.get_mut(k.as_str()).and_then(|t| t.as_table_mut()) {
+                if entry
+                    .get("base_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(crate::util::is_loopback_url)
+                {
+                    continue;
+                }
                 let _ = entry.remove("api_key");
             }
         }
@@ -543,7 +577,10 @@ fn read_top_level_api_key_from_config() -> Option<String> {
     let path = user_config_path();
     let text = std::fs::read_to_string(&path).ok()?;
     let value = parse_config_toml(&text)?;
-    let key = value.get("api_key").and_then(|v| v.as_str()).map(str::trim)?;
+    let key = value
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)?;
     if is_placeholder_api_key(key) {
         return None;
     }
@@ -588,6 +625,31 @@ fn first_model_api_key_value(root: &toml::Value) -> Option<String> {
         }
     }
     None
+}
+
+fn default_model_is_loopback() -> bool {
+    let path = user_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(value) = parse_config_toml(&text) else {
+        return false;
+    };
+    let Some(default_id) = value
+        .get("models")
+        .and_then(|v| v.get("default"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return false;
+    };
+    value
+        .get("model")
+        .and_then(|v| v.get(default_id))
+        .and_then(|v| v.get("base_url"))
+        .and_then(|v| v.as_str())
+        .is_some_and(crate::util::is_loopback_url)
 }
 
 /// Used by [`crate::agent::auth_method::read_ds_api_key_env`] for top-level + auth.json.
@@ -670,6 +732,46 @@ mod tests {
     }
 
     #[test]
+    fn write_and_clear_skip_loopback_models() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[model.qwen3-8-27b-4bit]\n\
+             base_url = \"http://127.0.0.1:8080/v1\"\n\
+             api_key = \"local\"\n",
+        )
+        .unwrap();
+
+        write_api_key_to_config(&path, "sk-test-key-123456").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let value = parse_config_toml(&body).expect("written config must parse");
+        let local = value
+            .get("model")
+            .and_then(|m| m.get("qwen3-8-27b-4bit"))
+            .expect("local model kept");
+        assert_eq!(local.get("api_key").and_then(|v| v.as_str()), Some("local"));
+        assert_eq!(
+            local.get("base_url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:8080/v1")
+        );
+        assert_eq!(
+            value
+                .get("model")
+                .and_then(|m| m.get("deepseek-v4-pro"))
+                .and_then(|m| m.get("api_key"))
+                .and_then(|v| v.as_str()),
+            Some("sk-test-key-123456")
+        );
+
+        clear_api_key_from_config(&path).unwrap();
+        let body2 = std::fs::read_to_string(&path).unwrap();
+        assert!(body2.contains("api_key = \"local\""));
+        assert!(body2.contains("http://127.0.0.1:8080/v1"));
+        assert!(!body2.contains("sk-test-key-123456"));
+    }
+
+    #[test]
     fn parse_config_toml_reads_real_document_shape() {
         let s = r#"# comment with PASTE YOUR KEY HERE
 api_key = "sk-toplevel-key"
@@ -677,7 +779,10 @@ api_key = "sk-toplevel-key"
 api_key = "sk-model-key"
 "#;
         let v = parse_config_toml(s).expect("document parses");
-        assert_eq!(v.get("api_key").and_then(|x| x.as_str()), Some("sk-toplevel-key"));
+        assert_eq!(
+            v.get("api_key").and_then(|x| x.as_str()),
+            Some("sk-toplevel-key")
+        );
         assert_eq!(
             first_model_api_key_value(&v).as_deref(),
             Some("sk-model-key")
@@ -709,10 +814,7 @@ api_key = "sk-model-key"
             "#,
         )
         .unwrap();
-        assert_eq!(
-            first_model_api_key_value(&v).as_deref(),
-            Some("sk-model")
-        );
+        assert_eq!(first_model_api_key_value(&v).as_deref(), Some("sk-model"));
         assert_eq!(
             v.get("api_key").and_then(|x| x.as_str()),
             Some("sk-toplevel")

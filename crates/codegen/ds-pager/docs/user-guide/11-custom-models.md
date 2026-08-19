@@ -240,6 +240,24 @@ name = "Local Llama"
 temperature = 0.8
 ```
 
+### Local Qwen on this Mac (MLX)
+
+DS can drive a local `mlx-vlm` server. On this machine the intended model is
+`orcarouter/Qwen3.8-27B-Uncensored-MLX` at 4 / 6 / 8-bit (2-bit is omitted).
+
+```bash
+ds local setup
+ds local download --bits 4
+ds local serve --bits 4
+ds --model qwen3-8-27b-4bit
+```
+
+See [`LOCAL.md`](../../../../../LOCAL.md) at the repo root for paths, RAM
+notes, and the Hugging Face gated-repo token.
+
+`ds auth set` / `ds auth clear` leave loopback `[model.*]` blocks alone, and a
+loopback default does not require a DeepSeek API key.
+
 ---
 
 ## Custom Models Endpoint

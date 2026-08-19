@@ -18,6 +18,7 @@ pub mod hyperlink_route;
 pub mod inline_media_ffmpeg;
 pub mod input;
 pub mod input_log;
+pub mod local_cmd;
 pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;

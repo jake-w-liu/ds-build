@@ -1,6 +1,6 @@
 pub mod changelog;
-pub mod event_id;
 pub mod ds_home;
+pub mod event_id;
 pub mod secure_file;
 pub mod tips;
 pub mod uname;
@@ -75,6 +75,23 @@ pub fn is_first_party_ds_url(url: &str) -> bool {
         .and_then(|u| u.host_str().map(|h| h.to_owned()))
         .is_some_and(|host| host == "deepseek.com" || host.ends_with(".deepseek.com"))
 }
+
+/// True for loopback OpenAI-compatible endpoints (`127.0.0.1`, `localhost`, `::1`).
+///
+/// Local MLX / llama.cpp / Ollama servers do not need a DeepSeek API key.
+/// Invalid URLs are not treated as local.
+pub fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+        Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 /// Truncate a string to at most `max_chars` characters.
 /// Slices at char boundaries so multi-byte UTF-8 never panics.
 pub fn truncate(s: &str, max_chars: usize) -> &str {
@@ -244,11 +261,26 @@ mod tests {
         assert!(!is_first_party_ds_url(
             "https://generativelanguage.googleapis.com"
         ));
-        assert!(!is_first_party_ds_url("https://api.deepseek.com.evil.example/v1"));
-        assert!(!is_first_party_ds_url("https://evil-deepseek.com.attacker.com/v1"));
+        assert!(!is_first_party_ds_url(
+            "https://api.deepseek.com.evil.example/v1"
+        ));
+        assert!(!is_first_party_ds_url(
+            "https://evil-deepseek.com.attacker.com/v1"
+        ));
         assert!(!is_first_party_ds_url("https://prefixds.cli/v1"));
         assert!(!is_first_party_ds_url("not-a-url"));
         assert!(!is_first_party_ds_url(""));
+    }
+    #[test]
+    fn test_is_loopback_url() {
+        assert!(is_loopback_url("http://127.0.0.1:8080/v1"));
+        assert!(is_loopback_url("http://localhost:11434/v1"));
+        assert!(is_loopback_url("http://LOCALHOST/v1"));
+        assert!(is_loopback_url("http://[::1]:8080/v1"));
+        assert!(!is_loopback_url("https://api.deepseek.com/v1"));
+        assert!(!is_loopback_url("http://192.168.1.10:8080/v1"));
+        assert!(!is_loopback_url("not-a-url"));
+        assert!(!is_loopback_url(""));
     }
     #[test]
     fn test_truncate() {

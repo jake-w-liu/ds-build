@@ -1708,6 +1708,10 @@ async fn async_main() -> Result<()> {
             Command::Memory(memory_args) => {
                 return ds_pager::memory_cmd::run(memory_args);
             }
+            Command::Local(local_args) => {
+                init_tracing_simple("cli");
+                return ds_pager::local_cmd::run(local_args);
+            }
             Command::Update {
                 check,
                 json,

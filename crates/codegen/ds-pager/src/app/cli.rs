@@ -14,6 +14,8 @@ pub enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Serve and register a local OpenAI-compatible MLX model (Qwen)
+    Local(crate::local_cmd::LocalArgs),
     /// Show the configuration DS discovers for this directory
     Inspect {
         /// Emit machine-readable JSON output.
