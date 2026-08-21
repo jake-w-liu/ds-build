@@ -1,6 +1,6 @@
 [package]
 name = "ds-markdown-fuzz"
-version = "0.1.107"
+version = "0.1.108"
 publish = false
 edition = "2021"
 
