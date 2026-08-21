@@ -2465,6 +2465,30 @@ reasoning_effort = "low"
         assert_eq!(model.info.base_url, "https://inference.example.com/v1");
     }
     #[test]
+    fn baked_in_deepseek_defaults_are_responses_with_backend_search() {
+        // Regression: f0117899 moved the DeepSeek default to the Responses
+        // API (native reasoning items, tool calls, hosted web_search), but
+        // `default_models.json` was left on chat_completions without
+        // `supports_backend_search`. Env-only setups (no `[model.*]` config)
+        // then silently lost hosted web search and used a different protocol
+        // than the shipped example config.
+        let (_, models) = resolve_models_from_toml("", None);
+        for key in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            let model = models
+                .get(key)
+                .unwrap_or_else(|| panic!("{key} must be in the baked-in catalog"));
+            assert_eq!(
+                model.info.api_backend,
+                ApiBackend::Responses,
+                "{key} must default to the Responses API"
+            );
+            assert!(
+                model.info.supports_backend_search,
+                "{key} must default to supports_backend_search = true (hosted web search)"
+            );
+        }
+    }
+    #[test]
     fn e2e_default_model_with_session_routes_to_proxy() {
         let (_, models) = resolve_models_from_toml("", None);
         let model = models
