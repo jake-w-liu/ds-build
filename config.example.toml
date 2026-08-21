@@ -18,7 +18,9 @@
 #
 # ALTERNATIVE TO api_key IN THIS FILE
 #   export DEEPSEEK_API_KEY="sk-..."
-#   (env wins over this file if both are set)
+#   (a [model.*] api_key in this file still wins over the env var — per-model
+#    keys are the most specific; env is the fallback. Local-model entries
+#    rely on this: api_key = "local" must beat DEEPSEEK_API_KEY.)
 #
 # Full guide: DEEPSEEK.md
 # =============================================================================

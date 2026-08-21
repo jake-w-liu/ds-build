@@ -78,7 +78,7 @@ rebuild dual install). Never blind-merge `xai-org/grok-build`.
 | Version | lockstepped from `crates/codegen/ds-version/Cargo.toml` |
 | Default model | `deepseek-v4-pro` |
 | Fast model | `deepseek-v4-flash` |
-| API | `https://api.deepseek.com/v1` (OpenAI-compatible `chat_completions`) |
+| API | `https://api.deepseek.com/v1` (OpenAI-compatible; DeepSeek models default to the Responses API, `chat_completions` selectable) |
 | Login | `ds auth set` / first-run paste / `DEEPSEEK_API_KEY` |
 | Permissions | **always-approve** by default |
 | Subagents | **enabled** by default |

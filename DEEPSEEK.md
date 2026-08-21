@@ -15,7 +15,7 @@ This is the **canonical setup guide** for this fork. Follow the steps in order.
 | Get API key | https://platform.deepseek.com/api_keys |
 | API base URL | `https://api.deepseek.com/v1` |
 | Models | `deepseek-v4-pro` (default), `deepseek-v4-flash` (fast) |
-| API style | OpenAI-compatible **chat completions** |
+| API style | OpenAI-compatible; DS uses the **Responses API** (`/v1/responses`) for DeepSeek models by default (native reasoning items, tool calls, and server-side `web_search`). `chat_completions` remains selectable via `api_backend`. |
 | Docs | https://api-docs.deepseek.com/ |
 
 Keys look like: `sk-...` (not `ds-...`).
@@ -88,13 +88,15 @@ ds_api_base_url = "https://api.deepseek.com/v1"
 [model.deepseek-v4-pro]
 api_key = "sk-YOUR_KEY_HERE"
 base_url = "https://api.deepseek.com/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
+supports_backend_search = true
 context_window = 1000000
 
 [model.deepseek-v4-flash]
 api_key = "sk-YOUR_KEY_HERE"
 base_url = "https://api.deepseek.com/v1"
-api_backend = "chat_completions"
+api_backend = "responses"
+supports_backend_search = true
 context_window = 1000000
 ```
 
@@ -138,13 +140,19 @@ Prefer the config file if you do not want the key in shell history.
 
 ### How `ds` resolves the key (priority order)
 
-1. `DEEPSEEK_API_KEY`  
-2. `DS_API_KEY`  
-3. `DS_CODE_API_KEY`  
-4. Top-level `api_key` in `~/.ds/config.toml` (from `ds auth set`)  
-5. First non-empty `api_key` under **`[model.*]`** in `~/.ds/config.toml`  
-   (then project `.ds/config.toml` if present)  
-6. `ds::api_key` scope in `~/.ds/auth.json`
+Per-model credentials in `~/.ds/config.toml` win — they are the most
+specific. Order for a model's requests:
+
+1. `api_key` under **`[model.*]`** in `~/.ds/config.toml` (then project `.ds/config.toml` if present)
+2. `env_key` listed for that model (first set, non-empty value)
+3. `DEEPSEEK_API_KEY` → `DS_API_KEY` → `DS_CODE_API_KEY` (environment)
+4. Top-level `api_key` in `~/.ds/config.toml` (from `ds auth set`)
+5. `ds::api_key` scope in `~/.ds/auth.json`
+
+This is why the local-model examples use `api_key = "local"`: a per-model
+key must beat any `DEEPSEEK_API_KEY` in the environment, or local endpoints
+would receive the DeepSeek key. `ds auth status` shows the *diagnostic*
+origin (env vars first) — that is a status display, not the sampling path.
 
 ---
 
